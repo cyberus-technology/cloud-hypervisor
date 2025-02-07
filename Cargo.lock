@@ -1162,8 +1162,7 @@ dependencies = [
 [[package]]
 name = "kvm-ioctls"
 version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9002dff009755414f22b962ec6ae6980b07d6d8b06e5297b1062019d72bd6a8c"
+source = "git+https://github.com/cyberus-technology/rust-vmm-kvm?branch=cyberus-chv-fix-ub-ioctl-stable-v37.x#40f73dbdb1eef5d256e1e19a0d255d6725bb34e4"
 dependencies = [
  "bitflags 2.4.1",
  "kvm-bindings",
