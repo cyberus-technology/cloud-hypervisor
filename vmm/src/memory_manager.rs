@@ -669,7 +669,11 @@ impl MemoryManager {
             for zone_config in zones_config {
                 if guest_ram_mapping.zone_id == zone_config.id {
                     let region = MemoryManager::create_ram_region(
-                        &zone_config.file,
+                        if guest_ram_mapping.virtio_mem {
+                            &None
+                        } else {
+                            &zone_config.file
+                        },
                         guest_ram_mapping.file_offset,
                         GuestAddress(guest_ram_mapping.gpa),
                         guest_ram_mapping.size as usize,
@@ -1575,7 +1579,11 @@ impl MemoryManager {
 
         let start_addr = MemoryManager::start_addr(self.guest_memory.memory().last_addr(), true)?;
 
-        if start_addr.checked_add(size.try_into().unwrap()).unwrap() >= self.end_of_ram_area {
+        if start_addr
+            .checked_add((size - 1).try_into().unwrap())
+            .unwrap()
+            > self.end_of_ram_area
+        {
             return Err(Error::InsufficientHotplugRam);
         }
 

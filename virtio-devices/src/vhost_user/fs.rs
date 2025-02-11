@@ -271,17 +271,18 @@ impl VhostUserFrontendReqHandler for BackendReqHandler {
     }
 }
 
+pub const VIRTIO_FS_TAG_LEN: usize = 36;
 #[derive(Copy, Clone, Versionize)]
 #[repr(C, packed)]
 pub struct VirtioFsConfig {
-    pub tag: [u8; 36],
+    pub tag: [u8; VIRTIO_FS_TAG_LEN],
     pub num_request_queues: u32,
 }
 
 impl Default for VirtioFsConfig {
     fn default() -> Self {
         VirtioFsConfig {
-            tag: [0; 36],
+            tag: [0; VIRTIO_FS_TAG_LEN],
             num_request_queues: 0,
         }
     }
@@ -397,8 +398,13 @@ impl Fs {
 
             // Create virtio-fs device configuration.
             let mut config = VirtioFsConfig::default();
-            let tag_bytes_vec = tag.to_string().into_bytes();
-            config.tag[..tag_bytes_vec.len()].copy_from_slice(tag_bytes_vec.as_slice());
+            let tag_bytes_slice = tag.as_bytes();
+            let len = if tag_bytes_slice.len() < config.tag.len() {
+                tag_bytes_slice.len()
+            } else {
+                config.tag.len()
+            };
+            config.tag[..len].copy_from_slice(tag_bytes_slice[..len].as_ref());
             config.num_request_queues = req_num_queues as u32;
 
             (
