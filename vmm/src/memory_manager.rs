@@ -25,9 +25,7 @@ use devices::ioapic;
 #[cfg(target_arch = "aarch64")]
 use hypervisor::HypervisorVmError;
 use libc::_SC_NPROCESSORS_ONLN;
-#[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
-use log::debug;
-use log::{error, info, warn};
+use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracer::trace_scoped;
@@ -2648,8 +2646,8 @@ impl Migratable for MemoryManager {
             let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
             {
                 Some(region) => {
-                    assert!(region.start_addr().raw_value() == r.gpa);
-                    assert!(region.len() == r.size);
+                    assert_eq!(region.start_addr().raw_value(), r.gpa);
+                    assert_eq!(region.len(), r.size);
                     (**region).bitmap().get_and_reset()
                 }
                 None => {
@@ -2668,11 +2666,11 @@ impl Migratable for MemoryManager {
             let sub_table = MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, r.gpa, 4096);
 
             if sub_table.regions().is_empty() {
-                info!("Dirty Memory Range Table is empty");
+                debug!("Dirty Memory Range Table is empty");
             } else {
-                info!("Dirty Memory Range Table:");
+                debug!("Dirty Memory Range Table:");
                 for range in sub_table.regions() {
-                    info!("GPA: {:x} size: {} (KiB)", range.gpa, range.length / 1024);
+                    trace!("GPA: {:x} size: {} (KiB)", range.gpa, range.length / 1024);
                 }
             }
 
