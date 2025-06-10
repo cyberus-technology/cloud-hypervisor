@@ -112,6 +112,7 @@ use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, url_to_path};
     target_arch = "x86_64"
 ))]
 use crate::sev::MeasuredBootInfo;
+use crate::vcpu_throttling::ThrottleThreadHandle;
 #[cfg(feature = "fw_cfg")]
 use crate::vm_config::FwCfgConfig;
 use crate::vm_config::{
@@ -540,6 +541,7 @@ pub struct Vm {
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    vcpu_throttler: ThrottleThreadHandle,
 }
 
 impl Vm {
@@ -699,6 +701,10 @@ impl Vm {
             VmState::Created
         };
 
+        // TODO we could also spawn the thread when a migration with auto-converge starts.
+        // Probably this is the better design.
+        let vcpu_throttler = ThrottleThreadHandle::new_from_cpu_manager(&cpu_manager);
+
         Ok(Vm {
             #[cfg(feature = "tdx")]
             kernel,
@@ -718,6 +724,7 @@ impl Vm {
             hypervisor,
             stop_on_boot,
             load_payload_handle,
+            vcpu_throttler,
         })
     }
 
@@ -1332,6 +1339,31 @@ impl Vm {
         }
 
         Ok(numa_nodes)
+    }
+
+    /// Set's the throttle percentage to a value in range `0..=99`.
+    ///
+    /// Setting the value back to `0` brings the thread back into a waiting
+    /// state.
+    ///
+    /// # Panic
+    /// Panics, if `percent_new` is not in range `0..=99`.
+    pub fn set_throttle_percent(&self, percent: u8 /* 1..=99 */) {
+        self.vcpu_throttler.set_throttle_percent(percent);
+    }
+
+    /// Get the current throttle percentage in range `0..=99`.
+    ///
+    /// Please note that the value is not synchronized.
+    pub fn throttle_percent(&self) -> u8 {
+        self.vcpu_throttler.throttle_percent()
+    }
+
+    /// Stops and terminates the thread gracefully.
+    ///
+    /// Waits for the thread to finish.
+    pub fn stop_vcpu_throttling(&mut self) {
+        self.vcpu_throttler.shutdown();
     }
 
     #[allow(clippy::too_many_arguments)]
