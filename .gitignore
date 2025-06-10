@@ -7,3 +7,7 @@
 /rpm/SOURCES
 /.vscode
 /vendor
+
+# Nix
+.direnv
+/result*

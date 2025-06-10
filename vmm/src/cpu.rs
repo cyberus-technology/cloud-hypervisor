@@ -2299,7 +2299,7 @@ impl Pausable for CpuManager {
 
         // The vCPU thread will change its paused state before parking, wait here for each
         // activated vCPU change their state to ensure they have parked.
-        for state in self.vcpu_states.iter() {
+        for (index, state) in self.vcpu_states.iter().enumerate() {
             if state.active() {
                 while !state.paused.load(Ordering::SeqCst) {
                     // To avoid a priority inversion with the vCPU thread

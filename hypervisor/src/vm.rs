@@ -440,6 +440,9 @@ pub trait Vm: Send + Sync + Any {
     fn gain_page_access(&self, _gpa: u64, _size: u32) -> Result<()> {
         Ok(())
     }
+    
+    fn set_throttle_percentage(&self, percent: u8 /* 0..100 */);
+    fn get_throttle_percentage(&self) -> u8 /* 0..100 */ ;
 }
 
 pub trait VmOps: Send + Sync {

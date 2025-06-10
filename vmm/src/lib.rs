@@ -8,6 +8,11 @@ extern crate event_monitor;
 #[macro_use]
 extern crate log;
 
+const AUTO_CONVERGE_STEP_SIZE: u8 = 10;
+// after how many iterations we want to increase vCPU throttling
+const AUTO_CONVERGE_ITERATION_INCREASE: u8 = 2;
+const AUTO_CONVERGE_MAX: u8 = 99;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{stdout, Read, Write};
@@ -1145,6 +1150,13 @@ impl Vmm {
         let mut iteration_table;
 
         loop {
+            if s.iteration > 0 && s.iteration % AUTO_CONVERGE_ITERATION_INCREASE as u64 == 0 {
+                let current_throttle = vm.get_throttle_percentage();
+                let new_throttle = current_throttle + AUTO_CONVERGE_STEP_SIZE;
+                let new_throttle = std::cmp::min(new_throttle, AUTO_CONVERGE_MAX);
+                vm.set_throttle_percentage(new_throttle);
+            }
+
             // Update the start time of the iteration
             s.iteration_start_time = Instant::now();
 
@@ -1205,6 +1217,12 @@ impl Vmm {
                 s.pages_per_second =
                     s.current_dirty_pages * 1000 / s.iteration_cost_time.as_millis() as u64;
             }
+            log::info!(
+                "iteration {}: cost={}ms, throttle={}:",
+                s.iteration,
+                s.iteration_cost_time.as_millis(),
+                vm.get_throttle_percentage()
+            );
         }
 
         Ok(iteration_table)
@@ -1259,6 +1277,9 @@ impl Vmm {
 
         info!("Entering downtime phase");
         s.downtime_start = Instant::now();
+        // End throttle thread
+        // not needed anymore: vm.set_throttle_percentage(0);
+        vm.stop_throttle_thread();
         vm.pause()?;
 
         // Send last batch of dirty pages

@@ -11,19 +11,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
-#[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
-use std::mem::size_of;
-use std::num::Wrapping;
-use std::ops::Deref;
-use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex, RwLock};
-#[cfg(not(target_arch = "riscv64"))]
-use std::time::Instant;
-use std::{cmp, result, str, thread};
-
 use anyhow::anyhow;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
@@ -55,6 +42,21 @@ use linux_loader::loader::pe::Error::InvalidImageMagicNumber;
 use linux_loader::loader::KernelLoader;
 use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Seek, SeekFrom, Write};
+#[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
+use std::mem::size_of;
+use std::num::Wrapping;
+use std::ops::Deref;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::sleep;
+use std::time::Duration;
+#[cfg(not(target_arch = "riscv64"))]
+use std::time::Instant;
+use std::{cmp, result, str, thread};
 use thiserror::Error;
 use tracer::trace_scoped;
 use vm_device::Bus;
@@ -482,6 +484,8 @@ pub struct Vm {
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    vcpu_throttler_handle: Mutex<Option<thread::JoinHandle<()>>>,
+    terminate_vcpu_throttler_thread: Arc<AtomicBool>,
 }
 
 impl Vm {
@@ -563,6 +567,57 @@ impl Vm {
             sev_snp_enabled,
         )
         .map_err(Error::CpuManager)?;
+
+        let terminate_vcpu_throttler_thread = Arc::new(AtomicBool::new(false));
+
+        // TODO create lazily?
+        let vcpu_throttler_handle = {
+            let vm = vm.clone();
+            let cpu_manager = cpu_manager.clone();
+            let terminate_vcpu_throttler_thread = terminate_vcpu_throttler_thread.clone();
+            std::thread::Builder::new()
+                .name("vcpu-throttle-timer".to_string())
+                .spawn(move || {
+                    const TIMESLICE_MIN_MS: u64 = 100;
+                    const TIMESLICE_MAX_MS: u64 = 500;
+                    let timeslice_ms =
+                        cmp::min(300 /* configured downtime */, TIMESLICE_MAX_MS);
+                    let timeslice_ms = cmp::max(timeslice_ms, TIMESLICE_MIN_MS);
+
+                    loop {
+                        let exit_loop = terminate_vcpu_throttler_thread
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        if exit_loop {
+                            break;
+                        }
+
+                        let throttle_percentage = vm.get_throttle_percentage() as u64;
+                        if throttle_percentage == 0 {
+                            sleep(Duration::from_secs(1));
+                            continue;
+                        }
+
+                        let wait_ms_vcpus = timeslice_ms * throttle_percentage / 100;
+                        let wait_ms_thread = timeslice_ms - wait_ms_vcpus;
+
+                        let mut cpu_manager = cpu_manager.lock().unwrap();
+                        log::info!("stopping all vCPUs for {wait_ms_vcpus}ms");
+                        cpu_manager.pause().unwrap();
+                        log::info!("stopping all vCPUs");
+                        sleep(Duration::from_millis(wait_ms_vcpus));
+
+                        log::info!("resuming all vCPUs");
+                        cpu_manager.resume().unwrap();
+                        log::info!("resumed all vCPUs");
+
+                        log::info!("stopping vcpu-throttle-timer thread for {wait_ms_thread}ms");
+                        sleep(Duration::from_millis(wait_ms_thread));
+                    }
+                    // TODO graceful shutdown
+                    log::info!("Stopped vcpu-throttle-timer thread");
+                })
+                .unwrap()
+        };
 
         #[cfg(target_arch = "x86_64")]
         cpu_manager
@@ -770,6 +825,8 @@ impl Vm {
             hypervisor,
             stop_on_boot,
             load_payload_handle,
+            vcpu_throttler_handle: Mutex::new(Some(vcpu_throttler_handle)),
+            terminate_vcpu_throttler_thread,
         })
     }
 
@@ -855,6 +912,23 @@ impl Vm {
         }
 
         Ok(numa_nodes)
+    }
+
+    pub fn set_throttle_percentage(&self, percent: u8 /* 0..100 */) {
+        self.vm.set_throttle_percentage(percent);
+    }
+
+    pub fn get_throttle_percentage(&self) -> u8 /* 0..100 */ {
+        self.vm.get_throttle_percentage()
+    }
+
+    pub fn stop_throttle_thread(&self) {
+        self.terminate_vcpu_throttler_thread
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut lock = self.vcpu_throttler_handle.lock().unwrap();
+        let handle = lock.take().unwrap();
+        handle.join().unwrap();
     }
 
     #[allow(clippy::too_many_arguments)]

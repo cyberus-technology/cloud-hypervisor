@@ -17,6 +17,11 @@ use crate::vm_config::VmConfig;
 pub const SNAPSHOT_STATE_FILE: &str = "state.json";
 pub const SNAPSHOT_CONFIG_FILE: &str = "config.json";
 
+const AUTO_CONVERGE_STEP_SIZE: u8 = 10;
+// after how many iterations we want to increase vCPU throttling
+const AUTO_CONVERGE_ITERATION_INCREASE: u8 = 2;
+const AUTO_CONVERGE_MAX: u8 = 99;
+
 pub fn url_to_path(url: &str) -> std::result::Result<PathBuf, MigratableError> {
     let path: PathBuf = url
         .strip_prefix("file://")

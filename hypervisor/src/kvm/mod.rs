@@ -76,9 +76,6 @@ pub mod aarch64;
 // riscv64 dependencies
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
-#[cfg(target_arch = "aarch64")]
-use std::mem;
-
 ///
 /// Export generically-named wrappers of kvm-bindings for Unix-based platforms
 ///
@@ -103,6 +100,9 @@ use kvm_bindings::{kvm_riscv_core, user_regs_struct, KVM_REG_RISCV_CORE};
 #[cfg(feature = "tdx")]
 use kvm_bindings::{kvm_run__bindgen_ty_1, KVMIO};
 pub use kvm_ioctls::{Cap, Kvm, VcpuExit};
+#[cfg(target_arch = "aarch64")]
+use std::mem;
+use std::sync::atomic::AtomicU8;
 use thiserror::Error;
 use vfio_ioctls::VfioDeviceFd;
 #[cfg(feature = "tdx")]
@@ -474,6 +474,7 @@ pub struct KvmVm {
     #[cfg(target_arch = "x86_64")]
     msrs: Vec<MsrEntry>,
     dirty_log_slots: Arc<RwLock<HashMap<u32, KvmDirtyLogSlot>>>,
+    throttle_percentage: AtomicU8,
 }
 
 impl KvmVm {
@@ -1022,6 +1023,15 @@ impl vm::Vm for KvmVm {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn set_throttle_percentage(&self, percent: u8) {
+        assert!(percent < 100);
+        self.throttle_percentage.store(percent, Ordering::SeqCst);
+    }
+
+    fn get_throttle_percentage(&self) -> u8 {
+        self.throttle_percentage.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(feature = "tdx")]
@@ -1202,6 +1212,7 @@ impl hypervisor::Hypervisor for KvmHypervisor {
                 fd: vm_fd,
                 msrs,
                 dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
+                throttle_percentage: AtomicU8::new(0),
             }))
         }
 
