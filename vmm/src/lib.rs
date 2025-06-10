@@ -3,6 +3,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+/// Amount of iterations before auto-converging starts.
+const AUTO_CONVERGE_ITERATION_DELAY: u64 = 2;
+/// Step size in percent to increase the vCPU throttling.
+const AUTO_CONVERGE_STEP_SIZE: u8 = 10;
+/// Amount of iterations after that we increase vCPU throttling.
+const AUTO_CONVERGE_ITERATION_INCREASE: u64 = 2;
+/// Maximum vCPU throttling value.
+const AUTO_CONVERGE_MAX: u8 = 99;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write, stdout};
@@ -88,6 +97,7 @@ mod pci_segment;
 pub mod seccomp_filters;
 mod serial_manager;
 mod sigwinch_listener;
+mod vcpu_throttling;
 pub mod vm;
 pub mod vm_config;
 
@@ -1296,6 +1306,15 @@ impl Vmm {
         Ok(true)
     }
 
+    fn can_increase_autoconverge_step(s: &MigrationState) -> bool {
+        if s.iteration < AUTO_CONVERGE_ITERATION_DELAY {
+            false
+        } else {
+            let iteration = s.iteration - AUTO_CONVERGE_ITERATION_DELAY;
+            iteration.is_multiple_of(AUTO_CONVERGE_ITERATION_INCREASE)
+        }
+    }
+
     fn memory_copy_iterations(
         vm: &mut Vm,
         socket: &mut SocketStream,
@@ -1307,6 +1326,18 @@ impl Vmm {
         let mut iteration_table;
 
         loop {
+            // todo: check if auto-converge is enabled at all?
+            if Self::can_increase_autoconverge_step(s) && vm.throttle_percent() < AUTO_CONVERGE_MAX
+            {
+                let current_throttle = vm.throttle_percent();
+                let new_throttle = current_throttle + AUTO_CONVERGE_STEP_SIZE;
+                let new_throttle = std::cmp::min(new_throttle, AUTO_CONVERGE_MAX);
+                log::info!("Increasing auto-converge: {new_throttle}%");
+                if new_throttle != current_throttle {
+                    vm.set_throttle_percent(new_throttle);
+                }
+            }
+
             // Update the start time of the iteration
             s.iteration_start_time = Instant::now();
 
@@ -1367,6 +1398,12 @@ impl Vmm {
                 s.pages_per_second =
                     s.current_dirty_pages * 1000 / s.iteration_cost_time.as_millis() as u64;
             }
+            debug!(
+                "iteration {}: cost={}ms, throttle={}%",
+                s.iteration,
+                s.iteration_cost_time.as_millis(),
+                vm.throttle_percent()
+            );
         }
 
         Ok(iteration_table)
@@ -1420,7 +1457,13 @@ impl Vmm {
 
         info!("Entering downtime phase");
         s.downtime_start = Instant::now();
+        // End throttle thread
+        info!("stopping vcpu thread");
+        vm.stop_vcpu_throttling();
+        info!("stopped vcpu thread");
+        info!("pausing VM");
         vm.pause()?;
+        info!("paused VM");
 
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
