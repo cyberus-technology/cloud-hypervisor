@@ -15,6 +15,7 @@ use api_client::{
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use option_parser::{ByteSized, ByteSizedParseError};
 use thiserror::Error;
+use vmm::api::VmReceiveMigrationData;
 use vmm::config::RestoreConfig;
 use vmm::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig, VdpaConfig,
@@ -889,11 +890,9 @@ fn coredump_config(destination_url: &str) -> String {
     serde_json::to_string(&coredump_config).unwrap()
 }
 
-fn receive_migration_data(url: &str) -> String {
-    let receive_migration_data = vmm::api::VmReceiveMigrationData {
-        receiver_url: url.to_owned(),
-    };
-
+fn receive_migration_data(config: &str) -> String {
+    // TODO error handling instead of unwrap()?
+    let receive_migration_data = vmm::api::VmReceiveMigrationData::parse(config).unwrap();
     serde_json::to_string(&receive_migration_data).unwrap()
 }
 
@@ -1116,7 +1115,7 @@ fn main() {
                 .arg(
                     Arg::new("receive_migration_config")
                         .index(1)
-                        .help("<receiver_url>"),
+                        .help(VmReceiveMigrationData::SYNTAX),
                 ),
         )
         .subcommand(

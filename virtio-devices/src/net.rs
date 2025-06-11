@@ -610,6 +610,8 @@ impl Net {
         let mut taps: Vec<Tap> = Vec::new();
         let num_queue_pairs = fds.len();
 
+        
+        log::error!("id={}, fds={:?}", id, fds);
         for fd in fds.iter() {
             // Duplicate so that it can survive reboots
             // SAFETY: FFI call to dup. Trivially safe.
@@ -617,6 +619,7 @@ impl Net {
             if fd < 0 {
                 return Err(Error::DuplicateTapFd(std::io::Error::last_os_error()));
             }
+            error!("tap fd={fd}");
             let tap = Tap::from_tap_fd(fd, num_queue_pairs).map_err(Error::TapError)?;
             taps.push(tap);
         }

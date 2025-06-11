@@ -213,7 +213,7 @@ unsafe fn clone_clear_sighand() -> io::Result<u64> {
     };
     args.flags |= CLONE_CLEAR_SIGHAND;
     let r = clone3(&mut args, size_of::<clone_args>());
-    if r != -1 {
+    if r != -1 { 
         return Ok(r.try_into().unwrap());
     }
     let e = io::Error::last_os_error();

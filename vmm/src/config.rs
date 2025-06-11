@@ -2220,42 +2220,28 @@ pub struct RestoredNetConfig {
     pub id: String,
     #[serde(default)]
     pub num_fds: usize,
-    #[serde(
-        default,
-        serialize_with = "serialize_restorednetconfig_fds",
-        deserialize_with = "deserialize_restorednetconfig_fds"
-    )]
+    #[serde(default)]
     pub fds: Option<Vec<i32>>,
 }
 
-fn serialize_restorednetconfig_fds<S>(
-    x: &Option<Vec<i32>>,
-    s: S,
-) -> std::result::Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    if let Some(x) = x {
-        warn!("'RestoredNetConfig' contains FDs that can't be serialized correctly. Serializing them as invalid FDs.");
-        let invalid_fds = vec![-1; x.len()];
-        s.serialize_some(&invalid_fds)
-    } else {
-        s.serialize_none()
-    }
-}
+impl RestoredNetConfig {
+    // Ensure all net devices from 'VmConfig' backed by FDs have a
+    // corresponding 'RestoreNetConfig' with a matched 'id' and expected
+    // number of FDs.
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        let found = vm_config
+            .net
+            .iter()
+            .flatten()
+            .any(|net| net.id.as_ref() == Some(&self.id));
 
-fn deserialize_restorednetconfig_fds<'de, D>(
-    d: D,
-) -> std::result::Result<Option<Vec<i32>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let invalid_fds: Option<Vec<i32>> = Option::deserialize(d)?;
-    if let Some(invalid_fds) = invalid_fds {
-        warn!("'RestoredNetConfig' contains FDs that can't be deserialized correctly. Deserializing them as invalid FDs.");
-        Ok(Some(vec![-1; invalid_fds.len()]))
-    } else {
-        Ok(None)
+        if !found {
+            Err(ValidationError::RestoreMissingRequiredNetId(
+                self.id.clone(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 

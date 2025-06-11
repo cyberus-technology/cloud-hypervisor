@@ -36,16 +36,10 @@ pub mod http;
 use std::io;
 use std::sync::mpsc::{channel, RecvError, SendError, Sender};
 
-use micro_http::Body;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use vm_migration::MigratableError;
-use vmm_sys_util::eventfd::EventFd;
-
 #[cfg(feature = "dbus_api")]
 pub use self::dbus::start_dbus_thread;
 pub use self::http::{start_http_fd_thread, start_http_path_thread};
-use crate::config::RestoreConfig;
+use crate::config::{RestoreConfig, RestoredNetConfig};
 use crate::device_tree::DeviceTree;
 use crate::vm::{Error as VmError, VmState};
 use crate::vm_config::{
@@ -53,6 +47,12 @@ use crate::vm_config::{
     VmConfig, VsockConfig,
 };
 use crate::Error as VmmError;
+use micro_http::Body;
+use option_parser::{OptionParser, Tuple};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use vm_migration::MigratableError;
+use vmm_sys_util::eventfd::EventFd;
 
 /// API errors are sent back from the VMM API server through the ApiResponse.
 #[derive(Error, Debug)]
@@ -249,6 +249,45 @@ pub struct VmCoredumpData {
 pub struct VmReceiveMigrationData {
     /// URL for the reception of migration state
     pub receiver_url: String,
+    /// Map with new network FDs on the new host.
+    pub net_fds: Option<Vec<RestoredNetConfig>>,
+}
+
+impl VmReceiveMigrationData {
+
+    pub const SYNTAX: &'static str = "Receive Migration parameters \
+    \"receiver_url=<url to listen on>,net_fds=[net1@[23,24],net2@[25,26]]\"";
+
+    pub fn parse(restore: &str) -> Result<Self, ()> {
+        let mut parser = OptionParser::new();
+        parser.add("receiver_url").add("net_fds");
+        // TODO error handling
+        parser.parse(restore).unwrap();
+
+        let receiver_url = parser
+            .get("receiver_url")
+            .map(String::from)
+            // TODO error handling
+            .unwrap();
+        let net_fds = parser
+            .convert::<Tuple<String, Vec<u64>>>("net_fds")
+            // TODO error handling
+            .unwrap()
+            .map(|v| {
+                v.0.iter()
+                    .map(|(id, fds)| RestoredNetConfig {
+                        id: id.clone(),
+                        num_fds: fds.len(),
+                        fds: Some(fds.iter().map(|e| *e as i32).collect()),
+                    })
+                    .collect()
+            });
+
+        Ok(Self {
+            receiver_url,
+            net_fds,
+        })
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]

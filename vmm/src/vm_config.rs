@@ -325,8 +325,6 @@ pub struct NetConfig {
     pub id: Option<String>,
     #[serde(
         default,
-        serialize_with = "serialize_netconfig_fds",
-        deserialize_with = "deserialize_netconfig_fds"
     )]
     pub fds: Option<Vec<i32>>,
     #[serde(default)]
