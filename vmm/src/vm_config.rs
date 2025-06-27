@@ -324,12 +324,6 @@ pub struct NetConfig {
     pub vhost_mode: VhostMode,
     #[serde(default)]
     pub id: Option<String>,
-    // Special deserialize handling:
-    // Therefore, we don't serialize FDs, and whatever value is here after
-    // deserialization is invalid.
-    //
-    // Valid FDs are transmitted via a different channel (SCM_RIGHTS message)
-    // and will be populated into this struct on the destination VMM eventually.
     #[serde(default, deserialize_with = "deserialize_netconfig_fds")]
     pub fds: Option<Vec<i32>>,
     #[serde(default)]
