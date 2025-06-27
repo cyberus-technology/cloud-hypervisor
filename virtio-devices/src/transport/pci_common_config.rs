@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use byteorder::{ByteOrder, LittleEndian};
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use serde::{Deserialize, Serialize};
 use virtio_queue::{Queue, QueueT};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
@@ -243,7 +243,7 @@ impl VirtioPciCommonConfig {
     }
 
     fn read_common_config_word(&self, offset: u64, queues: &[Queue]) -> u16 {
-        debug!("read_common_config_word: offset 0x{offset:x}");
+        trace!("read_common_config_word: offset 0x{offset:x}");
         match offset {
             0x10 => self.msix_config.load(Ordering::Acquire),
             0x12 => queues.len() as u16, // num_queues
