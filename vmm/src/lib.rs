@@ -28,7 +28,7 @@ use console_devices::{ConsoleInfo, pre_create_console_devices};
 use event_monitor::event;
 use landlock::LandlockError;
 use libc::{EFD_NONBLOCK, SIGINT, SIGTERM, TCSANOW, tcsetattr, termios};
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use memory_manager::MemoryManagerSnapshotData;
 use pci::PciBdf;
 use seccompiler::{SeccompAction, apply_filter};
@@ -936,7 +936,7 @@ impl Vmm {
         socket: &mut SocketStream,
         state: ReceiveMigrationState,
         req: &Request,
-        _receive_data_migration: &VmReceiveMigrationData,
+        receive_data_migration: &VmReceiveMigrationData,
     ) -> std::result::Result<ReceiveMigrationState, MigratableError> {
         use ReceiveMigrationState::*;
 
@@ -951,6 +951,27 @@ impl Vmm {
              memory_files: HashMap<u32, File>|
              -> std::result::Result<Arc<Mutex<MemoryManager>>, MigratableError> {
                 let memory_manager = self.vm_receive_config(req, socket, memory_files)?;
+
+                if let Some(ref restored_net_configs) = receive_data_migration.net_fds {
+                    // TODO do some validation
+                    //restored_net_config.validate();
+                    // Update VM's net configurations with new fds received for restore operation
+
+                    let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
+
+                    for net in restored_net_configs {
+                        for net_config in vm_config.net.iter_mut().flatten() {
+                            // update only if the net dev is backed by FDs
+                            if net_config.id.as_ref() == Some(&net.id) && net_config.fds.is_some() {
+                                debug!(
+                                    "overwriting net fds: id={}, old={:?}, new={:?}",
+                                    net.id, &net_config.fds, &net.fds
+                                );
+                                net_config.fds.clone_from(&net.fds);
+                            }
+                        }
+                    }
+                }
 
                 Ok(memory_manager)
             };
@@ -2420,8 +2441,8 @@ impl RequestHandler for Vmm {
         receive_data_migration: VmReceiveMigrationData,
     ) -> result::Result<(), MigratableError> {
         info!(
-            "Receiving migration: receiver_url = {}",
-            receive_data_migration.receiver_url
+            "Receiving migration: receiver_url = {}, net_fds={:?}",
+            receive_data_migration.receiver_url, &receive_data_migration.net_fds
         );
 
         // Accept the connection and get the socket
