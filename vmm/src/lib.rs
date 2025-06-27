@@ -1011,6 +1011,20 @@ impl Vmm {
                 let shared_backing = !memory_files.is_empty();
                 let (memory_manager, memory_mode) =
                     self.vm_receive_config(req, socket, memory_files, receive_data_migration)?;
+
+                if !receive_data_migration.net_fds.is_empty() {
+                    let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
+                    for restored_net in &receive_data_migration.net_fds {
+                        for net_config in vm_config.net.iter_mut().flatten() {
+                            // Only update net devices that are backed directly by file descriptors.
+                            if net_config.pci_common.id.as_ref() == Some(&restored_net.id)
+                                && net_config.fds.is_some()
+                            {
+                                net_config.fds.clone_from(&restored_net.fds);
+                            }
+                        }
+                    }
+                }
                 let guest_memory = memory_manager.lock().unwrap().guest_memory();
                 // Create the additional-connection receiver even in the single-connection case.
                 // At this point the receiver does not know whether the sender will use extra TCP
@@ -3387,10 +3401,11 @@ impl RequestHandler for Vmm {
             .map_err(MigratableError::MigrateReceive)?;
 
         info!(
-            "Receiving migration: receiver_url={},tls={},zone_updates={:?}",
+            "Receiving migration: receiver_url={},tls={},zone_updates={:?},net_fds={:?}",
             receive_data_migration.receiver_url,
             receive_data_migration.tls_dir.is_some(),
             receive_data_migration.zone_updates,
+            receive_data_migration.net_fds
         );
 
         if receive_data_migration.receiver_url.starts_with("tcp:")
@@ -4293,6 +4308,7 @@ mod tests {
         VmReceiveMigrationData {
             receiver_url: "tcp:127.0.0.1:4321".to_string(),
             tls_dir: None,
+            net_fds: vec![],
             vfio_fds,
             iommufd_fd,
             zone_updates: vec![],

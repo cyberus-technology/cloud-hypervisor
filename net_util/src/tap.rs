@@ -14,6 +14,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::{mem, result, str};
 
 use libc::{__c_anonymous_ifr_ifru, IFNAMSIZ, ifreq};
+use log::debug;
 use thiserror::Error;
 use vmm_sys_util::ioctl::{ioctl_with_mut_ref, ioctl_with_ref, ioctl_with_val};
 
@@ -62,6 +63,16 @@ pub struct Tap {
     tap_file: File,
     /// The name does not exceed [`IFNAMSIZ`] bytes including the NUL byte.
     if_name: CString,
+}
+
+impl Drop for Tap {
+    fn drop(&mut self) {
+        debug!(
+            "Dropping Tap: if_name={}, FD={}",
+            self.if_name_as_str(),
+            self.tap_file.as_raw_fd()
+        );
+    }
 }
 
 impl PartialEq for Tap {
@@ -170,6 +181,7 @@ impl Tap {
         if fd < 0 {
             return Err(Error::OpenTun(IoError::last_os_error()));
         }
+        debug!("Opening Tap device with given name: ifname={if_name}, fd={fd}");
 
         // SAFETY: We just checked that the fd is valid.
         let tuntap = unsafe { File::from_raw_fd(fd) };

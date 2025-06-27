@@ -6,11 +6,11 @@
 
 //! # HTTP Endpoints of the Cloud Hypervisor API
 //!
-//! ## Special Handling for Devices Backed by Network File Descriptors (FDs) (e.g., virtio-net)
+//! ## Special Handling for Externally Provided File Descriptors (FDs) (e.g., virtio-net)
 //!
 //! Some of the HTTP handlers here implement special logic for devices
-//! **backed by network FDs** to enable live-migration, state save/resume
-//! (restore), and similar VM lifecycle events.
+//! **backed by externally opened FDs** to enable live-migration,
+//! state save/resume (restore), and similar VM lifecycle events.
 //!
 //! The utilized mechanism requires that the control software (e.g., libvirt)
 //! connects to Cloud Hypervisor by using a UNIX domain socket and that it
@@ -46,7 +46,9 @@ use vmm_sys_util::eventfd::EventFd;
 use crate::api;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::api::VmCoredump;
-use crate::api::http::http_endpoint::fds_helper::{attach_fds_to_cfg, attach_fds_to_cfgs};
+use crate::api::http::http_endpoint::fds_helper::{
+    ConfigWithVariableFDs, attach_fds_to_cfg, attach_fds_to_cfgs,
+};
 use crate::api::http::{EndpointHandler, HttpError, error_response};
 use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, DeviceConfig, NetConfig, VmAddDevice, VmAddFs,
@@ -519,7 +521,7 @@ impl PutHandler for VmAddDevice {
 
 impl GetHandler for VmAddDevice {}
 
-// Special handling for virtio-net devices backed by network FDs.
+// Special handling for externally provided FDs.
 // See module description for more info.
 impl PutHandler for VmAddNet {
     fn handle_request(
@@ -579,7 +581,7 @@ impl PutHandler for VmResize {
 
 impl GetHandler for VmResize {}
 
-// Special handling for virtio-net devices backed by network FDs.
+// Special handling for externally provided FDs.
 // See module description for more info.
 impl PutHandler for VmRestore {
     fn handle_request(
@@ -643,17 +645,23 @@ impl PutHandler for VmReceiveMigration {
         api_notifier: EventFd,
         api_sender: Sender<ApiRequest>,
         body: &Option<Body>,
-        files: Vec<File>,
+        mut files: Vec<File>,
     ) -> result::Result<Option<Body>, HttpError> {
         if let Some(body) = body {
             let mut data: VmReceiveMigrationData = serde_json::from_slice(body.raw())?;
-
+            // Split in the order net_fds, vfio_fds, then the iommufd FD.
+            let expected_net_fds: usize = data
+                .net_fds
+                .iter()
+                .map(|restored_net_cfg| restored_net_cfg.expected_num_fds())
+                .sum();
             let vfio_total = data.vfio_fds.as_ref().map_or(0, |c| c.len());
             let expected = if data.vfio_fds.is_some() {
-                vfio_total + 1
+                expected_net_fds + vfio_total + 1
             } else {
-                0
+                expected_net_fds
             };
+
             if files.len() != expected {
                 error!(
                     "Expected {expected} FDs in VmReceiveMigration request, received {}",
@@ -662,8 +670,12 @@ impl PutHandler for VmReceiveMigration {
                 return Err(HttpError::BadRequest);
             }
 
-            // Split in the order vfio_fds, then the iommufd FD.
-            let mut files = files;
+            if !data.net_fds.is_empty() {
+                let mut cfgs = data.net_fds.iter_mut().collect::<Vec<&mut _>>();
+                let cfgs = cfgs.as_mut_slice();
+                attach_fds_to_cfgs(files.drain(..expected_net_fds).collect(), cfgs)?;
+            }
+
             if let Some(cfgs) = data.vfio_fds.as_mut() {
                 let vfio_files: Vec<File> = files.drain(..vfio_total).collect();
                 let mut cfgs = cfgs.iter_mut().collect::<Vec<&mut _>>();

@@ -3174,6 +3174,7 @@ impl DeviceManager {
 
         let (virtio_device, migratable_device) = if net_cfg.vhost_user {
             let socket = net_cfg.vhost_socket.as_ref().unwrap().clone();
+            debug!("Creating virtio-net device with vhost-user backend: {socket}");
             let vu_cfg = VhostUserConfig {
                 socket,
                 num_queues: net_cfg.num_queues,
@@ -3218,6 +3219,7 @@ impl DeviceManager {
             let guest_mac = *net_cfg.mac.get_or_insert_with(MacAddr::local_random);
 
             let virtio_net = if let Some(ref tap_if_name) = net_cfg.tap {
+                debug!("Creating virtio-net device from Tap device: {tap_if_name}");
                 Arc::new(Mutex::new(
                     virtio_devices::Net::new(
                         id.clone(),
@@ -3243,6 +3245,7 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
             } else if let Some(fds) = &net_cfg.fds {
+                debug!("Creating virtio-net device from network FDs: {fds:?}");
                 let net = virtio_devices::Net::from_tap_fds(
                     id.clone(),
                     fds,
@@ -3269,6 +3272,9 @@ impl DeviceManager {
 
                 Arc::new(Mutex::new(net))
             } else {
+                debug!(
+                    "Creating virtio-net device: no ifname or FDs given, creating new Tap device"
+                );
                 Arc::new(Mutex::new(
                     virtio_devices::Net::new(
                         id.clone(),
@@ -5492,6 +5498,10 @@ impl DeviceManager {
         Ok(())
     }
 
+    /// Notifies the VM for a hotplug.
+    ///
+    /// This call doesn't wait for the vCPU receiving the
+    /// interrupt to acknowledge.
     pub fn notify_hotplug(
         &self,
         _notification_type: AcpiNotificationFlags,

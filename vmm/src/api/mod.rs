@@ -56,7 +56,8 @@ pub use self::dbus::start_dbus_thread;
 pub use self::http::{start_http_fd_thread, start_http_path_thread};
 use crate::Error as VmmError;
 use crate::config::{
-    RestoreConfig, RestoredVfioConfig, VmMemoryZoneUpdateData, deserialize_restored_fd,
+    RestoreConfig, RestoredNetConfig, RestoredVfioConfig, VmMemoryZoneUpdateData,
+    deserialize_restored_fd,
 };
 use crate::device_tree::DeviceTree;
 use crate::migration::transport::{
@@ -397,6 +398,9 @@ pub struct VmReceiveMigrationData {
     /// If this is `Some`, the migration uses TLS without client authentication.
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
+    /// Map with new network FDs on the new host.
+    #[serde(default)]
+    pub net_fds: Vec<RestoredNetConfig>,
     /// Optional VFIO device id to cdev FD pairs, used to substitute each
     /// device's saved path or stale FD in the received VmConfig.
     #[serde(default)]
@@ -525,6 +529,7 @@ impl VmReceiveMigrationData {
         let data = Self {
             receiver_url,
             tls_dir,
+            net_fds: vec![],
             vfio_fds,
             iommufd_fd,
             zone_updates,
@@ -2511,6 +2516,7 @@ mod tests {
             VmReceiveMigrationData {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: None,
+                net_fds: vec![],
                 vfio_fds: None,
                 iommufd_fd: None,
                 zone_updates: vec![],
@@ -2541,6 +2547,7 @@ mod tests {
             VmReceiveMigrationData {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: Some(tls_dir_path),
+                net_fds: vec![],
                 vfio_fds: None,
                 iommufd_fd: None,
                 zone_updates: vec![],
