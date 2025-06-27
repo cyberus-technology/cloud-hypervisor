@@ -2342,6 +2342,27 @@ pub struct RestoredNetConfig {
     pub fds: Option<Vec<i32>>,
 }
 
+impl RestoredNetConfig {
+    // Ensure all net devices from 'VmConfig' backed by FDs have a
+    // corresponding 'RestoreNetConfig' with a matched 'id' and expected
+    // number of FDs.
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        let found = vm_config
+            .net
+            .iter()
+            .flatten()
+            .any(|net| net.id.as_ref() == Some(&self.id));
+
+        if found {
+            Ok(())
+        } else {
+            Err(ValidationError::RestoreMissingRequiredNetId(
+                self.id.clone(),
+            ))
+        }
+    }
+}
+
 fn deserialize_restorednetconfig_fds<'de, D>(
     d: D,
 ) -> std::result::Result<Option<Vec<i32>>, D::Error>
@@ -3224,6 +3245,8 @@ impl VmConfig {
     /// To use this safely, the caller must guarantee that the input
     /// fds are all valid.
     pub unsafe fn add_preserved_fds(&mut self, mut fds: Vec<i32>) {
+        debug!("adding preserved FDs to VM list: {fds:?}");
+
         if fds.is_empty() {
             return;
         }
@@ -3277,7 +3300,16 @@ impl Clone for VmConfig {
                 .preserved_fds
                 .as_ref()
                 // SAFETY: FFI call with valid FDs
-                .map(|fds| fds.iter().map(|fd| unsafe { libc::dup(*fd) }).collect()),
+                .map(|fds| {
+                    fds.iter()
+                        .map(|fd| {
+                            // SAFETY: Trivially safe.
+                            let fd_duped = unsafe { libc::dup(*fd) };
+                            warn!("Cloning VM config: duping preserved FD {fd} => {fd_duped}");
+                            fd_duped
+                        })
+                        .collect()
+                }),
             landlock_rules: self.landlock_rules.clone(),
             #[cfg(feature = "ivshmem")]
             ivshmem: self.ivshmem.clone(),
@@ -3289,6 +3321,7 @@ impl Clone for VmConfig {
 impl Drop for VmConfig {
     fn drop(&mut self) {
         if let Some(mut fds) = self.preserved_fds.take() {
+            debug!("Closing preserved FDs from VM: fds={fds:?}");
             for fd in fds.drain(..) {
                 // SAFETY: FFI call with valid FDs
                 unsafe { libc::close(fd) };
