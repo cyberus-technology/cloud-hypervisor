@@ -229,12 +229,49 @@ pub fn get_x2apic_id(cpu_id: u32, topology: Option<(u8, u8, u8)>) -> u32 {
     cpu_id
 }
 
+#[repr(u8)]
 #[derive(Copy, Clone, Debug)]
 pub enum CpuidReg {
     EAX,
     EBX,
     ECX,
     EDX,
+}
+
+/*
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+*/
+
+struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(u32);
+impl CpuIdFeatureFlags<1, 0, { CpuidReg::EDX as u8 }> {
+    /// Onboard x87 FPU
+    const FPU: Self = Self(1);
+    /// Virtual 8086 mode extensions (such as VIF, VIP, PVI)
+    const VME: Self = Self(1 << 1);
+    /// Debugging extensions (CR4 bit 3)
+    const DE: Self = Self(1 << 2);
+    /// Page size extension (4 MB pages)
+    const PSE: Self = Self(1 << 3);
+    /// Time Stamp Counter and RDTSC instruction
+    const TSC: Self = Self(1 << 4);
+    /// Model-specific registers and RDMSR/WRMSR instructions
+    const MSR: Self = Self(1 << 5);
+
+    const PAE: Self = Self(1 << 6);
+    /// CLFLUSH cache line flush instruction
+    const CL_FLUSH: Self = Self(1 << 19);
+    /// MMX instructions (64-bit SIMD)
+    const MMX: Self = Self(1 << 23);
+    /// FXSAVE, FXRSTOR instructions
+    const FXSR: Self = Self(1 << 24);
+    /// Streaming SIMD extensions instructions
+    const SSE: Self = Self(1 << 25);
+    /// SSE2 instructions
+    const SSE2: Self = Self(1 << 26);
 }
 
 pub struct CpuidPatch {
