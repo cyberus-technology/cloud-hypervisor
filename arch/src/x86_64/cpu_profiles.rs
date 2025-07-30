@@ -85,7 +85,9 @@ impl CascadeLakeServerV1CpuIdFeatures {
         }
     }
 
-    pub(super) const fn into_cpuid_entries(self) -> [CpuIdEntry; 4] {
+    /// Restricts the given entries by performing bitwise intersections of registers
+    /// per set of matching parameters.
+    pub(super) fn restrict(self, cpuid: &mut [CpuIdEntry]) {
         let Self {
             edx_1,
             ecx_1,
@@ -96,11 +98,13 @@ impl CascadeLakeServerV1CpuIdFeatures {
             edx_7_0,
             eax_0dh,
         } = self;
-        [
-            edx_1.join(ecx_1),
-            edx_8000_0001h.join(ecx_8000_0001h),
-            ebx_7_0.join_three(ecx_7_0, edx_7_0),
-            eax_0dh.into_entry(),
-        ]
+        edx_1.intersect_matching(cpuid);
+        ecx_1.intersect_matching(cpuid);
+        edx_8000_0001h.intersect_matching(cpuid);
+        ecx_8000_0001h.intersect_matching(cpuid);
+        ebx_7_0.intersect_matching(cpuid);
+        ecx_7_0.intersect_matching(cpuid);
+        edx_7_0.intersect_matching(cpuid);
+        eax_0dh.intersect_matching(cpuid);
     }
 }
