@@ -310,65 +310,62 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::Not
 }
 
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUNCTION, INDEX, REG> {
-    const fn into_entry(self) -> CpuIdEntry {
-        // Unfortunately we cannot use enums as const generic parameters as of now, hence we need
-        // this workaround
-        CpuIdEntry {
-            function: FUNCTION,
-            index: INDEX,
-            flags: CPUID_FLAG_VALID_INDEX,
-            eax: if REG == { CpuidReg::EAX as u8 } {
-                self.0
+    fn intersect_matching(&self, cpuid: &mut [CpuIdEntry]) {
+        if let Some(entry) = cpuid.iter_mut().find(|entry| {
+            entry.function == FUNCTION
+                && entry.index == INDEX
+                && entry.flags == CPUID_FLAG_VALID_INDEX
+        }) {
+            let mut updated = 0;
+            if REG == { CpuidReg::EAX as u8 } {
+                entry.eax &= self.0;
+                updated = entry.eax;
+            } else if REG == { CpuidReg::EBX as u8 } {
+                entry.ebx &= self.0;
+                updated = entry.ebx;
+            } else if REG == { CpuidReg::ECX as u8 } {
+                entry.ecx &= self.0;
+                updated = entry.ecx;
+            } else if REG == { CpuidReg::EDX as u8 } {
+                entry.edx &= self.0;
+                updated = entry.edx;
             } else {
-                0
-            },
-            ebx: if REG == { CpuidReg::EBX as u8 } {
-                self.0
-            } else {
-                0
-            },
-            ecx: if REG == { CpuidReg::ECX as u8 } {
-                self.0
-            } else {
-                0
-            },
-            edx: if REG == { CpuidReg::EDX as u8 } {
-                self.0
-            } else {
-                0
-            },
+                // Unfortunately we cannot use enums as const generic parameters yet, hence we check for this
+                // here.
+                error!("BUG: CpuIdFeatureFlags constructed with invalid register value");
+            }
+            let mut missing_bits = updated ^ self.0;
+            if missing_bits != 0 {
+                // iterate over the missing bits and log a warning
+                let mut bit_positions = Vec::new();
+                while missing_bits != 0 {
+                    let idx = missing_bits.trailing_zeros() as usize;
+                    bit_positions.push(u8::try_from(idx).expect(
+                        "idx is at most 32 hence it can be represented as a u8 without problems",
+                    ));
+                    let least_significant_bit = missing_bits & missing_bits.wrapping_neg();
+                    missing_bits ^= least_significant_bit;
+                }
+                // TODO: Use a proper register name rather than REG and consider returning this as an error instead of logging here
+                log::warn!(
+                    "the given cpuid entry identified by: \n
+                 function = 0x{:08x} \
+                 index = 0x{:08x} \
+                 flags =  0x{:08x} \
+                 does not have the following bits set: {:?} in the register {:?}
+                 even though the specified restriction permits it.
+                ",
+                    entry.function,
+                    entry.index,
+                    entry.flags,
+                    bit_positions,
+                    REG
+                );
+            }
         }
     }
-    const fn join<const OTHER_REG: u8>(
-        self,
-        other: CpuIdFeatureFlags<FUNCTION, INDEX, OTHER_REG>,
-    ) -> CpuIdEntry {
-        let mut entry_self = self.into_entry();
-        let entry_other = other.into_entry();
-        entry_self.eax |= entry_other.eax;
-        entry_self.ebx |= entry_other.ebx;
-        entry_self.ecx |= entry_other.ecx;
-        entry_self.edx |= entry_other.edx;
-        // Note that we don't meed tp worry about FUNCTION and INDEX matching for the two entries as that
-        // is already taken care of by the type system.
-        entry_self
-    }
-    const fn join_three<const SECOND_REG: u8, const THIRD_REG: u8>(
-        self,
-        second: CpuIdFeatureFlags<FUNCTION, INDEX, SECOND_REG>,
-        third: CpuIdFeatureFlags<FUNCTION, INDEX, THIRD_REG>,
-    ) -> CpuIdEntry {
-        let mut join = self.join(second);
-        let third_as_entry = third.into_entry();
-        join.eax |= third_as_entry.eax;
-        join.ebx |= third_as_entry.ebx;
-        join.ecx |= third_as_entry.ecx;
-        join.edx |= third_as_entry.edx;
-        // Note that we don't meed tp worry about FUNCTION and INDEX matching for the three entries as that
-        // is already taken care of by the type system.
-        join
-    }
 }
+
 cpuid_flag_constants!(
     CpuIdFeatureFlags<1, 0, { CpuidReg::EDX as u8 }>,
             FPU, VME, DE, PSE,
