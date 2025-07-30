@@ -238,41 +238,239 @@ pub enum CpuidReg {
     EDX,
 }
 
-/*
-            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-            CPUID_DE | CPUID_FP87,
-*/
+macro_rules! cpuid_flag_constants {
+    //============ Possible starting points ===========//
+    ($t:ty, $name:ident) => {
+        impl $t {
+            const $name: Self = Self(1);
+        }
+    };
+    ($t:ty, "NULL", $($tail:tt)*) => {
+        impl $t {
+            cpuid_flag_constants!(1, $($tail)*);
+        }
+    };
+    ($t:ty, $name:ident, $($tail:tt)*) => {
+        impl $t {
+            const $name: Self = Self(1);
+            cpuid_flag_constants!(1, $($tail)*);
+        }
+    };
 
-struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(u32);
-impl CpuIdFeatureFlags<1, 0, { CpuidReg::EDX as u8 }> {
-    /// Onboard x87 FPU
-    const FPU: Self = Self(1);
-    /// Virtual 8086 mode extensions (such as VIF, VIP, PVI)
-    const VME: Self = Self(1 << 1);
-    /// Debugging extensions (CR4 bit 3)
-    const DE: Self = Self(1 << 2);
-    /// Page size extension (4 MB pages)
-    const PSE: Self = Self(1 << 3);
-    /// Time Stamp Counter and RDTSC instruction
-    const TSC: Self = Self(1 << 4);
-    /// Model-specific registers and RDMSR/WRMSR instructions
-    const MSR: Self = Self(1 << 5);
+    //============ Possible most deeply nested macro invocation ===========//
+    ($i:expr, $name:ident) => {
+        const $name: Self = Self(1 << $i);
+    };
 
-    const PAE: Self = Self(1 << 6);
-    /// CLFLUSH cache line flush instruction
-    const CL_FLUSH: Self = Self(1 << 19);
-    /// MMX instructions (64-bit SIMD)
-    const MMX: Self = Self(1 << 23);
-    /// FXSAVE, FXRSTOR instructions
-    const FXSR: Self = Self(1 << 24);
-    /// Streaming SIMD extensions instructions
-    const SSE: Self = Self(1 << 25);
-    /// SSE2 instructions
-    const SSE2: Self = Self(1 << 26);
+    ($i:expr, "NULL") => {};
+
+    ("NULL") => {};
+
+    () => {};
+
+    // Also permit ending with a trailing ,
+    ($i:expr, $name:ident,) => {
+        const $name: Self = Self(1 << $i);
+    };
+
+    ($i:expr, "NULL",) => {};
+
+    ("NULL",) => {};
+
+    (,) => {};
+
+    // ============ Possible continuations that continue the recursion ===== //
+    ($i:expr, "NULL", $($tail:tt)+) => {
+        cpuid_flag_constants!($i + 1, $($tail)*);
+    };
+    ($i:expr, $name:ident, $($tail:tt)+) => {
+        const $name: Self = Self(1 << $i);
+        cpuid_flag_constants!($i + 1, $($tail)*);
+    };
+
 }
+struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(u32);
+impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::BitOr
+    for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
+{
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::Not
+    for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
+{
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        Self(!self.0)
+    }
+}
+
+impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUNCTION, INDEX, REG> {
+    const fn into_entry(self) -> CpuIdEntry {
+        // Unfortunately we cannot use enums as const generic parameters as of now, hence we need
+        // this workaround
+        CpuIdEntry {
+            function: FUNCTION,
+            index: INDEX,
+            flags: CPUID_FLAG_VALID_INDEX,
+            eax: if REG == { CpuidReg::EAX as u8 } {
+                self.0
+            } else {
+                0
+            },
+            ebx: if REG == { CpuidReg::EBX as u8 } {
+                self.0
+            } else {
+                0
+            },
+            ecx: if REG == { CpuidReg::ECX as u8 } {
+                self.0
+            } else {
+                0
+            },
+            edx: if REG == { CpuidReg::EDX as u8 } {
+                self.0
+            } else {
+                0
+            },
+        }
+    }
+    const fn join<const OTHER_REG: u8>(
+        self,
+        other: CpuIdFeatureFlags<FUNCTION, INDEX, OTHER_REG>,
+    ) -> CpuIdEntry {
+        let mut entry_self = self.into_entry();
+        let entry_other = other.into_entry();
+        entry_self.eax |= entry_other.eax;
+        entry_self.ebx |= entry_other.ebx;
+        entry_self.ecx |= entry_other.ecx;
+        entry_self.edx |= entry_other.edx;
+        // Note that we don't meed tp worry about FUNCTION and INDEX matching for the two entries as that
+        // is already taken care of by the type system.
+        entry_self
+    }
+    const fn join_three<const SECOND_REG: u8, const THIRD_REG: u8>(
+        self,
+        second: CpuIdFeatureFlags<FUNCTION, INDEX, SECOND_REG>,
+        third: CpuIdFeatureFlags<FUNCTION, INDEX, THIRD_REG>,
+    ) -> CpuIdEntry {
+        let mut join = self.join(second);
+        let third_as_entry = third.into_entry();
+        join.eax |= third_as_entry.eax;
+        join.ebx |= third_as_entry.ebx;
+        join.ecx |= third_as_entry.ecx;
+        join.edx |= third_as_entry.edx;
+        // Note that we don't meed tp worry about FUNCTION and INDEX matching for the three entries as that
+        // is already taken care of by the type system.
+        join
+    }
+}
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<1, 0, { CpuidReg::EDX as u8 }>,
+            FPU, VME, DE, PSE,
+            TSC, MSR, PAE, MCE,
+            CX8, APIC, "NULL", SEP,
+            MTRR, PGE, MCA, CMOV,
+            PAT, PSE36, PN /* Intel psn */, CLFLUSH /* Intel clfsh */,
+            "NULL", DS /* INTEL DTS */, ACPI, MMX,
+            FXSR, SSE, SSE2, SS,
+            HT /* Intel htt */, TM, IA64, PBE,
+);
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<1, 0, { CpuidReg::ECX as u8 }>,
+            PNI /* Intel,AMD sse3 */, PCLMULQDQ, DTES64, MONITOR,
+            DS_CPL, VMX, SMX, EST,
+            TM2, SSSE3, CID, "NULL",
+            FMA, CX16, XTPR, PDCM,
+            "NULL", PCID, DCA, SSE4_1,
+            SSE4_2, X2APIC, MOVBE, POPCNT,
+            TSC_DEADLINE, AES, XSAVE, "NULL" /* osxsave */,
+            AVX, F16C, RDRAND, HYPERVISOR,
+);
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
+            "NULL" /* fpu */, "NULL" /* vme */, "NULL" /* de */, "NULL" /* pse */,
+            "NULL" /* tsc */, "NULL" /* msr */, "NULL" /* pae */, "NULL" /* mce */,
+            "NULL" /* cx8 */, "NULL" /* apic */, "NULL", SYSCALL,
+            "NULL" /* mtrr */, "NULL" /* pge */, "NULL" /* mca */, "NULL" /* cmov */,
+            "NULL" /* pat */, "NULL" /* pse36 */, "NULL", "NULL" /* Linux mp */,
+            NX, "NULL", MMXEXT, "NULL" /* mmx */,
+            "NULL" /* fxsr */, FXSR_OPT, PDPE1GB, RDTSCP,
+            "NULL", LM, EXT_3DNOW, FIRST_3DNOW,
+
+);
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::ECX as u8}>,
+            LAHF_LM, CMP_LEGACY, SVM, EXTAPIC,
+            CR8LEGACY, ABM, SSE4A, MISALIGNSSE,
+            PREFETCH_3DNOW, OSVW, IBS, XOP,
+            SKINIT, WDT, "NULL", LWP,
+            FMA4, TCE, "NULL", NODEID_MSR,
+            "NULL", TBM, TOPOEXT, PERFCTR_CORE,
+            PERFCTR_NB, "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+);
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<7, 0, {CpuidReg::EBX as u8}>,
+            FSGSBASE, TSC_ADJUST, SGX, BMI1,
+            HLE, AVX2, FDP_EXCPTN_ONLY, SMEP,
+            BMI2, ERMS, INVPCID, RTM,
+            "NULL", ZERO_FCS_FDS, MPX, "NULL",
+            AVX512F, AVX512DQ, RDSEED, ADX,
+            SMAP, AVX512IFMA, PCOMMIT, CLFLUSHOPT,
+            CLWB, INTEL_PT, AVX512PF, AVX512ER,
+            AVX512CD, SHA_NI, AVX512BW, AVX512VL,
+);
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<7, 0, {CpuidReg::ECX as u8}>,
+            "NULL", AVX512VBMI, UMIP, PKU,
+            "NULL" /* ospke */, WAITPKG, AVX512VBMI2, "NULL",
+            GFNI, VAES, VPCLMULQDQ, AVX512VNNI,
+            AVX512BITALG, "NULL", AVX512_VPOPCNTDQ, "NULL",
+            LA57, "NULL", "NULL", "NULL",
+            "NULL", "NULL", RDPID, "NULL",
+            BUS_LOCK_DETECT, CLDEMOTE, "NULL", MOVDIRI,
+            MOVDIR64B, "NULL", SGXLC, PKS,
+);
+
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<7, 0, {CpuidReg::EDX as u8}>,
+    "NULL", "NULL", AVX512_4VNNIW, AVX512_4FMAPS,
+    FSRM, "NULL", "NULL", "NULL",
+    AVX512_VP2INTERSECT, "NULL", MD_CLEAR, "NULL",
+    "NULL", "NULL", SERIALIZE, "NULL",
+    TSX_LDTRK, "NULL", "NULL" /* pconfig */, ARCH_LBR,
+    "NULL", "NULL", AMX_BF16, AVX512_FP16,
+    AMX_TILE, AMX_INT8, SPEC_CTRL, STIBP,
+    FLUSH_L1D, ARCH_CAPABILITIES, CORE_CAPABILITY, SSBD,
+);
+
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<0xd,1, {CpuidReg::EAX as u8}>,
+            XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
+            XFD, "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+);
+
+cpuid_flag_constants!(
+    CpuIdFeatureFlags<6, 0, {CpuidReg::EAX as u8}>,
+            "NULL", "NULL", ARAT, "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+
+);
 
 pub struct CpuidPatch {
     pub function: u32,
