@@ -7,10 +7,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 use std::sync::Arc;
+mod cpu_profiles;
 pub mod interrupts;
 pub mod layout;
 mod mpspec;
 mod mptable;
+
 pub mod regs;
 use std::collections::BTreeMap;
 use std::mem;
@@ -380,7 +382,7 @@ cpuid_flag_constants!(
 );
 cpuid_flag_constants!(
     CpuIdFeatureFlags<1, 0, { CpuidReg::ECX as u8 }>,
-            PNI /* Intel,AMD sse3 */, PCLMULQDQ, DTES64, MONITOR,
+            SSE3 /* Intel PNI,AMD sse3 */, PCLMULQDQ, DTES64, MONITOR,
             DS_CPL, VMX, SMX, EST,
             TM2, SSSE3, CID, "NULL",
             FMA, CX16, XTPR, PDCM,
