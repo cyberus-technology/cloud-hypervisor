@@ -327,7 +327,7 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUN
 
 /// Reduces boilerplate when implementing CpuIdFeatureFlag constants.
 /// One passes in a parameterized CpuIdFeatureFlags together with
-/// a name corresponding to the bit at it's possition.
+/// a name per bit in the 32bit bitset.
 ///
 /// For lower order bits that should not have any associated constant, appearing
 /// before a higher order bit that needs a constant, you can simply place a "NULL"
