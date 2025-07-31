@@ -88,6 +88,8 @@ impl CascadeLakeServerV1CpuIdFeatures {
     /// Restricts the given entries by performing bitwise intersections of registers
     /// per set of matching parameters.
     pub(super) fn restrict(self, cpuid: &mut [CpuIdEntry]) {
+        // NOTE: This might get a bit repetetive when we get more structs in this module.
+        // Might be worth introducing a proc macro for this at some point...
         let Self {
             edx_1,
             ecx_1,
