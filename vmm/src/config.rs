@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::result;
 use std::str::FromStr;
 
+use arch::CpuProfile;
 use clap::ArgMatches;
 use option_parser::{
     ByteSized, IntegerList, OptionParser, OptionParserError, StringList, Toggle, Tuple,
@@ -542,6 +543,7 @@ impl FromStr for CpuTopology {
 
 impl CpusConfig {
     pub fn parse(cpus: &str) -> Result<Self> {
+        // TODO: Verify that this works with the new profile option
         let mut parser = OptionParser::new();
         parser
             .add("boot")
@@ -550,7 +552,8 @@ impl CpusConfig {
             .add("kvm_hyperv")
             .add("max_phys_bits")
             .add("affinity")
-            .add("features");
+            .add("features")
+            .add("profile");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u8 = parser
@@ -586,6 +589,10 @@ impl CpusConfig {
             .convert::<StringList>("features")
             .map_err(Error::ParseCpus)?
             .unwrap_or_default();
+        let profile: CpuProfile = parser
+            .convert("profile")
+            .map_err(Error::ParseCpus)?
+            .unwrap_or_default();
         // Some ugliness here as the features being checked might be disabled
         // at compile time causing the below allow and the need to specify the
         // ref type in the match.
@@ -612,6 +619,7 @@ impl CpusConfig {
             max_phys_bits,
             affinity,
             features,
+            profile,
         })
     }
 }

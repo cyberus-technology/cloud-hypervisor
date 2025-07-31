@@ -12,6 +12,7 @@
 extern crate log;
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, result};
 
@@ -60,11 +61,25 @@ pub enum Error {
 pub type Result<T> = result::Result<T, Error>;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CpuProfile {
     #[default]
     Host,
     #[cfg(target_arch = "x86_64")]
     CascadeLakeServerV1,
+}
+
+// TODO: Probably better to derive this
+impl FromStr for CpuProfile {
+    // TODO: Use a proper error type
+    type Err = &'static str;
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        match s {
+            "host" => Ok(Self::Host),
+            "cascadelake-server-v1" => Ok(Self::CascadeLakeServerV1),
+            _ => Err("invalid cpu profile"),
+        }
+    }
 }
 
 /// Type for memory region types.

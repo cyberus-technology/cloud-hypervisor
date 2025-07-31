@@ -729,6 +729,9 @@ impl CpuManager {
                 }
             }
         }
+        // TODO: Are there more CPU features that need explicit kernel support to work?
+        // If so we propose adding each of them to `CpuFeatures` and also dealing with
+        // here.
 
         let proximity_domain_per_cpu: BTreeMap<u8, u32> = {
             let mut cpu_list = Vec::new();
@@ -809,6 +812,7 @@ impl CpuManager {
                     #[cfg(feature = "tdx")]
                     tdx,
                     amx: self.config.features.amx,
+                    profile: self.config.profile,
                 },
             )
             .map_err(Error::CommonCpuId)?
