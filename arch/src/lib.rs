@@ -76,6 +76,7 @@ impl FromStr for CpuProfile {
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
         match s {
             "host" => Ok(Self::Host),
+            #[cfg(target_arch = "x86_64")]
             "cascadelake-server-v1" => Ok(Self::CascadeLakeServerV1),
             _ => Err("invalid cpu profile"),
         }
