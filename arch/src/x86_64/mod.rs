@@ -241,57 +241,8 @@ pub enum CpuidReg {
     EDX,
 }
 
-macro_rules! cpuid_flag_constants {
-    //============ Possible starting points ===========//
-    ($t:ty, $name:ident) => {
-        impl $t {
-            const $name: Self = Self(1);
-        }
-    };
-    ($t:ty, "NULL", $($tail:tt)*) => {
-        impl $t {
-            cpuid_flag_constants!(1, $($tail)*);
-        }
-    };
-    ($t:ty, $name:ident, $($tail:tt)*) => {
-        impl $t {
-            const $name: Self = Self(1);
-            cpuid_flag_constants!(1, $($tail)*);
-        }
-    };
-
-    //============ Possible most deeply nested macro invocation ===========//
-    ($i:expr, $name:ident) => {
-        const $name: Self = Self(1 << $i);
-    };
-
-    ($i:expr, "NULL") => {};
-
-    ("NULL") => {};
-
-    () => {};
-
-    // Also permit ending with a trailing ,
-    ($i:expr, $name:ident,) => {
-        const $name: Self = Self(1 << $i);
-    };
-
-    ($i:expr, "NULL",) => {};
-
-    ("NULL",) => {};
-
-    (,) => {};
-
-    // ============ Possible continuations that continue the recursion ===== //
-    ($i:expr, "NULL", $($tail:tt)+) => {
-        cpuid_flag_constants!($i + 1, $($tail)*);
-    };
-    ($i:expr, $name:ident, $($tail:tt)+) => {
-        const $name: Self = Self(1 << $i);
-        cpuid_flag_constants!($i + 1, $($tail)*);
-    };
-
-}
+/// A bitset of CPUID feature flags for a given leaf, sub-leaf and register triple
+/// (or function, index, register in KVM terms).
 struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(u32);
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::BitOr
     for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
@@ -315,6 +266,8 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUN
         if let Some(entry) = cpuid.iter_mut().find(|entry| {
             entry.function == FUNCTION
                 && entry.index == INDEX
+                // We only care about the cpuid entries with a valid index flag in KVM terms.
+                // TODO: Is this indeed the case?
                 && entry.flags == CPUID_FLAG_VALID_INDEX
         }) {
             let mut updated = 0;
@@ -335,6 +288,8 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUN
                 // here.
                 error!("BUG: CpuIdFeatureFlags constructed with invalid register value");
             }
+            // The job is done, but also check if the updated register contains all set feature flags,
+            // if not report them.
             let mut missing_bits = updated ^ self.0;
             if missing_bits != 0 {
                 // iterate over the missing bits and log a warning
@@ -363,8 +318,80 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUN
                     REG
                 );
             }
+        } else {
+            // TODO: Better log or return an error here
+            log::warn!("no entry matched");
         }
     }
+}
+
+/// Reduces boilerplate when implementing CpuIdFeatureFlag constants.
+/// One passes in a parameterized CpuIdFeatureFlags together with
+/// a name corresponding to the bit at it's possition.
+///
+/// For lower order bits that should not have any associated constant, appearing
+/// before a higher order bit that needs a constant, you can simply place a "NULL"
+/// in its place.
+macro_rules! cpuid_flag_constants {
+    /* NOTE: We allow dead code within this macro as we may want to use certain
+     unused constants in the feature when introducing more cpu profiles.
+     The alternative would be to fill the macro invocations with more "NULL"
+     entries.
+    */
+    //============ Possible starting points ===========//
+    ($t:ty, $name:ident) => {
+        impl $t {
+            #[allow(dead_code)]
+            const $name: Self = Self(1);
+        }
+    };
+    ($t:ty, "NULL", $($tail:tt)*) => {
+        impl $t {
+            cpuid_flag_constants!(1, $($tail)*);
+        }
+    };
+    ($t:ty, $name:ident, $($tail:tt)*) => {
+        impl $t {
+            #[allow(dead_code)]
+            const $name: Self = Self(1);
+            cpuid_flag_constants!(1, $($tail)*);
+        }
+    };
+
+    //============ Possible most deeply nested macro invocation ===========//
+    ($i:expr, $name:ident) => {
+        #[allow(dead_code)]
+        const $name: Self = Self(1 << $i);
+    };
+
+    ($i:expr, "NULL") => {};
+
+    ("NULL") => {};
+
+    () => {};
+
+    // Also permit ending with a trailing ,
+    ($i:expr, $name:ident,) => {
+        #[allow(dead_code)]
+        const $name: Self = Self(1 << $i);
+    };
+
+    ($i:expr, "NULL",) => {};
+
+    ("NULL",) => {};
+
+    (,) => {};
+
+    // ============ Possible continuations that continue the recursion ===== //
+    ($i:expr, "NULL", $($tail:tt)+) => {
+        cpuid_flag_constants!($i + 1, $($tail)*);
+    };
+    ($i:expr, $name:ident, $($tail:tt)+) => {
+        #[allow(dead_code)]
+        const $name: Self = Self(1 << $i);
+        cpuid_flag_constants!($i + 1, $($tail)*);
+    };
+
 }
 
 cpuid_flag_constants!(
@@ -895,6 +922,15 @@ pub fn generate_common_cpuid(
         .get_supported_cpuid()
         .map_err(Error::CpuidGetSupported)?;
 
+    // Restrict the supported CPUID to the features supported by the cpu profile
+    match config.profile {
+        CpuProfile::Host => {
+            // When this is set we do nothing
+        }
+        CpuProfile::CascadeLakeServerV1 => {
+            cpu_profile_feature_flags::CascadeLakeServerV1CpuIdFeatures::new().restrict(&mut cpuid);
+        }
+    }
     CpuidPatch::patch_cpuid(&mut cpuid, cpuid_patches);
 
     if let Some(sgx_epc_sections) = &config.sgx_epc_sections {
