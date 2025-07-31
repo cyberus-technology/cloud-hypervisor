@@ -59,6 +59,14 @@ pub enum Error {
 /// Type for returning public functions outcome.
 pub type Result<T> = result::Result<T, Error>;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CpuProfile {
+    #[default]
+    Host,
+    #[cfg(target_arch = "x86_64")]
+    CascadeLakeServerV1,
+}
+
 /// Type for memory region types.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RegionType {

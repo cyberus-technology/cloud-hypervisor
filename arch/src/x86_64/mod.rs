@@ -7,7 +7,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 use std::sync::Arc;
-mod cpu_profiles;
+mod cpu_profile_feature_flags;
 pub mod interrupts;
 pub mod layout;
 mod mpspec;
