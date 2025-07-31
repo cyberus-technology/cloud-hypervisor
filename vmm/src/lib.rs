@@ -1125,7 +1125,12 @@ impl Vmm {
                 )));
             };
 
-            let amx = vm_config.lock().unwrap().cpus.features.amx;
+            let (amx, cpu_profile) = {
+                let guard = vm_config.lock().unwrap();
+                let amx = guard.cpus.features.amx;
+                let profile = guard.cpus.profile;
+                (amx, profile)
+            };
             let phys_bits =
                 vm::physical_bits(&hypervisor, vm_config.lock().unwrap().cpus.max_phys_bits);
             arch::generate_common_cpuid(
@@ -1137,6 +1142,7 @@ impl Vmm {
                     #[cfg(feature = "tdx")]
                     tdx: false,
                     amx,
+                    profile: cpu_profile,
                 },
             )
             .map_err(|e| {
@@ -1276,6 +1282,7 @@ impl Vmm {
                     #[cfg(feature = "tdx")]
                     tdx: false,
                     amx: vm_config.cpus.features.amx,
+                    profile: vm_config.cpus.profile,
                 },
             )
             .map_err(|e| {
@@ -1296,6 +1303,7 @@ impl Vmm {
         vm_config: Arc<Mutex<VmConfig>>,
         prefault: bool,
     ) -> std::result::Result<(), VmError> {
+        // TODO: Do we need to check for compatibility with the cpu profile here as well?
         let snapshot = recv_vm_state(source_url).map_err(VmError::Restore)?;
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         let vm_snapshot = get_vm_snapshot(&snapshot).map_err(VmError::Restore)?;
@@ -2358,6 +2366,8 @@ const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
 
 #[cfg(test)]
 mod unit_tests {
+    use arch::CpuProfile;
+
     use super::*;
     #[cfg(target_arch = "x86_64")]
     use crate::vm_config::DebugConsoleConfig;
@@ -2391,6 +2401,7 @@ mod unit_tests {
                 max_phys_bits: 46,
                 affinity: None,
                 features: CpuFeatures::default(),
+                profile: CpuProfile::default(),
             },
             memory: MemoryConfig {
                 size: 536_870_912,

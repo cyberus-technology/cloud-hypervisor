@@ -2773,11 +2773,10 @@ impl Snapshottable for Vm {
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         let common_cpuid = {
-            let amx = self.config.lock().unwrap().cpus.features.amx;
-            let phys_bits = physical_bits(
-                &self.hypervisor,
-                self.config.lock().unwrap().cpus.max_phys_bits,
-            );
+            let guard = self.config.lock().unwrap();
+            let amx = guard.cpus.features.amx;
+            let phys_bits = physical_bits(&self.hypervisor, guard.cpus.max_phys_bits);
+            let profile = guard.cpus.profile;
             arch::generate_common_cpuid(
                 &self.hypervisor,
                 &arch::CpuidConfig {
@@ -2787,6 +2786,7 @@ impl Snapshottable for Vm {
                     #[cfg(feature = "tdx")]
                     tdx: false,
                     amx,
+                    profile,
                 },
             )
             .map_err(|e| {
