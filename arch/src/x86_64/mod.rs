@@ -366,10 +366,6 @@ macro_rules! cpuid_flag_constants {
 
     ($i:expr, "NULL" $(,)*) => {};
 
-    ("NULL" $(,)*) => {};
-
-    ($(,)*) => {};
-
     // ============ Possible continuations that continue the recursion ===== //
     ($i:expr, "NULL", $($tail:tt)+) => {
         cpuid_flag_constants!($i + 1, $($tail)*);
