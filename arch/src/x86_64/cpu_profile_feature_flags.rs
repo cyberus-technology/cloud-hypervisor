@@ -14,74 +14,74 @@ pub(super) struct CascadeLakeServerV1CpuIdFeatures {
 }
 
 impl CascadeLakeServerV1CpuIdFeatures {
-    pub(super) fn new() -> Self {
+    pub(super) const fn new() -> Self {
         use CpuIdFeatureFlags as FF;
-        Self {
-            edx_1: FF::VME
-                | FF::SSE2
-                | FF::SSE
-                | FF::FXSR
-                | FF::MMX
-                | FF::CLFLUSH
-                | FF::PSE36
-                | FF::PAT
-                | FF::CMOV
-                | FF::MCA
-                | FF::PGE
-                | FF::MTRR
-                | FF::SEP
-                | FF::APIC
-                | FF::CX8
-                | FF::MCE
-                | FF::PAE
-                | FF::MSR
-                | FF::TSC
-                | FF::PSE
-                | FF::DE
-                | FF::FPU,
+        // Placing this in a const block ensures compile time evaluation and we get isntant feedback
+        // (even from the LSP) if the lists contain arguments that are not defined for the given
+        // function, index, register triple via `crate::x86_64::impl_cpuid_feature_flags!`
+        const {
+            Self {
+                edx_1: FF::<1, 0, { CpuidReg::EDX as u8 }>::from_names(&[
+                    "vme", "sse2", "sse", "fxsr", "mmx", "clflush", "pse36", "pat", "cmov", "mca",
+                    "pge", "mtrr", "sep", "apic", "cx8", "mce", "pae", "msr", "tsc", "pse", "de",
+                    "fpu",
+                ]),
 
-            ecx_1: FF::AVX
-                | FF::XSAVE
-                | FF::AES
-                | FF::POPCNT
-                | FF::X2APIC
-                | FF::SSE4_2
-                | FF::SSE4_1
-                | FF::CX16
-                | FF::SSSE3
-                | FF::PCLMULQDQ
-                | FF::SSE3
-                | FF::TSC_DEADLINE
-                | FF::FMA
-                | FF::MOVBE
-                | FF::PCID
-                | FF::F16C
-                | FF::RDRAND,
+                ecx_1: FF::<1, 0, { CpuidReg::ECX as u8 }>::from_names(&[
+                    "avx",
+                    "xsave",
+                    "aes",
+                    "popcnt",
+                    "x2apic",
+                    "sse4.2",
+                    "sse4.1",
+                    "cx16",
+                    "ssse3",
+                    "pclmulqdq",
+                    "pni",
+                    "tsc-deadline",
+                    "fma",
+                    "movbe",
+                    "pcid",
+                    "f16c",
+                    "rdrand",
+                ]),
 
-            edx_8000_0001h: FF::LM | FF::PDPE1GB | FF::RDTSCP | FF::NX | FF::SYSCALL,
-            ecx_8000_0001h: FF::ABM | FF::LAHF_LM | FF::PREFETCH_3DNOW,
-            ebx_7_0: FF::FSGSBASE
-                | FF::BMI1
-                | FF::HLE
-                | FF::AVX2
-                | FF::SMEP
-                | FF::BMI2
-                | FF::ERMS
-                | FF::INVPCID
-                | FF::RTM
-                | FF::RDSEED
-                | FF::ADX
-                | FF::SMAP
-                | FF::CLWB
-                | FF::AVX512F
-                | FF::AVX512DQ
-                | FF::AVX512BW
-                | FF::AVX512CD
-                | FF::AVX512VL
-                | FF::CLFLUSHOPT,
-            ecx_7_0: FF::PKU | FF::AVX512VNNI,
-            edx_7_0: FF::SPEC_CTRL | FF::SSBD,
-            eax_0dh: FF::XSAVEOPT | FF::XSAVEC | FF::XGETBV1,
+                edx_8000_0001h: FF::<0x8000_0001, 0, { CpuidReg::EDX as u8 }>::from_names(&[
+                    "lm", "pdpe1gb", "rdtscp", "nx", "syscall",
+                ]),
+                ecx_8000_0001h: FF::<0x8000_0001, 0, { CpuidReg::ECX as u8 }>::from_names(&[
+                    "abm",
+                    "lahf-lm",
+                    "3dnowprefetch",
+                ]),
+                ebx_7_0: FF::<7, 0, { CpuidReg::EBX as u8 }>::from_names(&[
+                    "fsgsbase",
+                    "bmi1",
+                    "hle",
+                    "avx2",
+                    "smep",
+                    "bmi2",
+                    "erms",
+                    "invpcid",
+                    "rtm",
+                    "rdseed",
+                    "adx",
+                    "smap",
+                    "clwb",
+                    "avx512f",
+                    "avx512dq",
+                    "avx512bw",
+                    "avx512cd",
+                    "avx512vl",
+                    "clflushopt",
+                ]),
+                ecx_7_0: FF::<7, 0, { CpuidReg::ECX as u8 }>::from_names(&["pku", "avx512vnni"]),
+                edx_7_0: FF::<7, 0, { CpuidReg::EDX as u8 }>::from_names(&["spec-ctrl", "ssbd"]),
+                eax_0dh: FF::<0xd, 1, { CpuidReg::EAX as u8 }>::from_names(&[
+                    "xsaveopt", "xsavec", "xgetbv1",
+                ]),
+            }
         }
     }
 

@@ -244,14 +244,7 @@ pub enum CpuidReg {
 /// A bitset of CPUID feature flags for a given leaf, sub-leaf and register triple
 /// (or function, index, register in KVM terms).
 struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(u32);
-impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::BitOr
-    for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
-{
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self(self.0 | rhs.0)
-    }
-}
+
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::Not
     for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
 {
@@ -324,179 +317,419 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUN
         }
     }
 }
-
-/// Reduces boilerplate when implementing CpuIdFeatureFlag constants.
-/// One passes in a parameterized CpuIdFeatureFlags together with
-/// a name per bit in the 32bit bitset.
-///
-/// For lower order bits that should not have any associated constant, appearing
-/// before a higher order bit that needs a constant, you can simply place a "NULL"
-/// in its place.
-macro_rules! cpuid_flag_constants {
-    /* NOTE: We allow dead code within this macro as we may want to use certain
-     unused constants in the feature when introducing more cpu profiles.
-     The alternative would be to fill the macro invocations with more "NULL"
-     entries.
-    */
-    //============ Possible starting points ===========//
-    ($t:ty, $name:ident) => {
-        impl $t {
-            #[allow(dead_code)]
-            const $name: Self = Self(1);
-        }
+macro_rules! null_to_empty_else_identity {
+    (NULL) => {
+        ""
     };
-    ($t:ty, "NULL", $($tail:tt)*) => {
-        impl $t {
-            cpuid_flag_constants!(1, $($tail)*);
-        }
+    ($name:literal) => {
+        $name
     };
-    ($t:ty, $name:ident, $($tail:tt)*) => {
-        impl $t {
-            #[allow(dead_code)]
-            const $name: Self = Self(1);
-            cpuid_flag_constants!(1, $($tail)*);
-        }
-    };
-
-    //============ Possible most deeply nested macro invocation ===========//
-    ($i:expr, $name:ident) => {
-        #[allow(dead_code)]
-        const $name: Self = Self(1 << $i);
-    };
-
-    ($i:expr, "NULL") => {};
-
-    ("NULL") => {};
-
-    () => {};
-
-    // Also permit ending with a trailing ,
-    ($i:expr, $name:ident,) => {
-        #[allow(dead_code)]
-        const $name: Self = Self(1 << $i);
-    };
-
-    ($i:expr, "NULL",) => {};
-
-    ("NULL",) => {};
-
-    (,) => {};
-
-    // ============ Possible continuations that continue the recursion ===== //
-    ($i:expr, "NULL", $($tail:tt)+) => {
-        cpuid_flag_constants!($i + 1, $($tail)*);
-    };
-    ($i:expr, $name:ident, $($tail:tt)+) => {
-        #[allow(dead_code)]
-        const $name: Self = Self(1 << $i);
-        cpuid_flag_constants!($i + 1, $($tail)*);
-    };
-
 }
 
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<1, 0, { CpuidReg::EDX as u8 }>,
-            FPU, VME, DE, PSE,
-            TSC, MSR, PAE, MCE,
-            CX8, APIC, "NULL", SEP,
-            MTRR, PGE, MCA, CMOV,
-            PAT, PSE36, PN /* Intel psn */, CLFLUSH /* Intel clfsh */,
-            "NULL", DS /* INTEL DTS */, ACPI, MMX,
-            FXSR, SSE, SSE2, SS,
-            HT /* Intel htt */, TM, IA64, PBE,
-);
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<1, 0, { CpuidReg::ECX as u8 }>,
-            SSE3 /* Intel PNI,AMD sse3 */, PCLMULQDQ, DTES64, MONITOR,
-            DS_CPL, VMX, SMX, EST,
-            TM2, SSSE3, CID, "NULL",
-            FMA, CX16, XTPR, PDCM,
-            "NULL", PCID, DCA, SSE4_1,
-            SSE4_2, X2APIC, MOVBE, POPCNT,
-            TSC_DEADLINE, AES, XSAVE, "NULL" /* osxsave */,
-            AVX, F16C, RDRAND, HYPERVISOR,
-);
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
-            "NULL" /* fpu */, "NULL" /* vme */, "NULL" /* de */, "NULL" /* pse */,
-            "NULL" /* tsc */, "NULL" /* msr */, "NULL" /* pae */, "NULL" /* mce */,
-            "NULL" /* cx8 */, "NULL" /* apic */, "NULL", SYSCALL,
-            "NULL" /* mtrr */, "NULL" /* pge */, "NULL" /* mca */, "NULL" /* cmov */,
-            "NULL" /* pat */, "NULL" /* pse36 */, "NULL", "NULL" /* Linux mp */,
-            NX, "NULL", MMXEXT, "NULL" /* mmx */,
-            "NULL" /* fxsr */, FXSR_OPT, PDPE1GB, RDTSCP,
-            "NULL", LM, EXT_3DNOW, FIRST_3DNOW,
+macro_rules! impl_cpuid_feature_flags {
+    (function = $func:literal, index = $idx:literal, register = $reg:path, $($name_or_null:tt),+$(,)*) => {
+        impl CpuIdFeatureFlags<$func, $idx, {$reg as u8}> {
+            #[allow(dead_code)]
+            const SHORT_NAMES_PER_BIT: [&str; 32] = [$(null_to_empty_else_identity!($name_or_null)),+];
 
-);
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::ECX as u8}>,
-            LAHF_LM, CMP_LEGACY, SVM, EXTAPIC,
-            CR8LEGACY, ABM, SSE4A, MISALIGNSSE,
-            PREFETCH_3DNOW, OSVW, IBS, XOP,
-            SKINIT, WDT, "NULL", LWP,
-            FMA4, TCE, "NULL", NODEID_MSR,
-            "NULL", TBM, TOPOEXT, PERFCTR_CORE,
-            PERFCTR_NB, "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-);
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<7, 0, {CpuidReg::EBX as u8}>,
-            FSGSBASE, TSC_ADJUST, SGX, BMI1,
-            HLE, AVX2, FDP_EXCPTN_ONLY, SMEP,
-            BMI2, ERMS, INVPCID, RTM,
-            "NULL", ZERO_FCS_FDS, MPX, "NULL",
-            AVX512F, AVX512DQ, RDSEED, ADX,
-            SMAP, AVX512IFMA, PCOMMIT, CLFLUSHOPT,
-            CLWB, INTEL_PT, AVX512PF, AVX512ER,
-            AVX512CD, SHA_NI, AVX512BW, AVX512VL,
-);
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<7, 0, {CpuidReg::ECX as u8}>,
-            "NULL", AVX512VBMI, UMIP, PKU,
-            "NULL" /* ospke */, WAITPKG, AVX512VBMI2, "NULL",
-            GFNI, VAES, VPCLMULQDQ, AVX512VNNI,
-            AVX512BITALG, "NULL", AVX512_VPOPCNTDQ, "NULL",
-            LA57, "NULL", "NULL", "NULL",
-            "NULL", "NULL", RDPID, "NULL",
-            BUS_LOCK_DETECT, CLDEMOTE, "NULL", MOVDIRI,
-            MOVDIR64B, "NULL", SGXLC, PKS,
+            /// Construct a parametrized [`CpuIdFeatureFlags`] from a set of feature names.
+            ///
+            /// # Warning
+            ///
+            /// This function should only be called in const contexts to avoid runtime panics (and checks) as const generics does not yet
+            /// permit arrays (of string slices) there is currently no nice way to enforce this constraint. When Rust will permit arrays of string slices
+            /// as const generic parameters then we can ensure that the function is only evaluated at compile time (hence no possibilities for runtime panics).
+            #[allow(dead_code)]
+            const fn from_names(feature_names: &[&'static str]) -> Self {
+                    if feature_names.len() > 32 {
+                        panic!("There can be at most 32 feature flags in a CPUID register")
+                        }
+
+                    let mut i = 0;
+                    let mut set_flags = 0;
+                    // Loop over the FEATURE_NAMES. We need to use while loops with indices due to
+                    // const traits not yet being stable.
+                    while i < feature_names.len() {
+                        let feat_name = feature_names[i];
+                        // Loop until we find a matching feature in the predefined names
+                        let mut j = 0;
+                        // Unfortunately we need to check for equality byte for byte as this is a const function.
+                        let feat_name_bytes= feat_name.as_bytes();
+                        while j < 32 {
+                            let current_as_bytes = Self::SHORT_NAMES_PER_BIT[j].as_bytes();
+                            let length = current_as_bytes.len();
+                            if length != feat_name_bytes.len() {
+                                // No point in checking for equality as the string slices have different lengths
+                                j += 1;
+                                // If j becomes 32 then the feature was not found. This indicates a bug in the program hence we panic. Unfortunately we
+                                // cannot properly enforce this at compile time as of now (at least not without introducing loads of boiler plate).
+                                if j == 32 {
+                                    panic!("the specified feature does not exists, or is not defined for the chosen parametrization of CpuIdFeatureFlags");
+                                }
+                                continue;
+                            }
+                            let mut matches = true;
+                            let mut k = 0;
+                            while k < length {
+                                matches &= (current_as_bytes[k] == feat_name_bytes[k]);
+                                k += 1
+                            }
+                            if matches {
+                                set_flags |= (1u32 << j);
+                                break;
+                            }
+                            j += 1;
+                            if j == 32 {
+                                panic!("the specified feature does not exists, or is not defined for the chosen parametrization of CpuIdFeatureFlags");
+                            }
+                        }
+                        i += 1;
+                    }
+                    Self(set_flags)
+                }
+        }
+    };
+}
+
+impl_cpuid_feature_flags!(
+    function = 1,
+    index = 0,
+    register = CpuidReg::EDX,
+    "fpu",
+    "vme",
+    "de",
+    "pse",
+    "tsc",
+    "msr",
+    "pae",
+    "mce",
+    "cx8",
+    "apic",
+    NULL,
+    "sep",
+    "mtrr",
+    "pge",
+    "mca",
+    "cmov",
+    "pat",
+    "pse36",
+    "pn",      /* Intel psn */
+    "clflush", /* Intel clfsh */
+    NULL,
+    "ds", /* Intel dts */
+    "acpi",
+    "mmx",
+    "fxsr",
+    "sse",
+    "sse2",
+    "ss",
+    "ht", /* Intel htt */
+    "tm",
+    "ia64",
+    "pbe",
 );
 
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<7, 0, {CpuidReg::EDX as u8}>,
-    "NULL", "NULL", AVX512_4VNNIW, AVX512_4FMAPS,
-    FSRM, "NULL", "NULL", "NULL",
-    AVX512_VP2INTERSECT, "NULL", MD_CLEAR, "NULL",
-    "NULL", "NULL", SERIALIZE, "NULL",
-    TSX_LDTRK, "NULL", "NULL" /* pconfig */, ARCH_LBR,
-    "NULL", "NULL", AMX_BF16, AVX512_FP16,
-    AMX_TILE, AMX_INT8, SPEC_CTRL, STIBP,
-    FLUSH_L1D, ARCH_CAPABILITIES, CORE_CAPABILITY, SSBD,
+impl_cpuid_feature_flags!(
+    function = 1,
+    index = 0,
+    register = CpuidReg::ECX,
+    "pni", /* Intel,AMD sse3 */
+    "pclmulqdq",
+    "dtes64",
+    "monitor",
+    "ds-cpl",
+    "vmx",
+    "smx",
+    "est",
+    "tm2",
+    "ssse3",
+    "cid",
+    NULL,
+    "fma",
+    "cx16",
+    "xtpr",
+    "pdcm",
+    NULL,
+    "pcid",
+    "dca",
+    "sse4.1",
+    "sse4.2",
+    "x2apic",
+    "movbe",
+    "popcnt",
+    "tsc-deadline",
+    "aes",
+    "xsave",
+    NULL, /* osxsave */
+    "avx",
+    "f16c",
+    "rdrand",
+    "hypervisor",
+);
+impl_cpuid_feature_flags!(
+    function = 0x8000_0001,
+    index = 0,
+    register = CpuidReg::EDX,
+    NULL, /* fpu */
+    NULL, /* vme */
+    NULL, /* de */
+    NULL, /* pse */
+    NULL, /* tsc */
+    NULL, /* msr */
+    NULL, /* pae */
+    NULL, /* mce */
+    NULL, /* cx8 */
+    NULL, /* apic */
+    NULL,
+    "syscall",
+    NULL, /* mtrr */
+    NULL, /* pge */
+    NULL, /* mca */
+    NULL, /* cmov */
+    NULL, /* pat */
+    NULL, /* pse36 */
+    NULL,
+    NULL, /* Linux mp */
+    "nx",
+    NULL,
+    "mmxext",
+    NULL, /* mmx */
+    NULL, /* fxsr */
+    "fxsr-opt",
+    "pdpe1gb",
+    "rdtscp",
+    NULL,
+    "lm",
+    "3dnowext",
+    "3dnow",
 );
 
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<0xd,1, {CpuidReg::EAX as u8}>,
-            XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
-            XFD, "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
+impl_cpuid_feature_flags!(
+    function = 0x8000_0001,
+    index = 0,
+    register = CpuidReg::ECX,
+    "lahf-lm",
+    "cmp-legacy",
+    "svm",
+    "extapic",
+    "cr8legacy",
+    "abm",
+    "sse4a",
+    "misalignsse",
+    "3dnowprefetch",
+    "osvw",
+    "ibs",
+    "xop",
+    "skinit",
+    "wdt",
+    NULL,
+    "lwp",
+    "fma4",
+    "tce",
+    NULL,
+    "nodeid-msr",
+    NULL,
+    "tbm",
+    "topoext",
+    "perfctr-core",
+    "perfctr-nb",
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
 );
 
-cpuid_flag_constants!(
-    CpuIdFeatureFlags<6, 0, {CpuidReg::EAX as u8}>,
-            "NULL", "NULL", ARAT, "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
+impl_cpuid_feature_flags!(
+    function = 7,
+    index = 0,
+    register = CpuidReg::EBX,
+    "fsgsbase",
+    "tsc-adjust",
+    "sgx",
+    "bmi1",
+    "hle",
+    "avx2",
+    "fdp-excptn-only",
+    "smep",
+    "bmi2",
+    "erms",
+    "invpcid",
+    "rtm",
+    NULL,
+    "zero-fcs-fds",
+    "mpx",
+    NULL,
+    "avx512f",
+    "avx512dq",
+    "rdseed",
+    "adx",
+    "smap",
+    "avx512ifma",
+    "pcommit",
+    "clflushopt",
+    "clwb",
+    "intel-pt",
+    "avx512pf",
+    "avx512er",
+    "avx512cd",
+    "sha-ni",
+    "avx512bw",
+    "avx512vl",
+);
 
+impl_cpuid_feature_flags!(
+    function = 7,
+    index = 0,
+    register = CpuidReg::ECX,
+    NULL,
+    "avx512vbmi",
+    "umip",
+    "pku",
+    NULL, /* ospke */
+    "waitpkg",
+    "avx512vbmi2",
+    NULL,
+    "gfni",
+    "vaes",
+    "vpclmulqdq",
+    "avx512vnni",
+    "avx512bitalg",
+    NULL,
+    "avx512-vpopcntdq",
+    NULL,
+    "la57",
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    "rdpid",
+    NULL,
+    "bus-lock-detect",
+    "cldemote",
+    NULL,
+    "movdiri",
+    "movdir64b",
+    NULL,
+    "sgxlc",
+    "pks",
+);
+
+impl_cpuid_feature_flags!(
+    function = 7,
+    index = 0,
+    register = CpuidReg::EDX,
+    NULL,
+    NULL,
+    "avx512-4vnniw",
+    "avx512-4fmaps",
+    "fsrm",
+    NULL,
+    NULL,
+    NULL,
+    "avx512-vp2intersect",
+    NULL,
+    "md-clear",
+    NULL,
+    NULL,
+    NULL,
+    "serialize",
+    NULL,
+    "tsx-ldtrk",
+    NULL,
+    NULL, /* pconfig */
+    "arch-lbr",
+    NULL,
+    NULL,
+    "amx-bf16",
+    "avx512-fp16",
+    "amx-tile",
+    "amx-int8",
+    "spec-ctrl",
+    "stibp",
+    "flush-l1d",
+    "arch-capabilities",
+    "core-capability",
+    "ssbd",
+);
+
+impl_cpuid_feature_flags!(
+    function = 6,
+    index = 0,
+    register = CpuidReg::EAX,
+    NULL,
+    NULL,
+    "arat",
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+);
+
+impl_cpuid_feature_flags!(
+    function = 0xd,
+    index = 1,
+    register = CpuidReg::EAX,
+    "xsaveopt",
+    "xsavec",
+    "xgetbv1",
+    "xsaves",
+    "xfd",
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
 );
 
 pub struct CpuidPatch {
