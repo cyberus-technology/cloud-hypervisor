@@ -359,28 +359,16 @@ macro_rules! cpuid_flag_constants {
     };
 
     //============ Possible most deeply nested macro invocation ===========//
-    ($i:expr, $name:ident) => {
+    ($i:expr, $name:ident $(,)*) => {
         #[allow(dead_code)]
         const $name: Self = Self(1 << $i);
     };
 
-    ($i:expr, "NULL") => {};
+    ($i:expr, "NULL" $(,)*) => {};
 
-    ("NULL") => {};
+    ("NULL" $(,)*) => {};
 
-    () => {};
-
-    // Also permit ending with a trailing ,
-    ($i:expr, $name:ident,) => {
-        #[allow(dead_code)]
-        const $name: Self = Self(1 << $i);
-    };
-
-    ($i:expr, "NULL",) => {};
-
-    ("NULL",) => {};
-
-    (,) => {};
+    ($(,)*) => {};
 
     // ============ Possible continuations that continue the recursion ===== //
     ($i:expr, "NULL", $($tail:tt)+) => {
