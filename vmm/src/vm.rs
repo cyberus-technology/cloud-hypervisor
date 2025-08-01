@@ -2777,6 +2777,7 @@ impl Snapshottable for Vm {
             let amx = guard.cpus.features.amx;
             let phys_bits = physical_bits(&self.hypervisor, guard.cpus.max_phys_bits);
             let profile = guard.cpus.profile;
+            core::mem::drop(guard);
             arch::generate_common_cpuid(
                 &self.hypervisor,
                 &arch::CpuidConfig {
