@@ -927,7 +927,7 @@ pub fn generate_common_cpuid(
         CpuProfile::Host => {
             // When this is set we do nothing
         }
-        CpuProfile::CascadeLakeServerV1 => {
+        CpuProfile::CascadelakeServerV1 => {
             cpu_profile_feature_flags::CascadeLakeServerV1CpuIdFeatures::new().restrict(&mut cpuid);
         }
     }

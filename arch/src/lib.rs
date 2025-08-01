@@ -66,7 +66,7 @@ pub enum CpuProfile {
     #[default]
     Host,
     #[cfg(target_arch = "x86_64")]
-    CascadeLakeServerV1,
+    CascadelakeServerV1,
 }
 
 // TODO: Probably better to derive this
@@ -77,7 +77,7 @@ impl FromStr for CpuProfile {
         match s {
             "host" => Ok(Self::Host),
             #[cfg(target_arch = "x86_64")]
-            "cascadelake-server-v1" => Ok(Self::CascadeLakeServerV1),
+            "cascadelake-server-v1" => Ok(Self::CascadelakeServerV1),
             _ => Err("invalid cpu profile"),
         }
     }
