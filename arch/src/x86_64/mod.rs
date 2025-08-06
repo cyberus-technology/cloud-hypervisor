@@ -243,7 +243,7 @@ pub enum CpuidReg {
 
 /// A bitset of CPUID feature flags for a given leaf, sub-leaf and register triple
 /// (or function, index, register in KVM terms).
-struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(u32);
+struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(pub u32);
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::BitOr
     for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
 {
