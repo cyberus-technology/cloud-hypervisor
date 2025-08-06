@@ -1,21 +1,21 @@
 use hypervisor::arch::x86::CpuIdEntry;
 
-use super::{CpuIdFeatureFlags, CpuidReg};
+use super::{CpuIdEntryRegister, CpuidReg};
 
 pub(super) struct CascadeLakeServerV1CpuIdFeatures {
-    edx_1: CpuIdFeatureFlags<1, 0, { CpuidReg::EDX as u8 }>,
-    ecx_1: CpuIdFeatureFlags<1, 0, { CpuidReg::ECX as u8 }>,
-    edx_8000_0001h: CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::EDX as u8 }>,
-    ecx_8000_0001h: CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::ECX as u8 }>,
-    ebx_7_0: CpuIdFeatureFlags<7, 0, { CpuidReg::EBX as u8 }>,
-    ecx_7_0: CpuIdFeatureFlags<7, 0, { CpuidReg::ECX as u8 }>,
-    edx_7_0: CpuIdFeatureFlags<7, 0, { CpuidReg::EDX as u8 }>,
-    eax_0dh: CpuIdFeatureFlags<0xd, 1, { CpuidReg::EAX as u8 }>,
+    edx_1: CpuIdEntryRegister<1, 0, { CpuidReg::EDX as u8 }>,
+    ecx_1: CpuIdEntryRegister<1, 0, { CpuidReg::ECX as u8 }>,
+    edx_8000_0001h: CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8 }>,
+    ecx_8000_0001h: CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::ECX as u8 }>,
+    ebx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::EBX as u8 }>,
+    ecx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::ECX as u8 }>,
+    edx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::EDX as u8 }>,
+    eax_0dh: CpuIdEntryRegister<0xd, 1, { CpuidReg::EAX as u8 }>,
 }
 
 impl CascadeLakeServerV1CpuIdFeatures {
     pub(super) fn new() -> Self {
-        use CpuIdFeatureFlags as FF;
+        use CpuIdEntryRegister as FF;
         Self {
             edx_1: FF::VME
                 | FF::SSE2

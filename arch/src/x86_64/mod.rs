@@ -243,9 +243,9 @@ pub enum CpuidReg {
 
 /// A bitset of CPUID feature flags for a given leaf, sub-leaf and register triple
 /// (or function, index, register in KVM terms).
-struct CpuIdFeatureFlags<const FUNCTION: u32, const INDEX: u32, const REG: u8>(pub u32);
+pub struct CpuIdEntryRegister<const FUNCTION: u32, const INDEX: u32, const REG: u8>(pub u32);
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::BitOr
-    for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
+    for CpuIdEntryRegister<FUNCTION, INDEX, REG>
 {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -253,7 +253,7 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::BitOr
     }
 }
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::Not
-    for CpuIdFeatureFlags<FUNCTION, INDEX, REG>
+    for CpuIdEntryRegister<FUNCTION, INDEX, REG>
 {
     type Output = Self;
     fn not(self) -> Self::Output {
@@ -261,7 +261,9 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::Not
     }
 }
 
-impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> CpuIdFeatureFlags<FUNCTION, INDEX, REG> {
+impl<const FUNCTION: u32, const INDEX: u32, const REG: u8>
+    CpuIdEntryRegister<FUNCTION, INDEX, REG>
+{
     fn intersect_matching(&self, cpuid: &mut [CpuIdEntry]) {
         if let Some(entry) = cpuid.iter_mut().find(|entry| {
             entry.function == FUNCTION
@@ -379,7 +381,7 @@ macro_rules! cpuid_flag_constants {
 }
 
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<1, 0, { CpuidReg::EDX as u8 }>,
+    CpuIdEntryRegister<1, 0, { CpuidReg::EDX as u8 }>,
             FPU, VME, DE, PSE,
             TSC, MSR, PAE, MCE,
             CX8, APIC, "NULL", SEP,
@@ -390,7 +392,7 @@ cpuid_flag_constants!(
             HT /* Intel htt */, TM, IA64, PBE,
 );
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<1, 0, { CpuidReg::ECX as u8 }>,
+    CpuIdEntryRegister<1, 0, { CpuidReg::ECX as u8 }>,
             SSE3 /* Intel PNI,AMD sse3 */, PCLMULQDQ, DTES64, MONITOR,
             DS_CPL, VMX, SMX, EST,
             TM2, SSSE3, CID, "NULL",
@@ -401,7 +403,7 @@ cpuid_flag_constants!(
             AVX, F16C, RDRAND, HYPERVISOR,
 );
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
+    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
             "NULL" /* fpu */, "NULL" /* vme */, "NULL" /* de */, "NULL" /* pse */,
             "NULL" /* tsc */, "NULL" /* msr */, "NULL" /* pae */, "NULL" /* mce */,
             "NULL" /* cx8 */, "NULL" /* apic */, "NULL", SYSCALL,
@@ -413,7 +415,7 @@ cpuid_flag_constants!(
 
 );
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<0x8000_0001, 0, { CpuidReg::ECX as u8}>,
+    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::ECX as u8}>,
             LAHF_LM, CMP_LEGACY, SVM, EXTAPIC,
             CR8LEGACY, ABM, SSE4A, MISALIGNSSE,
             PREFETCH_3DNOW, OSVW, IBS, XOP,
@@ -424,7 +426,7 @@ cpuid_flag_constants!(
             "NULL", "NULL", "NULL", "NULL",
 );
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<7, 0, {CpuidReg::EBX as u8}>,
+    CpuIdEntryRegister<7, 0, {CpuidReg::EBX as u8}>,
             FSGSBASE, TSC_ADJUST, SGX, BMI1,
             HLE, AVX2, FDP_EXCPTN_ONLY, SMEP,
             BMI2, ERMS, INVPCID, RTM,
@@ -435,7 +437,7 @@ cpuid_flag_constants!(
             AVX512CD, SHA_NI, AVX512BW, AVX512VL,
 );
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<7, 0, {CpuidReg::ECX as u8}>,
+    CpuIdEntryRegister<7, 0, {CpuidReg::ECX as u8}>,
             "NULL", AVX512VBMI, UMIP, PKU,
             "NULL" /* ospke */, WAITPKG, AVX512VBMI2, "NULL",
             GFNI, VAES, VPCLMULQDQ, AVX512VNNI,
@@ -447,7 +449,7 @@ cpuid_flag_constants!(
 );
 
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<7, 0, {CpuidReg::EDX as u8}>,
+    CpuIdEntryRegister<7, 0, {CpuidReg::EDX as u8}>,
     "NULL", "NULL", AVX512_4VNNIW, AVX512_4FMAPS,
     FSRM, "NULL", "NULL", "NULL",
     AVX512_VP2INTERSECT, "NULL", MD_CLEAR, "NULL",
@@ -459,7 +461,7 @@ cpuid_flag_constants!(
 );
 
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<0xd,1, {CpuidReg::EAX as u8}>,
+    CpuIdEntryRegister<0xd,1, {CpuidReg::EAX as u8}>,
             XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
             XFD, "NULL", "NULL", "NULL",
             "NULL", "NULL", "NULL", "NULL",
@@ -471,7 +473,7 @@ cpuid_flag_constants!(
 );
 
 cpuid_flag_constants!(
-    CpuIdFeatureFlags<6, 0, {CpuidReg::EAX as u8}>,
+    CpuIdEntryRegister<6, 0, {CpuidReg::EAX as u8}>,
             "NULL", "NULL", ARAT, "NULL",
             "NULL", "NULL", "NULL", "NULL",
             "NULL", "NULL", "NULL", "NULL",
