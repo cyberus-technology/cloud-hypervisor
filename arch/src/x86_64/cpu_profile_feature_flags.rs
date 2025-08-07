@@ -1,112 +1,89 @@
-use hypervisor::arch::x86::CpuIdEntry;
+use super::{CpuIdEntryRegister, CpuIdFeatureFlags};
 
-use super::{CpuIdEntryRegister, CpuidReg};
-
-pub(super) struct CascadeLakeServerV1CpuIdFeatures {
-    edx_1: CpuIdEntryRegister<1, 0, { CpuidReg::EDX as u8 }>,
-    ecx_1: CpuIdEntryRegister<1, 0, { CpuidReg::ECX as u8 }>,
-    edx_8000_0001h: CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8 }>,
-    ecx_8000_0001h: CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::ECX as u8 }>,
-    ebx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::EBX as u8 }>,
-    ecx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::ECX as u8 }>,
-    edx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::EDX as u8 }>,
-    eax_0dh: CpuIdEntryRegister<0xd, 1, { CpuidReg::EAX as u8 }>,
-}
-
-impl CascadeLakeServerV1CpuIdFeatures {
-    pub(super) fn new() -> Self {
+impl CpuIdFeatureFlags {
+    pub const fn intel_cascadelake_v1() -> Self {
         use CpuIdEntryRegister as FF;
+
         Self {
             edx_1: FF::VME
-                | FF::SSE2
-                | FF::SSE
-                | FF::FXSR
-                | FF::MMX
-                | FF::CLFLUSH
-                | FF::PSE36
-                | FF::PAT
-                | FF::CMOV
-                | FF::MCA
-                | FF::PGE
-                | FF::MTRR
-                | FF::SEP
-                | FF::APIC
-                | FF::CX8
-                | FF::MCE
-                | FF::PAE
-                | FF::MSR
-                | FF::TSC
-                | FF::PSE
-                | FF::DE
-                | FF::FPU,
+                .or(FF::SSE2)
+                .or(FF::SSE)
+                .or(FF::FXSR)
+                .or(FF::MMX)
+                .or(FF::CLFLUSH)
+                .or(FF::PSE36)
+                .or(FF::PAT)
+                .or(FF::CMOV)
+                .or(FF::MCA)
+                .or(FF::PGE)
+                .or(FF::MTRR)
+                .or(FF::SEP)
+                .or(FF::APIC)
+                .or(FF::CX8)
+                .or(FF::MCE)
+                .or(FF::PAE)
+                .or(FF::MSR)
+                .or(FF::TSC)
+                .or(FF::PSE)
+                .or(FF::DE)
+                .or(FF::FPU),
 
             ecx_1: FF::AVX
-                | FF::XSAVE
-                | FF::AES
-                | FF::POPCNT
-                | FF::X2APIC
-                | FF::SSE4_2
-                | FF::SSE4_1
-                | FF::CX16
-                | FF::SSSE3
-                | FF::PCLMULQDQ
-                | FF::SSE3
-                | FF::TSC_DEADLINE
-                | FF::FMA
-                | FF::MOVBE
-                | FF::PCID
-                | FF::F16C
-                | FF::RDRAND,
+                .or(FF::XSAVE)
+                .or(FF::AES)
+                .or(FF::POPCNT)
+                .or(FF::X2APIC)
+                .or(FF::SSE4_2)
+                .or(FF::SSE4_1)
+                .or(FF::CX16)
+                .or(FF::SSSE3)
+                .or(FF::PCLMULQDQ)
+                .or(FF::SSE3)
+                .or(FF::TSC_DEADLINE)
+                .or(FF::FMA)
+                .or(FF::MOVBE)
+                .or(FF::PCID)
+                .or(FF::F16C)
+                .or(FF::RDRAND),
 
-            edx_8000_0001h: FF::LM | FF::PDPE1GB | FF::RDTSCP | FF::NX | FF::SYSCALL,
-            ecx_8000_0001h: FF::ABM | FF::LAHF_LM | FF::PREFETCH_3DNOW,
+            edx_8000_0001h: FF::LM
+                .or(FF::PDPE1GB)
+                .or(FF::RDTSCP)
+                .or(FF::NX)
+                .or(FF::SYSCALL),
+            ecx_8000_0001h: FF::ABM.or(FF::LAHF_LM).or(FF::PREFETCH_3DNOW),
             ebx_7_0: FF::FSGSBASE
-                | FF::BMI1
-                | FF::HLE
-                | FF::AVX2
-                | FF::SMEP
-                | FF::BMI2
-                | FF::ERMS
-                | FF::INVPCID
-                | FF::RTM
-                | FF::RDSEED
-                | FF::ADX
-                | FF::SMAP
-                | FF::CLWB
-                | FF::AVX512F
-                | FF::AVX512DQ
-                | FF::AVX512BW
-                | FF::AVX512CD
-                | FF::AVX512VL
-                | FF::CLFLUSHOPT,
-            ecx_7_0: FF::PKU | FF::AVX512VNNI,
-            edx_7_0: FF::SPEC_CTRL | FF::SSBD,
-            eax_0dh: FF::XSAVEOPT | FF::XSAVEC | FF::XGETBV1,
+                .or(FF::BMI1)
+                .or(FF::HLE)
+                .or(FF::AVX2)
+                .or(FF::SMEP)
+                .or(FF::BMI2)
+                .or(FF::ERMS)
+                .or(FF::INVPCID)
+                .or(FF::RTM)
+                .or(FF::RDSEED)
+                .or(FF::ADX)
+                .or(FF::SMAP)
+                .or(FF::CLWB)
+                .or(FF::AVX512F)
+                .or(FF::AVX512DQ)
+                .or(FF::AVX512BW)
+                .or(FF::AVX512CD)
+                .or(FF::AVX512VL)
+                .or(FF::CLFLUSHOPT),
+            ecx_7_0: FF::PKU.or(FF::AVX512VNNI),
+            edx_7_0: FF::SPEC_CTRL.or(FF::SSBD),
+            eax_0dh_1: FF::XSAVEOPT.or(FF::XSAVEC).or(FF::XGETBV1),
+            eax_7_1: FF::NULL,
+            ecx_7_1: FF::NULL,
+            edx_7_1: FF::NULL,
+            edx_7_2: FF::NULL,
+            ecx_14h: FF::NULL,
+            ecx_24h_1: FF::NULL,
+            edx_8000_0007h: FF::NULL,
+            ebx_8000_0008h: FF::NULL,
+            edx_8000_000ah: FF::NULL,
+            eax_8000_0021h: FF::NULL,
         }
-    }
-
-    /// Restricts the given entries by performing bitwise intersections of registers
-    /// per set of matching parameters.
-    pub(super) fn restrict(self, cpuid: &mut [CpuIdEntry]) {
-        // NOTE: This might get a bit repetetive when we get more structs in this module.
-        // Might be worth introducing a proc macro for this at some point...
-        let Self {
-            edx_1,
-            ecx_1,
-            edx_8000_0001h,
-            ecx_8000_0001h,
-            ebx_7_0,
-            ecx_7_0,
-            edx_7_0,
-            eax_0dh,
-        } = self;
-        edx_1.intersect_matching(cpuid);
-        ecx_1.intersect_matching(cpuid);
-        edx_8000_0001h.intersect_matching(cpuid);
-        ecx_8000_0001h.intersect_matching(cpuid);
-        ebx_7_0.intersect_matching(cpuid);
-        ecx_7_0.intersect_matching(cpuid);
-        edx_7_0.intersect_matching(cpuid);
-        eax_0dh.intersect_matching(cpuid);
     }
 }

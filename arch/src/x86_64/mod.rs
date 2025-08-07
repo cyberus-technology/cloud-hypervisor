@@ -29,7 +29,7 @@ use vm_memory::{
     GuestMemoryRegion, GuestUsize,
 };
 
-use crate::{CpuProfile, GuestMemoryMmap, InitramfsConfig, RegionType};
+use crate::{GuestMemoryMmap, InitramfsConfig, RegionType};
 mod smbios;
 use std::arch::x86_64;
 #[cfg(feature = "tdx")]
@@ -120,6 +120,15 @@ impl SgxEpcRegion {
     pub fn insert(&mut self, id: String, epc_section: SgxEpcSection) {
         self.epc_sections.insert(id, epc_section);
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CpuProfile {
+    #[default]
+    Host,
+    #[cfg(target_arch = "x86_64")]
+    CascadelakeServerV1,
 }
 
 pub struct CpuidConfig {
@@ -243,35 +252,33 @@ pub enum CpuidReg {
 
 /// A bitset of CPUID feature flags for a given leaf, sub-leaf and register triple
 /// (or function, index, register in KVM terms).
-pub struct CpuIdEntryRegister<const FUNCTION: u32, const INDEX: u32, const REG: u8>(pub u32);
-impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::BitOr
-    for CpuIdEntryRegister<FUNCTION, INDEX, REG>
-{
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self(self.0 | rhs.0)
-    }
-}
-impl<const FUNCTION: u32, const INDEX: u32, const REG: u8> std::ops::Not
-    for CpuIdEntryRegister<FUNCTION, INDEX, REG>
-{
-    type Output = Self;
-    fn not(self) -> Self::Output {
-        Self(!self.0)
-    }
-}
+pub struct CpuIdEntryRegister<const FUNCTION: u32, const INDEX: u32, const REG: u8>(u32);
 
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8>
     CpuIdEntryRegister<FUNCTION, INDEX, REG>
 {
+    const NULL: Self = Self(0);
+    // Workaround until we can use BitOr in const contexts
+    pub const fn or(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+    /// Represents this [`CpuIdEntryRegister`] as a bitset in terms of a [`u32`].
+    ///
+    /// The returned representation does not track the metadata consisting of
+    /// the function/leaf, index/subleaf and register name.
+    pub const fn into_raw(&self) -> u32 {
+        self.0
+    }
     fn intersect_matching(&self, cpuid: &mut [CpuIdEntry]) {
-        if let Some(entry) = cpuid.iter_mut().find(|entry| {
+        let mut found_matching = false;
+        for entry in cpuid.iter_mut().filter(|entry| {
             entry.function == FUNCTION
                 && entry.index == INDEX
                 // We only care about the cpuid entries with a valid index flag in KVM terms.
                 // TODO: Is this indeed the case?
                 && entry.flags == CPUID_FLAG_VALID_INDEX
         }) {
+            found_matching = true;
             let mut updated = 0;
             if REG == { CpuidReg::EAX as u8 } {
                 entry.eax &= self.0;
@@ -320,7 +327,8 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8>
                     REG
                 );
             }
-        } else {
+        }
+        if (!found_matching) && (self.0 != 0) {
             // TODO: Better log or return an error here
             log::warn!("no entry matched");
         }
@@ -485,6 +493,85 @@ cpuid_flag_constants!(
 
 );
 
+/// A set of CPUID feature flags consisting of the registers for the various leaves describing
+/// CPU feature flags.
+///
+/// # Feature related Registers that are ignored
+///
+/// - 0x12: SGX capabilities (this is handled separately for now)
+/// - 0x19: Intel key locker features (ignored, but why?)
+/// - 0x1E, EXC=1: TMUL information (this is handled separately for now)
+/// - TODO: 0x8000_0001F: Encrypted Memory Capabilities
+/// - 0xC000_0000: Highest Centaur Extended Function (out of scope for now)
+/// - 0xC000_0001: Centaur Feature Information (out of scope for now)
+/// # Constructors
+///
+/// This struct has constructors for each of the currently supported CPU profiles.
+// For DEVELOPERS: The CPU profile constructors are located in [`crate::x86_64::cpu_profile_feature_flags`](crate::x86_64::cpu_profile_feature_flags).
+pub struct CpuIdFeatureFlags {
+    pub edx_1: CpuIdEntryRegister<1, 0, { CpuidReg::EDX as u8 }>,
+    pub ecx_1: CpuIdEntryRegister<1, 0, { CpuidReg::ECX as u8 }>,
+    pub ebx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::EBX as u8 }>,
+    pub ecx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::ECX as u8 }>,
+    pub edx_7_0: CpuIdEntryRegister<7, 0, { CpuidReg::EDX as u8 }>,
+    pub eax_7_1: CpuIdEntryRegister<7, 1, { CpuidReg::EAX as u8 }>,
+    pub ecx_7_1: CpuIdEntryRegister<7, 1, { CpuidReg::ECX as u8 }>,
+    pub edx_7_1: CpuIdEntryRegister<7, 1, { CpuidReg::EDX as u8 }>,
+    pub edx_7_2: CpuIdEntryRegister<7, 2, { CpuidReg::EDX as u8 }>,
+    pub eax_0dh_1: CpuIdEntryRegister<0xd, 1, { CpuidReg::EAX as u8 }>,
+    pub ecx_14h: CpuIdEntryRegister<0x14, 0, { CpuidReg::ECX as u8 }>,
+    pub ecx_24h_1: CpuIdEntryRegister<0x24, 1, { CpuidReg::ECX as u8 }>,
+    pub edx_8000_0001h: CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8 }>,
+    pub ecx_8000_0001h: CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::ECX as u8 }>,
+    pub edx_8000_0007h: CpuIdEntryRegister<0x8000_0007, 0, { CpuidReg::EDX as u8 }>,
+    pub ebx_8000_0008h: CpuIdEntryRegister<0x8000_0008, 0, { CpuidReg::EBX as u8 }>,
+    /// FEAT_SVM in QEMU
+    pub edx_8000_000ah: CpuIdEntryRegister<0x8000_000A, 0, { CpuidReg::EDX as u8 }>,
+    pub eax_8000_0021h: CpuIdEntryRegister<0x8000_0021, 0, { CpuidReg::EAX as u8 }>,
+}
+
+impl CpuIdFeatureFlags {
+    fn restrict(&self, cpuid: &mut [CpuIdEntry]) {
+        let Self {
+            edx_1,
+            ecx_1,
+            ebx_7_0,
+            ecx_7_0,
+            edx_7_0,
+            eax_7_1,
+            ecx_7_1,
+            edx_7_1,
+            edx_7_2,
+            eax_0dh_1,
+            ecx_14h,
+            ecx_24h_1,
+            edx_8000_0001h,
+            ecx_8000_0001h,
+            edx_8000_0007h,
+            ebx_8000_0008h,
+            edx_8000_000ah,
+            eax_8000_0021h,
+        } = self;
+        edx_1.intersect_matching(cpuid);
+        ecx_1.intersect_matching(cpuid);
+        ebx_7_0.intersect_matching(cpuid);
+        ecx_7_0.intersect_matching(cpuid);
+        edx_7_0.intersect_matching(cpuid);
+        eax_7_1.intersect_matching(cpuid);
+        ecx_7_1.intersect_matching(cpuid);
+        edx_7_1.intersect_matching(cpuid);
+        edx_7_2.intersect_matching(cpuid);
+        eax_0dh_1.intersect_matching(cpuid);
+        ecx_14h.intersect_matching(cpuid);
+        ecx_24h_1.intersect_matching(cpuid);
+        edx_8000_0001h.intersect_matching(cpuid);
+        ecx_8000_0001h.intersect_matching(cpuid);
+        edx_8000_0007h.intersect_matching(cpuid);
+        ebx_8000_0008h.intersect_matching(cpuid);
+        edx_8000_000ah.intersect_matching(cpuid);
+        eax_8000_0021h.intersect_matching(cpuid);
+    }
+}
 pub struct CpuidPatch {
     pub function: u32,
     pub index: u32,
@@ -908,15 +995,24 @@ pub fn generate_common_cpuid(
         .get_supported_cpuid()
         .map_err(Error::CpuidGetSupported)?;
 
-    // Restrict the supported CPUID to the features supported by the cpu profile
+    // Restrict the supported CPUID to the features supported by the cpu profile.
+    /* NOTE:
+        The compiler will probably inline all function calls in the following match. This
+        should be fine for a few dozen cpu profiles, but since `CpuIdFeatureFlags` is a fairly large
+        struct it can lead to potential stack overflow if/when we implement really many cpu profiles.
+
+        If that becomes the case we recommend changing the match arms to return a function pointer to the relevant
+        constructor instead.
+    */
     match config.profile {
         CpuProfile::Host => {
             // When this is set we do nothing
         }
         CpuProfile::CascadelakeServerV1 => {
-            cpu_profile_feature_flags::CascadeLakeServerV1CpuIdFeatures::new().restrict(&mut cpuid);
+            CpuIdFeatureFlags::intel_cascadelake_v1().restrict(&mut cpuid);
         }
     }
+
     CpuidPatch::patch_cpuid(&mut cpuid, cpuid_patches);
 
     if let Some(sgx_epc_sections) = &config.sgx_epc_sections {

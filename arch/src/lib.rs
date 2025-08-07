@@ -60,13 +60,16 @@ pub enum Error {
 /// Type for returning public functions outcome.
 pub type Result<T> = result::Result<T, Error>;
 
+#[cfg(target_arch = "x86_64")]
+pub use crate::x86_64::CpuProfile;
+// Only concentrate on X86_64 for now, but keep it here to simplify imports in other crates, regardless of target.
+// In the future we may add definitions for more target arches, and this can still be used as a fallback
+#[cfg(not(target_arch = "x86_64"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CpuProfile {
     #[default]
     Host,
-    #[cfg(target_arch = "x86_64")]
-    CascadelakeServerV1,
 }
 
 // TODO: Probably better to derive this
