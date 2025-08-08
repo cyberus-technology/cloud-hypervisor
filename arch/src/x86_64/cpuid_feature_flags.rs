@@ -162,15 +162,19 @@ cpuid_flag_constants!(
             TSC_DEADLINE, AES, XSAVE, "NULL" /* osxsave */,
             AVX, F16C, RDRAND, HYPERVISOR,
 );
+/*
+TODO: The duplicate values only set for AMD are currently ignored (set to "NULL"). We need to
+change this when we add the first AMD cpu profile.
+*/
 cpuid_flag_constants!(
     CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
-            "NULL" /* fpu */, "NULL" /* vme */, "NULL" /* de */, "NULL" /* pse */,
-            "NULL" /* tsc */, "NULL" /* msr */, "NULL" /* pae */, "NULL" /* mce */,
-            "NULL" /* cx8 */, "NULL" /* apic */, "NULL", SYSCALL,
-            "NULL" /* mtrr */, "NULL" /* pge */, "NULL" /* mca */, "NULL" /* cmov */,
-            "NULL" /* pat */, "NULL" /* pse36 */, "NULL", "NULL" /* Linux mp */,
-            NX, "NULL", MMXEXT, "NULL" /* mmx */,
-            "NULL" /* fxsr */, FXSR_OPT, PDPE1GB, RDTSCP,
+            "NULL" /* AMD_FPU */, "NULL" /* AMD_VME */, "NULL" /* AMD_DE */, "NULL" /* AMD_PSE */,
+            "NULL" /* AMD_TSC */, "NULL" /* AMD_MSR */, "NULL" /* AMD_PAE */, "NULL" /* AMD_MCE */,
+            "NULL" /* AMD_CX8 */, "NULL" /* AMD_APIC */, "NULL", SYSCALL,
+            "NULL" /* AMD_MTRR */, "NULL" /* AMD_PGE */, "NULL" /* AMD_MCA */, "NULL" /* AMD_CMOV */,
+            "NULL" /* AMD_PAT */, "NULL" /* AMD_PSE36 */, "NULL", "NULL" /* AMD ECC */,
+            NX, "NULL", MMXEXT, "NULL" /* AMD_MMX */,
+            "NULL" /* AMD_FXSR */, FXSR_OPT, PDPE1GB, RDTSCP,
             "NULL", LM, EXT_3DNOW, FIRST_3DNOW,
 
 );
