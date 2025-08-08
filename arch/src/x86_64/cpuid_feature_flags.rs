@@ -162,33 +162,21 @@ cpuid_flag_constants!(
             TSC_DEADLINE, AES, XSAVE, "NULL" /* osxsave */,
             AVX, F16C, RDRAND, HYPERVISOR,
 );
-/*
-TODO: The duplicate values only set for AMD are currently ignored (set to "NULL"). We need to
-change this when we add the first AMD cpu profile.
-*/
+
+// https://en.wikipedia.org/wiki/CPUID#EAX=6:_Thermal_and_Power_Management
 cpuid_flag_constants!(
-    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
-            "NULL" /* AMD_FPU */, "NULL" /* AMD_VME */, "NULL" /* AMD_DE */, "NULL" /* AMD_PSE */,
-            "NULL" /* AMD_TSC */, "NULL" /* AMD_MSR */, "NULL" /* AMD_PAE */, "NULL" /* AMD_MCE */,
-            "NULL" /* AMD_CX8 */, "NULL" /* AMD_APIC */, "NULL", SYSCALL,
-            "NULL" /* AMD_MTRR */, "NULL" /* AMD_PGE */, "NULL" /* AMD_MCA */, "NULL" /* AMD_CMOV */,
-            "NULL" /* AMD_PAT */, "NULL" /* AMD_PSE36 */, "NULL", "NULL" /* AMD ECC */,
-            NX, "NULL", MMXEXT, "NULL" /* AMD_MMX */,
-            "NULL" /* AMD_FXSR */, FXSR_OPT, PDPE1GB, RDTSCP,
-            "NULL", LM, EXT_3DNOW, FIRST_3DNOW,
+    CpuIdEntryRegister<6, 0, {CpuidReg::EAX as u8}>,
+            "NULL", "NULL", ARAT, "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
 
 );
-cpuid_flag_constants!(
-    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::ECX as u8}>,
-            LAHF_LM, CMP_LEGACY, SVM, EXTAPIC,
-            CR8LEGACY, ABM, SSE4A, MISALIGNSSE,
-            PREFETCH_3DNOW, OSVW, IBS, XOP,
-            SKINIT, WDT, "NULL", LWP,
-            FMA4, TCE, "NULL", NODEID_MSR,
-            "NULL", TBM, TOPOEXT, PERFCTR_CORE,
-            PERFCTR_NB, "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-);
+
 cpuid_flag_constants!(
     CpuIdEntryRegister<7, 0, {CpuidReg::EBX as u8}>,
             FSGSBASE, TSC_ADJUST, SGX, BMI1,
@@ -224,10 +212,71 @@ cpuid_flag_constants!(
     FLUSH_L1D, ARCH_CAPABILITIES, CORE_CAPABILITY, SSBD,
 );
 
+// https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=1:_Extended_Features
+cpuid_flag_constants!(
+    CpuIdEntryRegister<7, 1, {CpuidReg::ECX as u8}>,
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", MSR_IMM, "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+
+);
+cpuid_flag_constants!(
+    CpuIdEntryRegister<7, 1, {CpuidReg::EAX as u8}>,
+    SHA512, SM3, SM4, "NULL",
+    AVX_VNNI, AVX512_BF16, "NULL", CMPCCXADD,
+    "NULL", "NULL", FZRM, FSRS,
+    FSRC, "NULL", "NULL", "NULL",
+    "NULL", FRED, LKGS, WRMSRNS,
+    "NULL", AMX_FP16, "NULL", AVX_IFMA,
+    "NULL", "NULL", LAM, "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+);
+
+cpuid_flag_constants!(
+    CpuIdEntryRegister<7, 1, {CpuidReg::EDX as u8}>,
+    "NULL", "NULL", "NULL", "NULL",
+    AVX_VNNI_INT8, AVX_NE_CONVERT, "NULL", "NULL",
+    AMX_COMPLEX, "NULL", AVX_VNNI_INT16, "NULL",
+    "NULL", "NULL", PREFETCHITI, "NULL",
+    "NULL", "NULL", "NULL", AVX10,
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+);
+
+cpuid_flag_constants!(
+    CpuIdEntryRegister<7, 2, {CpuidReg::EDX as u8}>,
+    INTEL_PSFD, IPRED_CTRL, RRSBA_CTRL, DDPD_U,
+    BHI_CTRL, MCDT_NO, "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+);
 cpuid_flag_constants!(
     CpuIdEntryRegister<0xd,1, {CpuidReg::EAX as u8}>,
-            XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
-            XFD, "NULL", "NULL", "NULL",
+    XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
+    XFD, "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+);
+
+// https://en.wikipedia.org/wiki/CPUID#EAX=24h,_ECX=1:_Discrete_AVX10_Features
+cpuid_flag_constants!(
+    CpuIdEntryRegister<0x24, 1, {CpuidReg::ECX as u8}>,
+        VPMM, "NULL", AVX_10_VNNI_INT, "NULL",
+            "NULL", "NULL", "NULL", "NULL",
             "NULL", "NULL", "NULL", "NULL",
             "NULL", "NULL", "NULL", "NULL",
             "NULL", "NULL", "NULL", "NULL",
@@ -236,17 +285,44 @@ cpuid_flag_constants!(
             "NULL", "NULL", "NULL", "NULL",
 );
 
+/*
+TODO: The duplicate values only set for AMD are currently ignored (set to "NULL"). We need to
+change this when we add the first AMD cpu profile.
+*/
 cpuid_flag_constants!(
-    CpuIdEntryRegister<6, 0, {CpuidReg::EAX as u8}>,
-            "NULL", "NULL", ARAT, "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
+    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
+            "NULL" /* AMD_FPU */, "NULL" /* AMD_VME */, "NULL" /* AMD_DE */, "NULL" /* AMD_PSE */,
+            "NULL" /* AMD_TSC */, "NULL" /* AMD_MSR */, "NULL" /* AMD_PAE */, "NULL" /* AMD_MCE */,
+            "NULL" /* AMD_CX8 */, "NULL" /* AMD_APIC */, "NULL", SYSCALL,
+            "NULL" /* AMD_MTRR */, "NULL" /* AMD_PGE */, "NULL" /* AMD_MCA */, "NULL" /* AMD_CMOV */,
+            "NULL" /* AMD_PAT */, "NULL" /* AMD_PSE36 */, "NULL", "NULL" /* AMD ECC */,
+            NX, "NULL", MMXEXT, "NULL" /* AMD_MMX */,
+            "NULL" /* AMD_FXSR */, FXSR_OPT, PDPE1GB, RDTSCP,
+            "NULL", LM, EXT_3DNOW, FIRST_3DNOW,
 
+);
+cpuid_flag_constants!(
+    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::ECX as u8}>,
+            LAHF_LM, CMP_LEGACY, SVM, EXTAPIC,
+            CR8LEGACY, ABM, SSE4A, MISALIGNSSE,
+            PREFETCH_3DNOW, OSVW, IBS, XOP,
+            SKINIT, WDT, "NULL", LWP,
+            FMA4, TCE, "NULL", NODEID_MSR,
+            "NULL", TBM, TOPOEXT, PERFCTR_CORE,
+            PERFCTR_NB, "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+);
+
+cpuid_flag_constants!(
+    CpuIdEntryRegister<0x8000_0007, 0, {CpuidReg::EDX as u8}>,
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            INVTSC, "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL",
 );
 
 /// A set of CPUID feature flags consisting of the registers for the various leaves describing
