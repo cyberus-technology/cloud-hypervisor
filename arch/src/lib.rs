@@ -16,7 +16,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, result};
 
-use serde::{Deserialize, Serialize};
+use serde::{de::IntoDeserializer, Deserialize, Serialize};
 use thiserror::Error;
 
 #[cfg(target_arch = "x86_64")]
@@ -61,9 +61,7 @@ pub enum Error {
 pub type Result<T> = result::Result<T, Error>;
 
 #[cfg(target_arch = "x86_64")]
-pub use crate::x86_64::CpuProfile;
-// Only concentrate on X86_64 for now, but keep it here to simplify imports in other crates, regardless of target.
-// In the future we may add definitions for more target arches, and this can still be used as a fallback
+pub use crate::x86_64::{CpuIdEntryRegister, CpuIdFeatureFlags, CpuProfile};
 #[cfg(not(target_arch = "x86_64"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -72,17 +70,16 @@ pub enum CpuProfile {
     Host,
 }
 
-// TODO: Probably better to derive this
 impl FromStr for CpuProfile {
-    // TODO: Use a proper error type
-    type Err = &'static str;
+    type Err = serde::de::value::Error;
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        match s {
-            "host" => Ok(Self::Host),
-            #[cfg(target_arch = "x86_64")]
-            "cascadelake-server-v1" => Ok(Self::CascadelakeServerV1),
-            _ => Err("invalid cpu profile"),
-        }
+        // Should accept both plain strings, and strings surrounded by `"`.
+        let normalized = s
+            .strip_prefix('"')
+            .unwrap_or(s)
+            .strip_suffix('"')
+            .unwrap_or(s);
+        Self::deserialize(normalized.into_deserializer())
     }
 }
 

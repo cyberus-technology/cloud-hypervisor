@@ -1,4 +1,4 @@
-use super::{CpuIdEntryRegister, CpuIdFeatureFlags};
+use crate::x86_64::cpuid_feature_flags::{CpuIdEntryRegister, CpuIdFeatureFlags};
 
 impl CpuIdFeatureFlags {
     pub const fn intel_cascadelake_v1() -> Self {
