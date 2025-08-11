@@ -87,242 +87,345 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8>
     }
 }
 
-/// Reduces boilerplate when implementing CpuIdFeatureFlag constants.
-/// One passes in a parameterized CpuIdFeatureFlags together with
-/// a name per bit in the 32bit bitset.
+/// Generates multiple constants for [`CpuIdEntryRegister`] without having to repeat the function, index, register parameters every time.
 ///
-/// For lower order bits that should not have any associated constant, appearing
-/// before a higher order bit that needs a constant, you can simply place a "NULL"
-/// in its place.
-macro_rules! cpuid_flag_constants {
-    /* NOTE: We allow dead code within this macro as we may want to use certain
-     unused constants in the feature when introducing more cpu profiles.
-     The alternative would be to fill the macro invocations with more "NULL"
-     entries.
-    */
-    //============ Possible starting points ===========//
-    ($t:ty, $name:ident) => {
-        impl $t {
-            #[allow(dead_code)]
-            pub const $name: Self = Self(1);
+/// Also produces decent documentation for each constant including the parameters, the bit position and the wikipedia entry where the meaning of each feature flag for
+/// the current (function, index, register) triple can be found.
+///
+/// Invocations have the following named arguments in the following order:
+/// - `wiki`: A string with the link to the wikipedia entry describing the various values in this leaf, subleaf, register triple (or function, index, register in KVM terms).
+/// - `function`: The leaf for the CPUID entry (called function in KVM terminology).
+/// - `index`: The subleaf for the CPUID entry (called index in KVM terminology).
+/// - `register`: The register where the feature bits are located (valid inputs are `eax`, `ebx`, `ecx` and `edx`. These are idents and not string literals).
+/// - A list of tuples where the first is the name of the constant and the second is its corresponding bit position.
+macro_rules! impl_cpuid_entry_register_constants {
+    (wiki = $wiki:literal, function = $function:literal, index = $index:literal, register = $register:ident, [$(($name:ident, $position:literal)),+$(,)*]) => {
+        paste::paste! {
+            impl CpuIdEntryRegister<$function, $index, {CpuidReg::[<$register:upper>] as u8}> {
+                $(
+                    #[doc = "Bit `" $position "` in register `" $register "` of CPUID function = `" $function "`, index = `" $index "`."]
+                    #[doc = "\n\nSee [this section of the CPUID article in wikipedia]( " $wiki " ) for more information"]
+                    pub const $name: Self = Self(1u32 << $position);
+                )+
+            }
         }
     };
-    ($t:ty, "NULL", $($tail:tt)*) => {
-        impl $t {
-            cpuid_flag_constants!(1, $($tail)*);
-        }
-    };
-    ($t:ty, $name:ident, $($tail:tt)*) => {
-        impl $t {
-            #[allow(dead_code)]
-            pub const $name: Self = Self(1);
-            cpuid_flag_constants!(1, $($tail)*);
-        }
-    };
-
-    //============ Possible most deeply nested macro invocation ===========//
-    ($i:expr, $name:ident $(,)*) => {
-        #[allow(dead_code)]
-        pub const $name: Self = Self(1 << $i);
-    };
-
-    ($i:expr, "NULL" $(,)*) => {};
-
-    // ============ Possible continuations that continue the recursion ===== //
-    ($i:expr, "NULL", $($tail:tt)+) => {
-        cpuid_flag_constants!($i + 1, $($tail)*);
-    };
-    ($i:expr, $name:ident, $($tail:tt)+) => {
-        #[allow(dead_code)]
-        pub const $name: Self = Self(1 << $i);
-        cpuid_flag_constants!($i + 1, $($tail)*);
-    };
-
 }
 
-cpuid_flag_constants!(
-    CpuIdEntryRegister<1, 0, { CpuidReg::EDX as u8 }>,
-            FPU, VME, DE, PSE,
-            TSC, MSR, PAE, MCE,
-            CX8, APIC, "NULL", SEP,
-            MTRR, PGE, MCA, CMOV,
-            PAT, PSE36, PN /* Intel psn */, CLFLUSH /* Intel clfsh */,
-            "NULL", DS /* INTEL DTS */, ACPI, MMX,
-            FXSR, SSE, SSE2, SS,
-            HT /* Intel htt */, TM, IA64, PBE,
-);
-cpuid_flag_constants!(
-    CpuIdEntryRegister<1, 0, { CpuidReg::ECX as u8 }>,
-            SSE3 /* Intel PNI,AMD sse3 */, PCLMULQDQ, DTES64, MONITOR,
-            DS_CPL, VMX, SMX, EST,
-            TM2, SSSE3, CID, "NULL",
-            FMA, CX16, XTPR, PDCM,
-            "NULL", PCID, DCA, SSE4_1,
-            SSE4_2, X2APIC, MOVBE, POPCNT,
-            TSC_DEADLINE, AES, XSAVE, "NULL" /* osxsave */,
-            AVX, F16C, RDRAND, HYPERVISOR,
-);
-
-// https://en.wikipedia.org/wiki/CPUID#EAX=6:_Thermal_and_Power_Management
-cpuid_flag_constants!(
-    CpuIdEntryRegister<6, 0, {CpuidReg::EAX as u8}>,
-            "NULL", "NULL", ARAT, "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-
-);
-
-cpuid_flag_constants!(
-    CpuIdEntryRegister<7, 0, {CpuidReg::EBX as u8}>,
-            FSGSBASE, TSC_ADJUST, SGX, BMI1,
-            HLE, AVX2, FDP_EXCPTN_ONLY, SMEP,
-            BMI2, ERMS, INVPCID, RTM,
-            "NULL", ZERO_FCS_FDS, MPX, "NULL",
-            AVX512F, AVX512DQ, RDSEED, ADX,
-            SMAP, AVX512IFMA, PCOMMIT, CLFLUSHOPT,
-            CLWB, INTEL_PT, AVX512PF, AVX512ER,
-            AVX512CD, SHA_NI, AVX512BW, AVX512VL,
-);
-cpuid_flag_constants!(
-    CpuIdEntryRegister<7, 0, {CpuidReg::ECX as u8}>,
-            "NULL", AVX512VBMI, UMIP, PKU,
-            "NULL" /* ospke */, WAITPKG, AVX512VBMI2, "NULL",
-            GFNI, VAES, VPCLMULQDQ, AVX512VNNI,
-            AVX512BITALG, "NULL", AVX512_VPOPCNTDQ, "NULL",
-            LA57, "NULL", "NULL", "NULL",
-            "NULL", "NULL", RDPID, "NULL",
-            BUS_LOCK_DETECT, CLDEMOTE, "NULL", MOVDIRI,
-            MOVDIR64B, "NULL", SGXLC, PKS,
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=1:_Processor_Info_and_Feature_Bits",
+    function = 1,
+    index = 0,
+    register = edx,
+    [
+        (FPU, 0),
+        (VME, 1),
+        (DE, 2),
+        (PSE, 3),
+        (TSC, 4),
+        (MSR, 5),
+        (PAE, 6),
+        (MCE, 7),
+        (CX8, 8),
+        (APIC, 9),
+        (SEP, 11),
+        (MTRR, 12),
+        (PGE, 13),
+        (MCA, 14),
+        (CMOV, 15),
+        (PAT, 16),
+        (PSE36, 17),
+        (PN /* Intel psn */, 18),
+        (CLFLUSH /* Intel clfsh */, 19),
+        (DS /* INTEL DTS */, 21),
+        (ACPI, 22),
+        (MMX, 23),
+        (FXSR, 24),
+        (SSE, 25),
+        (SSE2, 26),
+        (SS, 27),
+        (HT /* Intel htt */, 28),
+        (TM, 29),
+        (IA64, 30),
+        (PBE, 31),
+    ]
 );
 
-cpuid_flag_constants!(
-    CpuIdEntryRegister<7, 0, {CpuidReg::EDX as u8}>,
-    "NULL", "NULL", AVX512_4VNNIW, AVX512_4FMAPS,
-    FSRM, "NULL", "NULL", "NULL",
-    AVX512_VP2INTERSECT, "NULL", MD_CLEAR, "NULL",
-    "NULL", "NULL", SERIALIZE, "NULL",
-    TSX_LDTRK, "NULL", "NULL" /* pconfig */, ARCH_LBR,
-    "NULL", "NULL", AMX_BF16, AVX512_FP16,
-    AMX_TILE, AMX_INT8, SPEC_CTRL, STIBP,
-    FLUSH_L1D, ARCH_CAPABILITIES, CORE_CAPABILITY, SSBD,
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=1:_Processor_Info_and_Feature_Bits",
+    function = 1,
+    index = 0,
+    register = ecx,
+    [
+        (SSE3 /* Intel PNI and AMD sse3 */, 0),
+        (PCLMULQDQ, 1),
+        (DTES64, 2),
+        (MONITOR, 3),
+        (DS_CPL, 4),
+        (VMX, 5),
+        (SMX, 6),
+        (EST, 7),
+        (TM2, 8),
+        (SSSE3, 9),
+        (CID, 10),
+        (FMA, 12),
+        (CX16, 13),
+        (XTPR, 14),
+        (PDCM, 15),
+        (PCID, 17),
+        (DCA, 18),
+        (SSE4_1, 19),
+        (SSE4_2, 20),
+        (X2APIC, 21),
+        (MOVBE, 22),
+        (POPCNT, 23),
+        (TSC_DEADLINE, 24),
+        (AES, 25),
+        (XSAVE, 26),
+        (AVX, 28),
+        (F16C, 29),
+        (RDRAND, 30),
+        (HYPERVISOR, 31),
+    ]
 );
 
-// https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=1:_Extended_Features
-cpuid_flag_constants!(
-    CpuIdEntryRegister<7, 1, {CpuidReg::ECX as u8}>,
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", MSR_IMM, "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-
-);
-cpuid_flag_constants!(
-    CpuIdEntryRegister<7, 1, {CpuidReg::EAX as u8}>,
-    SHA512, SM3, SM4, "NULL",
-    AVX_VNNI, AVX512_BF16, "NULL", CMPCCXADD,
-    "NULL", "NULL", FZRM, FSRS,
-    FSRC, "NULL", "NULL", "NULL",
-    "NULL", FRED, LKGS, WRMSRNS,
-    "NULL", AMX_FP16, "NULL", AVX_IFMA,
-    "NULL", "NULL", LAM, "NULL",
-    "NULL", "NULL", "NULL", "NULL",
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=6:_Thermal_and_Power_Management",
+    function = 6,
+    index = 0,
+    register = eax,
+    [(ARAT, 2)]
 );
 
-cpuid_flag_constants!(
-    CpuIdEntryRegister<7, 1, {CpuidReg::EDX as u8}>,
-    "NULL", "NULL", "NULL", "NULL",
-    AVX_VNNI_INT8, AVX_NE_CONVERT, "NULL", "NULL",
-    AMX_COMPLEX, "NULL", AVX_VNNI_INT16, "NULL",
-    "NULL", "NULL", PREFETCHITI, "NULL",
-    "NULL", "NULL", "NULL", AVX10,
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=0:_Extended_Features",
+    function = 7,
+    index = 0,
+    register = ebx,
+    [
+        (FSGSBASE, 0),
+        (TSC_ADJUST, 1),
+        (SGX, 2),
+        (BMI1, 3),
+        (HLE, 4),
+        (AVX2, 5),
+        (FDP_EXCPTN_ONLY, 6),
+        (SMEP, 7),
+        (BMI2, 8),
+        (ERMS, 9),
+        (INVPCID, 10),
+        (RTM, 11),
+        (ZERO_FCS_FDS, 13),
+        (MPX, 14),
+        (AVX512F, 16),
+        (AVX512DQ, 17),
+        (RDSEED, 18),
+        (ADX, 19),
+        (SMAP, 20),
+        (AVX512IFMA, 21),
+        (PCOMMIT, 22),
+        (CLFLUSHOPT, 23),
+        (CLWB, 24),
+        (INTEL_PT, 25),
+        (AVX512PF, 26),
+        (AVX512ER, 27),
+        (AVX512CD, 28),
+        (SHA_NI, 29),
+        (AVX512BW, 30),
+        (AVX512VL, 31),
+    ]
 );
 
-cpuid_flag_constants!(
-    CpuIdEntryRegister<7, 2, {CpuidReg::EDX as u8}>,
-    INTEL_PSFD, IPRED_CTRL, RRSBA_CTRL, DDPD_U,
-    BHI_CTRL, MCDT_NO, "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-);
-cpuid_flag_constants!(
-    CpuIdEntryRegister<0xd,1, {CpuidReg::EAX as u8}>,
-    XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
-    XFD, "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-    "NULL", "NULL", "NULL", "NULL",
-);
-
-// https://en.wikipedia.org/wiki/CPUID#EAX=24h,_ECX=1:_Discrete_AVX10_Features
-cpuid_flag_constants!(
-    CpuIdEntryRegister<0x24, 1, {CpuidReg::ECX as u8}>,
-        VPMM, "NULL", AVX_10_VNNI_INT, "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=0:_Extended_Features",
+    function = 7,
+    index = 0,
+    register = ecx,
+    [
+        (AVX512VBMI, 1),
+        (UMIP, 2),
+        (PKU, 3),
+        (WAITPKG, 5),
+        (AVX512VBMI2, 6),
+        (GFNI, 8),
+        (VAES, 9),
+        (VPCLMULQDQ, 10),
+        (AVX512VNNI, 11),
+        (AVX512BITALG, 12),
+        (AVX512_VPOPCNTDQ, 14),
+        (LA57, 16),
+        (RDPID, 22),
+        (BUS_LOCK_DETECT, 24),
+        (CLDEMOTE, 25),
+        (MOVDIRI, 27),
+        (MOVDIR64B, 28),
+        (SGXLC, 30),
+        (PKS, 31),
+    ]
 );
 
-/*
-TODO: The duplicate values only set for AMD are currently ignored (set to "NULL"). We need to
-change this when we add the first AMD cpu profile.
-*/
-cpuid_flag_constants!(
-    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::EDX as u8}>,
-            "NULL" /* AMD_FPU */, "NULL" /* AMD_VME */, "NULL" /* AMD_DE */, "NULL" /* AMD_PSE */,
-            "NULL" /* AMD_TSC */, "NULL" /* AMD_MSR */, "NULL" /* AMD_PAE */, "NULL" /* AMD_MCE */,
-            "NULL" /* AMD_CX8 */, "NULL" /* AMD_APIC */, "NULL", SYSCALL,
-            "NULL" /* AMD_MTRR */, "NULL" /* AMD_PGE */, "NULL" /* AMD_MCA */, "NULL" /* AMD_CMOV */,
-            "NULL" /* AMD_PAT */, "NULL" /* AMD_PSE36 */, "NULL", "NULL" /* AMD ECC */,
-            NX, "NULL", MMXEXT, "NULL" /* AMD_MMX */,
-            "NULL" /* AMD_FXSR */, FXSR_OPT, PDPE1GB, RDTSCP,
-            "NULL", LM, EXT_3DNOW, FIRST_3DNOW,
-
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=0:_Extended_Features",
+    function = 7,
+    index = 0,
+    register = edx,
+    [
+        (AVX512_4VNNIW, 2),
+        (AVX512_4FMAPS, 3),
+        (FSRM, 4),
+        (AVX512_VP2INTERSECT, 8),
+        (MD_CLEAR, 10),
+        (SERIALIZE, 14),
+        (TSX_LDTRK, 16),
+        (ARCH_LBR, 19),
+        (AMX_BF16, 22),
+        (AVX512_FP16, 23),
+        (AMX_TILE, 24),
+        (AMX_INT8, 25),
+        (SPEC_CTRL, 26),
+        (STIBP, 27),
+        (FLUSH_L1D, 28),
+        (ARCH_CAPABILITIES, 29),
+        (CORE_CAPABILITY, 30),
+        (SSBD, 31),
+    ]
 );
-cpuid_flag_constants!(
-    CpuIdEntryRegister<0x8000_0001, 0, { CpuidReg::ECX as u8}>,
-            LAHF_LM, CMP_LEGACY, SVM, EXTAPIC,
-            CR8LEGACY, ABM, SSE4A, MISALIGNSSE,
-            PREFETCH_3DNOW, OSVW, IBS, XOP,
-            SKINIT, WDT, "NULL", LWP,
-            FMA4, TCE, "NULL", NODEID_MSR,
-            "NULL", TBM, TOPOEXT, PERFCTR_CORE,
-            PERFCTR_NB, "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
+
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=1:_Extended_Features",
+    function = 7,
+    index = 1,
+    register = ecx,
+    [(MSR_IMM, 5)]
+);
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=1:_Extended_Features",
+    function = 7,
+    index = 1,
+    register = eax,
+    [
+        (SHA512, 0),
+        (SM3, 1),
+        (SM4, 2),
+        (AVX_VNNI, 4),
+        (AVX512_BF16, 5),
+        (CMPCCXADD, 7),
+        (FZRM, 10),
+        (FSRS, 11),
+        (FSRC, 12),
+        (FRED, 17),
+        (LKGS, 18),
+        (WRMSRNS, 19),
+        (AMX_FP16, 21),
+        (AVX_IFMA, 23),
+        (LAM, 26),
+    ]
 );
 
-cpuid_flag_constants!(
-    CpuIdEntryRegister<0x8000_0007, 0, {CpuidReg::EDX as u8}>,
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            INVTSC, "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
-            "NULL", "NULL", "NULL", "NULL",
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=1:_Extended_Features",
+    function = 7,
+    index = 1,
+    register = edx,
+    [
+        (AVX_VNNI_INT8, 4),
+        (AVX_NE_CONVERT, 5),
+        (AMX_COMPLEX, 8),
+        (AVX_VNNI_INT16, 10),
+        (PREFETCHITI, 14),
+        (AVX10, 19),
+    ]
+);
+
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=2:_Extended_Features",
+    function = 7,
+    index = 2,
+    register = edx,
+    [
+        (INTEL_PSFD, 0),
+        (IPRED_CTRL, 1),
+        (RRSBA_CTRL, 2),
+        (DDPD_U, 3),
+        (BHI_CTRL, 4),
+        (MCDT_NO, 5),
+    ]
+);
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=0Dh:_XSAVE_Features_and_State_Components",
+    function = 0xd,
+    index = 1,
+    register = eax,
+    [
+        (XSAVEOPT, 0),
+        (XSAVEC, 1),
+        (XGETBV1, 2),
+        (XSAVES, 3),
+        (XFD, 4),
+    ]
+);
+
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=24h,_ECX=1:_Discrete_AVX10_Features",
+    function = 0x24,
+    index = 1,
+    register = ecx,
+    [(VPMM, 0), (AVX_10_VNNI_INT, 2)]
+);
+
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=8000'0001h:_Extended_Processor_Info_and_Feature_Bits",
+    function = 0x8000_0001,
+    index = 0,
+    register = edx,
+    [
+        (SYSCALL, 11),
+        (NX, 20),
+        (MMXEXT, 22),
+        (FXSR_OPT, 25),
+        (PDPE1GB, 26),
+        (RDTSCP, 27),
+        (LM, 29),
+        (EXT_3DNOW, 30),
+        (FIRST_3DNOW, 31),
+    ]
+);
+impl_cpuid_entry_register_constants!(
+    wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=8000'0001h:_Extended_Processor_Info_and_Feature_Bits",
+    function = 0x8000_0001,
+    index = 0,
+    register = ecx,
+    [
+        (LAHF_LM,0),
+        (CMP_LEGACY,1),
+        (SVM,2),
+        (EXTAPIC,3),
+        (CR8LEGACY,4),
+        (ABM,5),
+        (SSE4A,6),
+        (MISALIGNSSE,7),
+        (PREFETCH_3DNOW,8),
+        (OSVW,9),
+        (IBS,10),
+        (XOP,11),
+        (SKINIT,12),
+        (WDT,13),
+        (LWP,15),
+        (FMA4,16),
+        (TCE,17),
+        (NODEID_MSR,19),
+        (TBM,21),
+        (TOPOEXT,22),
+        (PERFCTR_CORE,23),
+        (PERFCTR_NB,24),
+    ]
+);
+impl_cpuid_entry_register_constants!(
+    wiki="https://en.wikipedia.org/wiki/CPUID#EAX=8000'0007h:_Processor_Power_Management_Information_and_RAS_Capabilities",
+    function = 0x8000_0007,
+    index = 0,
+    register = edx,
+    [(INVTSC, 8)]
 );
 
 /// A set of CPUID feature flags consisting of the registers for the various leaves describing

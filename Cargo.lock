@@ -114,6 +114,7 @@ dependencies = [
  "libc",
  "linux-loader",
  "log",
+ "paste",
  "serde",
  "thiserror 2.0.12",
  "uuid",

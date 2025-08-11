@@ -17,6 +17,7 @@ hypervisor = { path = "../hypervisor" }
 libc = "0.2.167"
 linux-loader = { workspace = true, features = ["bzimage", "elf", "pe"] }
 log = "0.4.22"
+paste = { version = "1"}
 serde = { version = "1.0.208", features = ["derive", "rc"] }
 thiserror = { workspace = true }
 uuid = { workspace = true }
