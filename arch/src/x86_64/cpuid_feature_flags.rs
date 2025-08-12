@@ -9,6 +9,22 @@ pub struct CpuIdEntryRegister<const FUNCTION: u32, const INDEX: u32, const REG: 
 impl<const FUNCTION: u32, const INDEX: u32, const REG: u8>
     CpuIdEntryRegister<FUNCTION, INDEX, REG>
 {
+    pub const fn register_name(&self) -> &'static str {
+        const {
+            if CpuidReg::EAX as u8 == REG {
+                "eax"
+            } else if CpuidReg::EBX as u8 == REG {
+                "ebx"
+            } else if CpuidReg::ECX as u8 == REG {
+                "ecx"
+            } else if CpuidReg::EDX as u8 == REG {
+                "edx"
+            } else {
+                // Note that this block is evaluated at compile time and cannot lead to runtime panics
+                panic!("invalid register value");
+            }
+        }
+    }
     pub const NULL: Self = Self(0);
     // Workaround until we can use BitOr in const contexts
     pub const fn or(self, other: Self) -> Self {
@@ -63,26 +79,28 @@ impl<const FUNCTION: u32, const INDEX: u32, const REG: u8>
                     let least_significant_bit = missing_bits & missing_bits.wrapping_neg();
                     missing_bits ^= least_significant_bit;
                 }
-                // TODO: Use a proper register name rather than REG and consider returning this as an error instead of logging here
                 log::warn!(
                     "the given cpuid entry identified by: \n
                  function = 0x{:08x} \
                  index = 0x{:08x} \
                  flags =  0x{:08x} \
-                 does not have the following bits set: {:?} in the register {:?}
+                 does not have the following bits set: {:?} for the {} register
                  even though the specified restriction permits it.
                 ",
-                    entry.function,
-                    entry.index,
+                    FUNCTION,
+                    INDEX,
                     entry.flags,
                     bit_positions,
-                    REG
+                    self.register_name()
                 );
             }
         }
         if (!found_matching) && (self.0 != 0) {
-            // TODO: Better log or return an error here
-            log::warn!("no entry matched");
+            log::warn!(
+                "no entry matched the function = 0x{:8x}, index = 0x{:08x} parameters",
+                FUNCTION,
+                INDEX
+            );
         }
     }
 }
@@ -189,6 +207,7 @@ impl_cpuid_entry_register_constants!(
     ]
 );
 
+// We only make the ARAT (always running APIC timer) capability from this leaf ergonomic for now.
 impl_cpuid_entry_register_constants!(
     wiki = "https://en.wikipedia.org/wiki/CPUID#EAX=6:_Thermal_and_Power_Management",
     function = 6,
@@ -433,7 +452,8 @@ impl_cpuid_entry_register_constants!(
 ///
 /// # Feature related Registers that are ignored
 ///
-/// - 0x12: SGX capabilities (this is handled separately for now)
+/// - 0x12: SGX capabilities (this is ignored as CHV has deprecated its support). TODO: Should we include this and set it to `Self::NULL` ?
+///
 /// - 0x19: Intel key locker features (ignored, but why?)
 /// - 0x1E, EXC=1: TMUL information (this is handled separately for now)
 /// - TODO: 0x8000_0001F: Encrypted Memory Capabilities

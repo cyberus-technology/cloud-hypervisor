@@ -80,6 +80,10 @@ impl CpuIdFeatureFlags {
             edx_7_2: FF::NULL,
             ecx_14h: FF::NULL,
             ecx_24h_1: FF::NULL,
+            /*
+            Caskadelake Server only supports TscInvariant, but this feature cannot be relied upon in the context of migration hence we also leave that turned off.
+            TODO: Isnt't this feature very useful when the VM is running normally though? (i.e. outside of migrations).
+             */
             edx_8000_0007h: FF::NULL,
             ebx_8000_0008h: FF::NULL,
             edx_8000_000ah: FF::NULL,
