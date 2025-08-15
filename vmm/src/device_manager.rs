@@ -4392,17 +4392,21 @@ impl DeviceManager {
                 VirtioDeviceType::Net => {
                     let mut config = self.config.lock().unwrap();
                     let nets = config.net.as_deref_mut().unwrap();
-                    let net_dev_cfg = nets.iter_mut().find(|net| net.id.as_ref() == Some(&id)).unwrap();
+                    let net_dev_cfg = nets
+                        .iter_mut()
+                        .find(|net| net.id.as_ref() == Some(&id))
+                        .unwrap();
                     let fds = net_dev_cfg.fds.take().unwrap_or(Vec::new());
 
                     debug!("Closing preserved FDs from virtio-net device: id={id}, fds={fds:?}");
                     for fd in fds {
                         config.preserved_fds.as_mut().unwrap().retain(|x| *x != fd);
+                        // SAFETY: Trivially safe
                         unsafe {
                             libc::close(fd);
                         }
                     }
-                },
+                }
                 VirtioDeviceType::Block
                 | VirtioDeviceType::Pmem
                 | VirtioDeviceType::Fs
