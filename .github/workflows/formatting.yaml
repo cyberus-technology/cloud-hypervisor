@@ -14,7 +14,6 @@ jobs:
           - nightly
         target:
           - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
     env:
       RUSTFLAGS: -D warnings
     steps:
