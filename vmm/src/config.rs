@@ -6,10 +6,10 @@
 use std::collections::{BTreeSet, HashMap};
 #[cfg(feature = "ivshmem")]
 use std::fs;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
-use std::result;
 use std::str::FromStr;
+use std::{mem, result};
 
 use clap::ArgMatches;
 use option_parser::{
@@ -361,6 +361,14 @@ pub enum ValidationError {
     InvalidIvshmemPath,
     #[error("Payload configuration is not bootable")]
     PayloadError(#[from] PayloadConfigError),
+    /// Multiple things in a VM can be backed up by externally provided FDs,
+    /// such as memory zones, virtio-net devices, or virtio-blk devices (not
+    /// yet implemented, but likely in future).
+    ///
+    /// It is a hard configuration error to use the same FD for multiple
+    /// things.
+    #[error("Externally provided FD already in use! FD={0}")]
+    ExternalFdAlreadyInUse(RawFd),
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -3058,7 +3066,7 @@ impl VmConfig {
             pci_segments,
             platform,
             tpm,
-            preserved_fds: None,
+            preserved_fds: BTreeSet::new(),
             landlock_enable: vm_params.landlock_enable,
             landlock_rules,
             #[cfg(feature = "ivshmem")]
@@ -3131,21 +3139,81 @@ impl VmConfig {
         removed
     }
 
+    /// Adds the provided external FDs to the preserved FDs.
+    ///
+    /// This is useful to keep external FDs valid across VM reboots, where no
+    /// device instance holds open FDs.
+    ///
     /// # Safety
     /// To use this safely, the caller must guarantee that the input
-    /// fds are all valid.
-    pub unsafe fn add_preserved_fds(&mut self, mut fds: Vec<i32>) {
-        debug!("adding preserved FDs to VM list: {fds:?}");
+    /// FDs are all valid.
+    ///
+    /// # Arguments
+    /// - `fds`: Iterator over the external FDs of some component
+    /// - `hot`: Whether this happens when the VM is running, i.e., whether
+    ///   device instances also have open (dup'ed) FDs of this or just the VM
+    ///   config.
+    ///
+    /// # Panics
+    /// This panics when an external FD is used multiple times to force
+    /// programmers to do proper checking early.
+    pub fn add_preserved_fds(
+        &mut self,
+        fds: impl IntoIterator<Item = RawFd> + Clone,
+        hot: bool,
+    ) -> ValidationResult<()> {
+        self.can_add_preserved_fds(fds.clone(), hot)
+            .unwrap_or_else(|_| {
+                panic!(
+                    "should have detected earlier that FDs {:?} can't be added: preserved: {:?}",
+                    fds.clone().into_iter().collect::<Vec<_>>().len(),
+                    self.preserved_fds
+                )
+            });
 
-        if fds.is_empty() {
-            return;
+        for fd in fds.into_iter() {
+            let pfd = self.preserved_fds.iter().find(|pfd| pfd.as_raw_fd() == fd);
+            match (pfd, hot) {
+                (None, false) => {
+                    self.preserved_fds.insert(PreservedFd::Cold(fd));
+                }
+                (None, true) => {
+                    self.preserved_fds.insert(PreservedFd::Hot(fd));
+                }
+                // We allow the transition from Cold to Hot, i.e., "in use"
+                (Some(PreservedFd::Cold(_)), true) => {
+                    self.preserved_fds.remove(&PreservedFd::Cold(fd));
+                    self.preserved_fds.insert(PreservedFd::Hot(fd));
+                }
+                // Invalid state transition, propagate error
+                (Some(_), _) => return Err(ValidationError::ExternalFdAlreadyInUse(fd)),
+            }
         }
+        Ok(())
+    }
 
-        if let Some(preserved_fds) = &self.preserved_fds {
-            fds.append(&mut preserved_fds.clone());
+    /// Checks if any of the externally provided FDs is already preserved in the
+    /// list of preserved FDs.
+    ///
+    /// This function is supposed to be called early in every code path that adds
+    /// configurations tide to such FDs.
+    pub fn can_add_preserved_fds(
+        &self,
+        external_fds: impl IntoIterator<Item = RawFd>,
+        hot: bool,
+    ) -> ValidationResult<()> {
+        #[allow(clippy::never_loop)] // false-positive
+        for fd in external_fds.into_iter() {
+            let pfd = self.preserved_fds.iter().find(|pfd| pfd.as_raw_fd() == fd);
+            return match (pfd, hot) {
+                (None, _) => Ok(()),
+                // We allow the transition from Cold to Hot, i.e., "in use now"
+                (Some(PreservedFd::Cold(_)), true) => Ok(()),
+                // Invalid state transition, propagate error
+                (Some(_), _) => Err(ValidationError::ExternalFdAlreadyInUse(fd)),
+            };
         }
-
-        self.preserved_fds = Some(fds);
+        Ok(())
     }
 
     #[cfg(feature = "tdx")]
@@ -3188,18 +3256,10 @@ impl Clone for VmConfig {
             tpm: self.tpm.clone(),
             preserved_fds: self
                 .preserved_fds
-                .as_ref()
+                .iter()
                 // SAFETY: FFI call with valid FDs
-                .map(|fds| {
-                    fds.iter()
-                        .map(|fd| {
-                            // SAFETY: Trivially safe.
-                            let fd_duped = unsafe { libc::dup(*fd) };
-                            warn!("Cloning VM config: duping preserved FD {fd} => {fd_duped}");
-                            fd_duped
-                        })
-                        .collect()
-                }),
+                .map(|fd| fd.dup())
+                .collect(),
             landlock_rules: self.landlock_rules.clone(),
             #[cfg(feature = "ivshmem")]
             ivshmem: self.ivshmem.clone(),
@@ -3210,12 +3270,13 @@ impl Clone for VmConfig {
 
 impl Drop for VmConfig {
     fn drop(&mut self) {
-        if let Some(mut fds) = self.preserved_fds.take() {
-            debug!("Closing preserved FDs from VM: fds={fds:?}");
-            for fd in fds.drain(..) {
-                // SAFETY: FFI call with valid FDs
-                unsafe { libc::close(fd) };
-            }
+        debug!("Closing preserved FDs: fds={:?}", self.preserved_fds);
+
+        // There is no .drain() for BTreeSet yet
+        let fds = mem::take(&mut self.preserved_fds);
+        for fd in fds {
+            // SAFETY: FFI call with valid FDs
+            unsafe { libc::close(fd.as_raw_fd()) };
         }
     }
 }
@@ -3994,7 +4055,7 @@ mod tests {
             pci_segments: None,
             platform: None,
             tpm: None,
-            preserved_fds: None,
+            preserved_fds: BTreeSet::new(),
             net: Some(vec![
                 NetConfig {
                     id: Some("net0".to_owned()),
@@ -4207,7 +4268,7 @@ mod tests {
             pci_segments: None,
             platform: None,
             tpm: None,
-            preserved_fds: None,
+            preserved_fds: BTreeSet::new(),
             landlock_enable: false,
             landlock_rules: None,
             #[cfg(feature = "ivshmem")]
@@ -4834,12 +4895,53 @@ mod tests {
         let fd1 = unsafe { libc::dup(File::open("/dev/null").unwrap().as_raw_fd()) };
         // SAFETY: Safe as the file was just opened
         let fd2 = unsafe { libc::dup(File::open("/dev/null").unwrap().as_raw_fd()) };
-        // SAFETY: safe as both FDs are valid
-        unsafe {
-            still_valid_config.add_preserved_fds(vec![fd1, fd2]);
-        }
+        still_valid_config
+            .add_preserved_fds([fd1, fd2], false)
+            .unwrap();
         let _still_valid_config = still_valid_config.clone();
     }
+
+    #[test]
+    fn test_add_preserved_fds_corner_cases() {
+        let mut config = valid_vmconfig();
+
+        config.can_add_preserved_fds([3], false).unwrap();
+        config.add_preserved_fds([3], false).unwrap();
+
+        config.can_add_preserved_fds([3], false).unwrap_err();
+
+        config.can_add_preserved_fds([3], true).unwrap();
+        config.add_preserved_fds([3], true).unwrap();
+
+        config.can_add_preserved_fds([3], true).unwrap_err();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_add_preserved_fds_corner_cases_panic_cold_cold() {
+        let mut config = valid_vmconfig();
+
+        config.add_preserved_fds([3], false).unwrap();
+
+        // panic here
+        config
+            .add_preserved_fds([3], false)
+            .expect_err("should fail as the device is already hot");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_add_preserved_fds_corner_cases_panic_hot_hot() {
+        let mut config = valid_vmconfig();
+
+        config.add_preserved_fds([3], true).unwrap();
+
+        // panic here
+        config
+            .add_preserved_fds([3], true)
+            .expect_err("should fail as the device is already hot");
+    }
+
     #[test]
     fn test_landlock_parsing() -> Result<()> {
         // should not be empty

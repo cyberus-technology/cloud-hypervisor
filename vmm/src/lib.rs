@@ -2253,10 +2253,17 @@ impl RequestHandler for Vmm {
 
     fn vm_add_net(&mut self, net_cfg: NetConfig) -> result::Result<Option<Vec<u8>>, VmError> {
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
-
         {
             // Validate the configuration change in a cloned configuration
             let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+
+            // Special handling for externally provided FDs
+            if let Some(fds) = &net_cfg.fds {
+                config
+                    .can_add_preserved_fds(fds.iter().cloned(), true)
+                    .map_err(VmError::ConfigValidation)?;
+            }
+
             add_to_config(&mut config.net, net_cfg.clone());
             config.validate().map_err(VmError::ConfigValidation)?;
         }
@@ -2593,6 +2600,8 @@ const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
 
 #[cfg(test)]
 mod unit_tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     #[cfg(target_arch = "x86_64")]
     use crate::vm_config::DebugConsoleConfig;
@@ -2693,7 +2702,7 @@ mod unit_tests {
             pci_segments: None,
             platform: None,
             tpm: None,
-            preserved_fds: None,
+            preserved_fds: BTreeSet::new(),
             landlock_enable: false,
             landlock_rules: None,
             #[cfg(feature = "ivshmem")]

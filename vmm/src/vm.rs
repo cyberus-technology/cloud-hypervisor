@@ -11,7 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
@@ -100,7 +100,7 @@ use crate::vcpu_throttling::ThrottleThreadHandle;
 use crate::vm_config::FwCfgConfig;
 use crate::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, NumaConfig, PayloadConfig,
-    PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
+    PmemConfig, PreservedFd, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
 };
 use crate::{
     CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, GuestMemoryMmap,
@@ -1663,6 +1663,27 @@ impl Vm {
             .unwrap()
             .shutdown()
             .map_err(Error::CpuManager)?;
+
+        // Mark all preserved FDs as cold
+        {
+            let mut config = self.config.lock().unwrap();
+
+            let mut new_set = BTreeSet::new();
+            for fd in config.preserved_fds.iter() {
+                match fd {
+                    PreservedFd::Cold(fd) => {
+                        // very unlikely; can only be a programming error as we expect all FDs to be Hot
+                        // after the VM has booted.
+                        log::debug!("Preserved FD {} is still cold", fd);
+                    }
+                    PreservedFd::Hot(fd) => {
+                        new_set.insert(PreservedFd::Cold(*fd));
+                    }
+                }
+            }
+
+            config.preserved_fds = new_set;
+        }
 
         // Wait for all the threads to finish
         for thread in self.threads.drain(..) {

@@ -2,7 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "fw_cfg")]
 use std::str::FromStr;
@@ -897,6 +899,40 @@ impl ApplyLandlock for LandlockConfig {
     }
 }
 
+/// Helps to identify the context of a preserved FD.
+///
+/// Specifically, we need to distinguish between FDs coming from a "cold" config ([`PreservedFd::Cold`])
+/// or a "warm" config ([`PreservedFd::Hot`]). This type helps to better prevent misconfiguration
+/// in [`VmConfig::add_preserved_fds`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum PreservedFd {
+    /// The FD is preserved by the VMM but not yet associated with a device.
+    Cold(RawFd),
+    /// The FD is associated with a device and in active use.
+    Hot(RawFd),
+}
+
+impl PreservedFd {
+    pub fn dup(&self) -> Self {
+        let fd = self.as_raw_fd();
+        // SAFETY: FFI call with valid FDs
+        let fd_dup = unsafe { libc::dup(fd.as_raw_fd()) };
+        match self {
+            PreservedFd::Cold(_) => PreservedFd::Cold(fd_dup),
+            PreservedFd::Hot(_) => PreservedFd::Cold(fd_dup),
+        }
+    }
+}
+
+impl AsRawFd for PreservedFd {
+    fn as_raw_fd(&self) -> RawFd {
+        match self {
+            PreservedFd::Cold(fd) => *fd,
+            PreservedFd::Hot(fd) => *fd,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VmConfig {
     #[serde(default)]
@@ -944,7 +980,7 @@ pub struct VmConfig {
     // Preserved FDs will stay open as long as the holding VmConfig instance is
     // valid, and will be closed when the holding VmConfig instance is destroyed.
     #[serde(skip)]
-    pub preserved_fds: Option<Vec<i32>>,
+    pub preserved_fds: BTreeSet<PreservedFd>,
     #[serde(default)]
     pub landlock_enable: bool,
     pub landlock_rules: Option<Vec<LandlockConfig>>,
