@@ -131,12 +131,14 @@ impl log::Log for Logger {
 
         let now = std::time::Instant::now();
         let duration = now.duration_since(self.start);
+        let duration_s = duration.as_secs_f32();
 
         if record.file().is_some() && record.line().is_some() {
             write!(
                 *(*(self.output.lock().unwrap())),
-                "cloud-hypervisor: {:.6?}: <{}> {}:{}:{} -- {}\r\n",
-                duration,
+                // 10: 6 decimal places + sep => 0..999s will be properly aligned
+                "cloud-hypervisor: {:>10.6?}s: <{}> {}:{}:{} -- {}\r\n",
+                duration_s,
                 std::thread::current().name().unwrap_or("anonymous"),
                 record.level(),
                 record.file().unwrap(),
@@ -146,8 +148,9 @@ impl log::Log for Logger {
         } else {
             write!(
                 *(*(self.output.lock().unwrap())),
-                "cloud-hypervisor: {:.6?}: <{}> {}:{} -- {}\r\n",
-                duration,
+                // 10: 6 decimal places + sep => 0..999s will be properly aligned
+                "cloud-hypervisor: {:>10.6?}s: <{}> {}:{} -- {}\r\n",
+                duration_s,
                 std::thread::current().name().unwrap_or("anonymous"),
                 record.level(),
                 record.target(),
