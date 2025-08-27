@@ -8,6 +8,20 @@ lto = true
 opt-level = "s"
 strip = true
 
+# Tradeof between performance and fast compilation times for local testing and
+# development with frequent rebuilds.
+[profile.optimized-dev]
+codegen-units = 16
+inherits = "release"
+lto = false
+opt-level = 2
+strip = false
+
+# Optimize more for dependencies: They don't require frequent rebuilds.
+[profile.optimized-dev.package."*"]
+codegen-units = 1
+opt-level = 3
+
 [profile.profiling]
 debug = true
 inherits = "release"
