@@ -990,9 +990,9 @@ impl CpuManager {
         #[cfg(feature = "guest_debug")]
         let vm_debug_evt = self.vm_debug_evt.try_clone().unwrap();
         let panic_exit_evt = self.exit_evt.try_clone().unwrap();
-        let vcpu_kill_signalled = self.vcpus_kill_signalled.clone();
-        let vcpu_pause_signalled = self.vcpus_pause_signalled.clone();
-        let vcpu_kick_signalled = self.vcpus_kick_signalled.clone();
+        let vcpus_kill_signalled_clone = self.vcpus_kill_signalled.clone();
+        let vcpus_pause_signalled_clone = self.vcpus_pause_signalled.clone();
+        let vcpus_kick_signalled_clone = self.vcpus_kick_signalled.clone();
 
         let vcpu_kill = self.vcpu_states[usize::from(vcpu_id)].kill.clone();
         let vcpu_run_interrupted = self.vcpu_states[usize::from(vcpu_id)]
@@ -1082,7 +1082,7 @@ impl CpuManager {
                             // loads and stores to different atomics and we need
                             // to see them in a consistent order in all threads
 
-                            if vcpu_pause_signalled.load(Ordering::SeqCst) {
+                            if vcpus_pause_signalled_clone.load(Ordering::SeqCst) {
                                 // As a pause can be caused by PIO & MMIO exits then we need to ensure they are
                                 // completed by returning to KVM_RUN. From the kernel docs:
                                 //
@@ -1111,14 +1111,14 @@ impl CpuManager {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
 
                                 vcpu_paused.store(true, Ordering::SeqCst);
-                                while vcpu_pause_signalled.load(Ordering::SeqCst) {
+                                while vcpus_pause_signalled_clone.load(Ordering::SeqCst) {
                                     thread::park();
                                 }
                                 vcpu_paused.store(false, Ordering::SeqCst);
                                 vcpu_run_interrupted.store(false, Ordering::SeqCst);
                             }
 
-                            if vcpu_kick_signalled.load(Ordering::SeqCst) {
+                            if vcpus_kick_signalled_clone.load(Ordering::SeqCst) {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
                                 #[cfg(target_arch = "x86_64")]
                                 match vcpu.lock().as_ref().unwrap().vcpu.nmi() {
@@ -1131,7 +1131,7 @@ impl CpuManager {
                             }
 
                             // We've been told to terminate
-                            if vcpu_kill_signalled.load(Ordering::SeqCst)
+                            if vcpus_kill_signalled_clone.load(Ordering::SeqCst)
                                 || vcpu_kill.load(Ordering::SeqCst)
                             {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
@@ -1150,7 +1150,7 @@ impl CpuManager {
                                         info!("VmExit::Debug");
                                         #[cfg(feature = "guest_debug")]
                                         {
-                                            vcpu_pause_signalled.store(true, Ordering::SeqCst);
+                                            vcpus_pause_signalled_clone.store(true, Ordering::SeqCst);
                                             let raw_tid = get_raw_tid(vcpu_id as usize);
                                             vm_debug_evt.write(raw_tid as u64).unwrap();
                                         }
@@ -1211,7 +1211,7 @@ impl CpuManager {
                             }
 
                             // We've been told to terminate
-                            if vcpu_kill_signalled.load(Ordering::SeqCst)
+                            if vcpus_kill_signalled_clone.load(Ordering::SeqCst)
                                 || vcpu_kill.load(Ordering::SeqCst)
                             {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
