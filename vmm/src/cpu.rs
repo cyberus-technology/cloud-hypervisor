@@ -631,6 +631,7 @@ struct VcpuState {
     handle: Option<thread::JoinHandle<()>>,
     kill: Arc<AtomicBool>,
     vcpu_run_interrupted: Arc<AtomicBool>,
+    /// Used to ACK state changes from the run vCPU loop to the CPU Manager.
     paused: Arc<AtomicBool>,
 }
 
@@ -1097,6 +1098,7 @@ impl CpuManager {
                                 while vcpu_pause_signalled.load(Ordering::SeqCst) {
                                     thread::park();
                                 }
+                                vcpu_paused.store(false, Ordering::SeqCst);
                                 vcpu_run_interrupted.store(false, Ordering::SeqCst);
                             }
 
@@ -2300,6 +2302,7 @@ impl Pausable for CpuManager {
         // activated vCPU change their state to ensure they have parked.
         for state in self.vcpu_states.iter() {
             if state.active() {
+                // wait for vCPU to update state
                 while !state.paused.load(Ordering::SeqCst) {
                     // To avoid a priority inversion with the vCPU thread
                     thread::sleep(std::time::Duration::from_millis(1));
@@ -2311,16 +2314,26 @@ impl Pausable for CpuManager {
     }
 
     fn resume(&mut self) -> std::result::Result<(), MigratableError> {
-        // Toggle the vCPUs pause boolean
+        // Ensure that vCPUs keep running after being unpark() in
+        // their run vCPU loop.
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
 
-        // Unpark all the VCPU threads.
-        // Once unparked, the next thing they will do is checking for the pause
-        // boolean. Since it'll be set to false, they will exit their pause loop
-        // and go back to vmx root.
-        for state in self.vcpu_states.iter() {
-            state.paused.store(false, Ordering::SeqCst);
-            state.unpark_thread();
+        // Unpark all the vCPU threads.
+        // Step 1/2: signal each thread
+        {
+            for state in self.vcpu_states.iter() {
+                state.unpark_thread();
+            }
+        }
+        // Step 2/2: wait for state ACK
+        {
+            for state in self.vcpu_states.iter() {
+                // wait for vCPU to update state
+                while state.paused.load(Ordering::SeqCst) {
+                    // To avoid a priority inversion with the vCPU thread
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
         }
         Ok(())
     }
