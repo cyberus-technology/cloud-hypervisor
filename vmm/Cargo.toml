@@ -54,6 +54,7 @@ hex = { version = "0.4.3", optional = true }
 hypervisor = { path = "../hypervisor" }
 igvm = { workspace = true, optional = true }
 igvm_defs = { workspace = true, optional = true }
+kvm-bindings = { workspace = true }
 landlock = "0.4.2"
 libc = { workspace = true }
 linux-loader = { workspace = true, features = ["bzimage", "elf", "pe"] }
