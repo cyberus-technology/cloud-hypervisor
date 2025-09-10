@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fs::File;
 #[cfg(target_arch = "x86_64")]
 use std::os::unix::io::AsRawFd;
-#[cfg(feature = "tdx")]
+#[cfg(any(feature = "tdx", feature = "kvm"))]
 use std::os::unix::io::RawFd;
 use std::result;
 #[cfg(target_arch = "x86_64")]
@@ -2772,6 +2772,13 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     fn set_immediate_exit(&self, exit: bool) {
         self.fd.lock().unwrap().set_kvm_immediate_exit(exit.into());
+    }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        let kvm_vcpu = self.fd.lock().unwrap();
+        let kvm_vcpu = &*kvm_vcpu;
+        kvm_vcpu.as_raw_fd()
     }
 
     ///
