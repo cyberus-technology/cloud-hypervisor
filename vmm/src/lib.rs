@@ -56,6 +56,8 @@ use crate::api::{
 use crate::config::{RestoreConfig, add_to_config};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::GuestDebuggable;
+#[cfg(feature = "kvm")]
+use crate::cpu::IS_IN_SHUTDOWN;
 use crate::landlock::Landlock;
 use crate::memory_manager::MemoryManager;
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -1379,6 +1381,14 @@ impl Vmm {
         // The VM is already stopped.
         vm.release_disk_locks()
             .map_err(|e| MigratableError::UnlockError(anyhow!("{e}")))?;
+
+        #[cfg(feature = "kvm")]
+        // Prevent signal handler to access thread local storage when signals are received
+        // close to the end when thread-local storage is already destroyed.
+        {
+            let mut lock = IS_IN_SHUTDOWN.write().unwrap();
+            *lock = true;
+        }
 
         // Capture snapshot and send it
         let vm_snapshot = vm.snapshot()?;
