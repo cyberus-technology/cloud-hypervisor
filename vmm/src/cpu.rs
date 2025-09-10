@@ -16,8 +16,6 @@ use std::collections::BTreeMap;
 use std::io::Write;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use std::mem::size_of;
-#[cfg(feature = "kvm")]
-use std::os::fd::RawFd;
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -82,6 +80,8 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{SIGRTMIN, register_signal_handler};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
+#[cfg(feature = "kvm")]
+use {kvm_bindings::kvm_run, std::cell::Cell, std::os::fd::RawFd, std::sync::RwLock};
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
@@ -96,6 +96,16 @@ use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::vm::physical_bits;
 use crate::vm_config::CpusConfig;
 use crate::{CPU_MANAGER_SNAPSHOT_ID, GuestMemoryMmap};
+
+#[cfg(feature = "kvm")]
+thread_local! {
+    static KVM_RUN: Cell<*mut kvm_run> = const {Cell::new(core::ptr::null_mut())};
+}
+#[cfg(feature = "kvm")]
+/// Tell signal handler to not access certain stuff anymore during shutdown.
+/// Otherwise => panics.
+/// Better alternative would be to prevent signals there at all.
+pub static IS_IN_SHUTDOWN: RwLock<bool> = RwLock::new(false);
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -1101,6 +1111,28 @@ impl CpuManager {
             thread::Builder::new()
                 .name(format!("vcpu{vcpu_id}"))
                 .spawn(move || {
+                    // init thread-local kvm_run structure
+                    #[cfg(feature = "kvm")]
+                    {
+                        let raw_kvm_fd = vcpu.lock().unwrap().get_kvm_vcpu_raw_fd();
+
+                        // SAFETY: We know the FD is valid and have the proper args.
+                        let buffer = unsafe {
+                            libc::mmap(
+                                core::ptr::null_mut(),
+                                4096,
+                                libc::PROT_WRITE | libc::PROT_READ,
+                                libc::MAP_SHARED,
+                                raw_kvm_fd,
+                                0,
+                            )
+                        };
+                        assert!(!buffer.is_null());
+                        assert_ne!(buffer, libc::MAP_FAILED);
+                        let kvm_run = buffer.cast::<kvm_run>();
+                        KVM_RUN.set(kvm_run);
+                    }
+
                     // Schedule the thread to run on the expected CPU set
                     if let Some(cpuset) = cpuset.as_ref() {
                         // SAFETY: FFI call with correct arguments
@@ -1130,7 +1162,35 @@ impl CpuManager {
                             return;
                         }
 
+                    #[cfg(not(feature = "kvm"))]
                     extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {}
+                    #[cfg(feature = "kvm")]
+                    extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {
+                        // We do not need a self-pipe for safe UNIX signal handling here as in this
+                        // signal handler, we only expect the same signal over and over again. While
+                        // different signals can interrupt a signal being handled, the same signal
+                        // again can't by default. Therefore, this is safe.
+
+                        // This lock prevents accessing thread locals when a signal is received
+                        // in the teardown phase of the Rust standard library. Otherwise, we would
+                        // panic.
+                        //
+                        // Masking signals would be a nicer approach but this is the pragmatic
+                        // solution.
+                        //
+                        // We don't have lock contention in normal operation. When the writer
+                        // sets the bool to true, the lock is only held for a couple of µs.
+                        let lock = IS_IN_SHUTDOWN.read().unwrap();
+                        if *lock {
+                            return;
+                        }
+
+                        let kvm_run = KVM_RUN.get();
+                        // SAFETY: the mapping is valid
+                        let kvm_run = unsafe {
+                            kvm_run.as_mut().expect("kvm_run should have been mapped as part of vCPU setup") };
+                        kvm_run.immediate_exit = 1;
+                    }
                     // This uses an async signal safe handler to kill the vcpu handles.
                     register_signal_handler(SIGRTMIN(), handle_signal)
                         .expect("Failed to register vcpu signal handler");
