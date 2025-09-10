@@ -1552,7 +1552,7 @@ impl cpu::Vcpu for MshvVcpu {
 
     #[cfg(feature = "kvm")]
     unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
-        todo!()
+        unimplemented!()
     }
 }
 
