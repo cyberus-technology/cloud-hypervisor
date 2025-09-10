@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use std::mem::size_of;
+#[cfg(feature = "kvm")]
+use std::os::fd::RawFd;
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -557,6 +559,13 @@ impl Vcpu {
             .set_gic_redistributor_addr(gicr_base)
             .map_err(Error::VcpuSetGicrBaseAddr)?;
         Ok(())
+    }
+
+    #[cfg(feature = "kvm")]
+    pub fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        // SAFETY: We happen to know that all current uses respect the safety contract.
+        // TODO find a better way to keep this safe and/or express its fragile state.
+        unsafe { self.vcpu.get_kvm_vcpu_raw_fd() }
     }
 }
 
