@@ -14,10 +14,8 @@ use std::any::Any;
 use std::collections::HashMap;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use std::mem::offset_of;
-#[cfg(feature = "tdx")]
-use std::os::unix::io::AsRawFd;
-#[cfg(feature = "tdx")]
-use std::os::unix::io::RawFd;
+#[cfg(any(feature = "tdx", feature = "kvm"))]
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use std::sync::Mutex;
@@ -2709,6 +2707,11 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     fn set_immediate_exit(&mut self, exit: bool) {
         self.fd.set_kvm_immediate_exit(exit.into());
+    }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 
     ///
