@@ -68,9 +68,9 @@ pub enum Error {
     #[error("Error accepting connection")]
     AcceptConnection(#[source] io::Error),
 
-    /// Cannot clone the UnixStream
-    #[error("Error cloning UnixStream")]
-    CloneUnixStream(#[source] io::Error),
+    /// Cannot clone the Stream
+    #[error("Error cloning Stream")]
+    CloneStream(#[source] io::Error),
 
     /// Cannot shutdown the connection
     #[error("Error shutting down a connection")]
@@ -327,7 +327,7 @@ impl SerialManager {
                                     let (unix_stream, _) =
                                         listener.accept().map_err(Error::AcceptConnection)?;
                                     let writer =
-                                        unix_stream.try_clone().map_err(Error::CloneUnixStream)?;
+                                        unix_stream.try_clone().map_err(Error::CloneStream)?;
 
                                     epoll::ctl(
                                         epoll_fd,
