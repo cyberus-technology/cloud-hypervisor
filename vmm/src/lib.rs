@@ -2651,6 +2651,7 @@ mod unit_tests {
                 mode: ConsoleOutputMode::Null,
                 iommu: false,
                 socket: None,
+                url: None,
             },
             console: ConsoleConfig {
                 file: None,
@@ -2658,6 +2659,7 @@ mod unit_tests {
                 mode: ConsoleOutputMode::Off,
                 iommu: false,
                 socket: None,
+                url: None,
             },
             #[cfg(target_arch = "x86_64")]
             debug_console: DebugConsoleConfig::default(),
