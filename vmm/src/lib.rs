@@ -3797,6 +3797,7 @@ mod tests {
                     file: None,
                     mode: ConsoleOutputMode::Null,
                     socket: None,
+                    url: None,
                 },
             },
             console: ConsoleConfig {
@@ -3805,6 +3806,7 @@ mod tests {
                     // Caution: Don't use `Tty` to not mess with users terminal
                     mode: ConsoleOutputMode::Off,
                     socket: None,
+                    url: None,
                 },
                 pci_common: PciDeviceCommonConfig::default(),
             },

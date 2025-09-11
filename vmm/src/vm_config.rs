@@ -710,6 +710,7 @@ pub enum ConsoleOutputMode {
     Tty,
     File,
     Socket,
+    Tcp,
     Null,
 }
 
@@ -724,6 +725,7 @@ pub struct CommonConsoleConfig {
     pub mode: ConsoleOutputMode,
     #[serde(default)]
     pub socket: Option<PathBuf>,
+    pub url: Option<String>,
 }
 
 impl ApplyLandlock for CommonConsoleConfig {
@@ -760,6 +762,7 @@ impl Default for SerialConfig {
                 file: None,
                 mode: ConsoleOutputMode::Null,
                 socket: None,
+                url: None,
             },
         }
     }
@@ -791,6 +794,7 @@ impl Default for ConsoleConfig {
                 file: None,
                 mode: ConsoleOutputMode::Tty,
                 socket: None,
+                url: None,
             },
             pci_common: PciDeviceCommonConfig::default(),
         }
