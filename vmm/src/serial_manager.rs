@@ -93,9 +93,10 @@ pub enum EpollDispatch {
     File = 0,
     Kill = 1,
     Socket = 2,
+    Tcp = 3,
     Unknown,
 }
-const EPOLL_EVENTS_LEN: usize = 4;
+const EPOLL_EVENTS_LEN: usize = 5;
 
 impl From<u64> for EpollDispatch {
     fn from(v: u64) -> Self {
@@ -104,6 +105,7 @@ impl From<u64> for EpollDispatch {
             0 => File,
             1 => Kill,
             2 => Socket,
+            3 => Tcp,
             _ => Unknown,
         }
     }
@@ -347,6 +349,7 @@ impl SerialManager {
                                     reader = Some(unix_stream);
                                     serial.lock().unwrap().set_out(Some(Box::new(writer)));
                                 }
+                                EpollDispatch::Tcp => {}
                                 EpollDispatch::File => {
                                     if event.events & libc::EPOLLIN as u32 != 0 {
                                         let mut input = [0u8; 64];
