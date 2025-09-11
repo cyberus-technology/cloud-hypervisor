@@ -1160,12 +1160,14 @@ impl CpuManager {
 
                                 #[cfg(feature = "kvm")]
                                 if matches!(hypervisor_type, HypervisorType::Kvm) {
-                                    vcpu.lock().unwrap().vcpu.set_immediate_exit(true);
-                                    if !matches!(vcpu.lock().unwrap().run(), Ok(VmExit::Ignore)) {
+                                    let lock = vcpu.lock();
+                                    let mut lock = lock.unwrap();
+                                    lock.vcpu.set_immediate_exit(true);
+                                    if !matches!(lock.run(), Ok(VmExit::Ignore)) {
                                         error!("Unexpected VM exit on \"immediate_exit\" run");
                                         break;
                                     }
-                                    vcpu.lock().unwrap().vcpu.set_immediate_exit(false);
+                                    lock.vcpu.set_immediate_exit(false);
                                 }
 
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
