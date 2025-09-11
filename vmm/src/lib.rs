@@ -2194,6 +2194,10 @@ impl RequestHandler for Vmm {
     ) -> result::Result<(), VmError> {
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
 
+        if desired_vcpus.is_some() {
+            todo!("doesn't work currently with our thread-local KVM_RUN approach");
+        }
+
         if let Some(ref mut vm) = self.vm {
             vm.resize(desired_vcpus, desired_ram, desired_balloon)
                 .inspect_err(|e| error!("Error when resizing VM: {e:?}"))?;
