@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -109,6 +110,58 @@ impl From<u64> for EpollDispatch {
             3 => Tcp,
             _ => Unknown,
         }
+    }
+}
+
+/// A thread-safe writer that fans out to multiple keyed writers. Allows for
+/// bundling different kinds of writers for the serial device, e.g. writing to
+/// a TCP socket and a file.
+#[derive(Clone)]
+struct FanoutWriter {
+    writers: Arc<Mutex<HashMap<String, Box<dyn Write + Send>>>>,
+}
+
+impl FanoutWriter {
+    fn new() -> Self {
+        FanoutWriter {
+            writers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn add_writer<W: Write + Send + 'static>(&self, key: String, writer: W) {
+        let mut writers = self.writers.lock().unwrap();
+        writers.insert(key, Box::new(writer));
+    }
+
+    fn remove_writer(&self, key: &str) -> Option<Box<dyn Write + Send>> {
+        let mut writers = self.writers.lock().unwrap();
+        writers.remove(key)
+    }
+}
+
+impl Write for FanoutWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut writers = self.writers.lock().unwrap();
+        let mut result: io::Result<usize> = Ok(buf.len());
+
+        for (i, w) in writers.values_mut().enumerate() {
+            let r = w.write(buf);
+            if i == 0 {
+                result = r;
+            } else {
+                r?;
+            }
+        }
+
+        result
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut writers = self.writers.lock().unwrap();
+        for w in writers.values_mut() {
+            w.flush()?;
+        }
+        Ok(())
     }
 }
 
@@ -301,8 +354,15 @@ impl SerialManager {
                         apply_filter(&seccomp_filter).map_err(Error::ApplySeccompFilter)?;
                     }
 
+                    let write_distributor = FanoutWriter::new();
+
                     let mut events =
                         [epoll::Event::new(epoll::Events::empty(), 0); EPOLL_EVENTS_LEN];
+                    serial
+                        .as_ref()
+                        .lock()
+                        .unwrap()
+                        .set_out(Some(Box::new(write_distributor.clone())));
 
                     loop {
                         let num_events =
@@ -384,6 +444,7 @@ impl SerialManager {
                                             .shutdown(Shutdown::Both)
                                             .map_err(Error::AcceptConnection)?;
                                         active_tcp_stream.lock().unwrap().take();
+                                        write_distributor.remove_writer("tcp");
                                     }
 
                                     let ConsoleTransport::Tcp(ref listener) = transport else {
@@ -413,7 +474,7 @@ impl SerialManager {
                                     *active_tcp_stream.lock().unwrap() =
                                         Some(active_tcp_stream_handle);
                                     reader_tcp = Some(tcp_stream);
-                                    serial.lock().unwrap().set_out(Some(Box::new(writer)));
+                                    write_distributor.add_writer("tcp".into(), writer);
                                 }
                                 EpollDispatch::File => {
                                     if event.events & libc::EPOLLIN as u32 != 0 {
@@ -447,11 +508,7 @@ impl SerialManager {
                                                             .map_err(Error::ShutdownConnection)?;
                                                         reader_tcp = None;
                                                         active_tcp_stream.lock().unwrap().take();
-                                                        serial
-                                                            .as_ref()
-                                                            .lock()
-                                                            .unwrap()
-                                                            .set_out(None);
+                                                        write_distributor.remove_writer("tcp");
                                                     }
                                                     count
                                                 } else {
