@@ -73,6 +73,8 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{SIGRTMIN, register_signal_handler};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
+#[cfg(feature = "kvm")]
+use {kvm_bindings::kvm_run, std::cell::Cell, std::os::fd::RawFd, std::sync::RwLock};
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
@@ -87,6 +89,16 @@ use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::vm::physical_bits;
 use crate::vm_config::CpusConfig;
 use crate::{CPU_MANAGER_SNAPSHOT_ID, GuestMemoryMmap};
+
+#[cfg(feature = "kvm")]
+thread_local! {
+    static KVM_RUN: Cell<*mut kvm_run> = const {Cell::new(core::ptr::null_mut())};
+}
+#[cfg(feature = "kvm")]
+/// Tell signal handler to not access certain stuff anymore during shutdown.
+/// Otherwise => panics.
+/// Better alternative would be to prevent signals there at all.
+pub static IS_IN_SHUTDOWN: RwLock<bool> = RwLock::new(false);
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -485,6 +497,13 @@ impl Vcpu {
             .map_err(Error::VcpuSetGicrBaseAddr)?;
         Ok(())
     }
+
+    #[cfg(feature = "kvm")]
+    pub fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        // SAFETY: We happen to know that all current uses respect the safety contract.
+        // TODO find a better way to keep this safe and/or express its fragile state.
+        unsafe { self.vcpu.get_kvm_vcpu_raw_fd() }
+    }
 }
 
 impl Pausable for Vcpu {}
@@ -633,6 +652,7 @@ struct VcpuState {
     handle: Option<thread::JoinHandle<()>>,
     kill: Arc<AtomicBool>,
     vcpu_run_interrupted: Arc<AtomicBool>,
+    /// Used to ACK state changes from the run vCPU loop to the CPU Manager.
     paused: Arc<AtomicBool>,
 }
 
@@ -996,9 +1016,9 @@ impl CpuManager {
         #[cfg(feature = "guest_debug")]
         let vm_debug_evt = self.vm_debug_evt.try_clone().unwrap();
         let panic_exit_evt = self.exit_evt.try_clone().unwrap();
-        let vcpu_kill_signalled = self.vcpus_kill_signalled.clone();
-        let vcpu_pause_signalled = self.vcpus_pause_signalled.clone();
-        let vcpu_kick_signalled = self.vcpus_kick_signalled.clone();
+        let vcpus_kill_signalled_clone = self.vcpus_kill_signalled.clone();
+        let vcpus_pause_signalled_clone = self.vcpus_pause_signalled.clone();
+        let vcpus_kick_signalled_clone = self.vcpus_kick_signalled.clone();
 
         let vcpu_kill = self.vcpu_states[usize::try_from(vcpu_id).unwrap()]
             .kill
@@ -1041,6 +1061,28 @@ impl CpuManager {
             thread::Builder::new()
                 .name(format!("vcpu{vcpu_id}"))
                 .spawn(move || {
+                    // init thread-local kvm_run structure
+                    #[cfg(feature = "kvm")]
+                    {
+                        let raw_kvm_fd = vcpu.lock().unwrap().get_kvm_vcpu_raw_fd();
+
+                        // SAFETY: We know the FD is valid and have the proper args.
+                        let buffer = unsafe {
+                            libc::mmap(
+                                core::ptr::null_mut(),
+                                4096,
+                                libc::PROT_WRITE | libc::PROT_READ,
+                                libc::MAP_SHARED,
+                                raw_kvm_fd,
+                                0,
+                            )
+                        };
+                        assert!(!buffer.is_null());
+                        assert_ne!(buffer, libc::MAP_FAILED);
+                        let kvm_run = buffer.cast::<kvm_run>();
+                        KVM_RUN.set(kvm_run);
+                    }
+
                     // Schedule the thread to run on the expected CPU set
                     if let Some(cpuset) = cpuset.as_ref() {
                         // SAFETY: FFI call with correct arguments
@@ -1070,7 +1112,35 @@ impl CpuManager {
                             return;
                         }
 
+                    #[cfg(not(feature = "kvm"))]
                     extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {}
+                    #[cfg(feature = "kvm")]
+                    extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {
+                        // We do not need a self-pipe for safe UNIX signal handling here as in this
+                        // signal handler, we only expect the same signal over and over again. While
+                        // different signals can interrupt a signal being handled, the same signal
+                        // again can't by default. Therefore, this is safe.
+
+                        // This lock prevents accessing thread locals when a signal is received
+                        // in the teardown phase of the Rust standard library. Otherwise, we would
+                        // panic.
+                        //
+                        // Masking signals would be a nicer approach but this is the pragmatic
+                        // solution.
+                        //
+                        // We don't have lock contention in normal operation. When the writer
+                        // sets the bool to true, the lock is only held for a couple of µs.
+                        let lock = IS_IN_SHUTDOWN.read().unwrap();
+                        if *lock {
+                            return;
+                        }
+
+                        let kvm_run = KVM_RUN.get();
+                        // SAFETY: the mapping is valid
+                        let kvm_run = unsafe {
+                            kvm_run.as_mut().expect("kvm_run should have been mapped as part of vCPU setup") };
+                        kvm_run.immediate_exit = 1;
+                    }
                     // This uses an async signal safe handler to kill the vcpu handles.
                     register_signal_handler(SIGRTMIN(), handle_signal)
                         .expect("Failed to register vcpu signal handler");
@@ -1091,7 +1161,7 @@ impl CpuManager {
                             // loads and stores to different atomics and we need
                             // to see them in a consistent order in all threads
 
-                            if vcpu_pause_signalled.load(Ordering::SeqCst) {
+                            if vcpus_pause_signalled_clone.load(Ordering::SeqCst) {
                                 // As a pause can be caused by PIO & MMIO exits then we need to ensure they are
                                 // completed by returning to KVM_RUN. From the kernel docs:
                                 //
@@ -1109,24 +1179,27 @@ impl CpuManager {
 
                                 #[cfg(feature = "kvm")]
                                 if matches!(hypervisor_type, HypervisorType::Kvm) {
-                                    vcpu.lock().as_ref().unwrap().vcpu.set_immediate_exit(true);
-                                    if !matches!(vcpu.lock().unwrap().run(), Ok(VmExit::Ignore)) {
+                                    let lock = vcpu.lock();
+                                    let lock = lock.as_ref().unwrap();
+                                    lock.vcpu.set_immediate_exit(true);
+                                    if !matches!(lock.run(), Ok(VmExit::Ignore)) {
                                         error!("Unexpected VM exit on \"immediate_exit\" run");
                                         break;
                                     }
-                                    vcpu.lock().as_ref().unwrap().vcpu.set_immediate_exit(false);
+                                    lock.vcpu.set_immediate_exit(false);
                                 }
 
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
 
                                 vcpu_paused.store(true, Ordering::SeqCst);
-                                while vcpu_pause_signalled.load(Ordering::SeqCst) {
+                                while vcpus_pause_signalled_clone.load(Ordering::SeqCst) {
                                     thread::park();
                                 }
+                                vcpu_paused.store(false, Ordering::SeqCst);
                                 vcpu_run_interrupted.store(false, Ordering::SeqCst);
                             }
 
-                            if vcpu_kick_signalled.load(Ordering::SeqCst) {
+                            if vcpus_kick_signalled_clone.load(Ordering::SeqCst) {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
                                 #[cfg(target_arch = "x86_64")]
                                 match vcpu.lock().as_ref().unwrap().vcpu.nmi() {
@@ -1139,7 +1212,7 @@ impl CpuManager {
                             }
 
                             // We've been told to terminate
-                            if vcpu_kill_signalled.load(Ordering::SeqCst)
+                            if vcpus_kill_signalled_clone.load(Ordering::SeqCst)
                                 || vcpu_kill.load(Ordering::SeqCst)
                             {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
@@ -1158,7 +1231,7 @@ impl CpuManager {
                                         info!("VmExit::Debug");
                                         #[cfg(feature = "guest_debug")]
                                         {
-                                            vcpu_pause_signalled.store(true, Ordering::SeqCst);
+                                            vcpus_pause_signalled_clone.store(true, Ordering::SeqCst);
                                             let raw_tid = get_raw_tid(vcpu_id as usize);
                                             vm_debug_evt.write(raw_tid as u64).unwrap();
                                         }
@@ -1219,7 +1292,7 @@ impl CpuManager {
                             }
 
                             // We've been told to terminate
-                            if vcpu_kill_signalled.load(Ordering::SeqCst)
+                            if vcpus_kill_signalled_clone.load(Ordering::SeqCst)
                                 || vcpu_kill.load(Ordering::SeqCst)
                             {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
@@ -2317,10 +2390,9 @@ impl Pausable for CpuManager {
 
         self.signal_vcpus();
 
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         for vcpu in self.vcpus.iter() {
-            let mut vcpu = vcpu.lock().unwrap();
-            vcpu.pause()?;
-            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            let vcpu = vcpu.lock().unwrap();
             if !self.config.kvm_hyperv {
                 vcpu.vcpu.notify_guest_clock_paused().map_err(|e| {
                     MigratableError::Pause(anyhow!(
@@ -2335,6 +2407,7 @@ impl Pausable for CpuManager {
         // activated vCPU change their state to ensure they have parked.
         for state in self.vcpu_states.iter() {
             if state.active() {
+                // wait for vCPU to update state
                 while !state.paused.load(Ordering::SeqCst) {
                     // To avoid a priority inversion with the vCPU thread
                     thread::sleep(std::time::Duration::from_millis(1));
@@ -2346,20 +2419,26 @@ impl Pausable for CpuManager {
     }
 
     fn resume(&mut self) -> std::result::Result<(), MigratableError> {
-        for vcpu in self.vcpus.iter() {
-            vcpu.lock().unwrap().resume()?;
-        }
-
-        // Toggle the vCPUs pause boolean
+        // Ensure that vCPUs keep running after being unpark() in
+        // their run vCPU loop.
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
 
-        // Unpark all the VCPU threads.
-        // Once unparked, the next thing they will do is checking for the pause
-        // boolean. Since it'll be set to false, they will exit their pause loop
-        // and go back to vmx root.
-        for state in self.vcpu_states.iter() {
-            state.paused.store(false, Ordering::SeqCst);
-            state.unpark_thread();
+        // Unpark all the vCPU threads.
+        // Step 1/2: signal each thread
+        {
+            for state in self.vcpu_states.iter() {
+                state.unpark_thread();
+            }
+        }
+        // Step 2/2: wait for state ACK
+        {
+            for state in self.vcpu_states.iter() {
+                // wait for vCPU to update state
+                while state.paused.load(Ordering::SeqCst) {
+                    // To avoid a priority inversion with the vCPU thread
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
         }
         Ok(())
     }

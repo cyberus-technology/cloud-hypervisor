@@ -14,10 +14,8 @@ use std::any::Any;
 use std::collections::HashMap;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use std::mem::offset_of;
-#[cfg(feature = "tdx")]
-use std::os::unix::io::AsRawFd;
-#[cfg(feature = "tdx")]
-use std::os::unix::io::RawFd;
+#[cfg(any(feature = "tdx", feature = "kvm"))]
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 #[cfg(target_arch = "x86_64")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2029,7 +2027,8 @@ impl cpu::Vcpu for KvmVcpu {
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
     fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
-        match self.fd.lock().unwrap().run() {
+        let mut lock = self.fd.lock().unwrap();
+        match lock.run() {
             Ok(run) => match run {
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoIn(addr, data) => {
@@ -2108,7 +2107,11 @@ impl cpu::Vcpu for KvmVcpu {
             },
 
             Err(ref e) => match e.errno() {
-                libc::EAGAIN | libc::EINTR => Ok(cpu::VmExit::Ignore),
+                libc::EINTR => {
+                    lock.set_kvm_immediate_exit(0);
+                    Ok(cpu::VmExit::Ignore)
+                }
+                libc::EAGAIN => Ok(cpu::VmExit::Ignore),
                 _ => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "VCPU error {:?}",
                     e
@@ -2809,6 +2812,13 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     fn set_immediate_exit(&self, exit: bool) {
         self.fd.lock().unwrap().set_kvm_immediate_exit(exit.into());
+    }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        let kvm_vcpu = self.fd.lock().unwrap();
+        let kvm_vcpu = &*kvm_vcpu;
+        kvm_vcpu.as_raw_fd()
     }
 
     ///

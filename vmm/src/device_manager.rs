@@ -2858,6 +2858,7 @@ impl DeviceManager {
 
         let (virtio_device, migratable_device) = if net_cfg.vhost_user {
             let socket = net_cfg.vhost_socket.as_ref().unwrap().clone();
+            debug!("Creating virtio-net device with vhost-user backend: {socket}");
             let vu_cfg = VhostUserConfig {
                 socket,
                 num_queues: net_cfg.num_queues,
@@ -2900,6 +2901,7 @@ impl DeviceManager {
             let state = state_from_id(self.snapshot.as_ref(), id.as_str())
                 .map_err(DeviceManagerError::RestoreGetState)?;
             let virtio_net = if let Some(ref tap_if_name) = net_cfg.tap {
+                debug!("Creating virtio-net device from Tap device: {tap_if_name}");
                 Arc::new(Mutex::new(
                     virtio_devices::Net::new(
                         id.clone(),
@@ -2925,6 +2927,7 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
             } else if let Some(fds) = &net_cfg.fds {
+                debug!("Creating virtio-net device from network FDs: {fds:?}");
                 let net = virtio_devices::Net::from_tap_fds(
                     id.clone(),
                     fds,
@@ -2951,6 +2954,9 @@ impl DeviceManager {
 
                 Arc::new(Mutex::new(net))
             } else {
+                debug!(
+                    "Creating virtio-net device: no ifname or FDs given, creating new Tap device"
+                );
                 Arc::new(Mutex::new(
                     virtio_devices::Net::new(
                         id.clone(),
@@ -4401,6 +4407,10 @@ impl DeviceManager {
         Ok(())
     }
 
+    /// Notifies the VM for a hotplug.
+    ///
+    /// This call doesn't wait for the vCPU receiving the
+    /// interrupt to acknowledge.
     pub fn notify_hotplug(
         &self,
         _notification_type: AcpiNotificationFlags,
@@ -4513,8 +4523,25 @@ impl DeviceManager {
                     .device_type(),
             );
             match device_type {
-                VirtioDeviceType::Net
-                | VirtioDeviceType::Block
+                VirtioDeviceType::Net => {
+                    let mut config = self.config.lock().unwrap();
+                    let nets = config.net.as_deref_mut().unwrap();
+                    let net_dev_cfg = nets
+                        .iter_mut()
+                        .find(|net| net.id.as_ref() == Some(&id))
+                        .unwrap();
+                    let fds = net_dev_cfg.fds.take().unwrap_or(Vec::new());
+
+                    debug!("Closing preserved FDs from virtio-net device: id={id}, fds={fds:?}");
+                    for fd in fds {
+                        config.preserved_fds.as_mut().unwrap().retain(|x| *x != fd);
+                        // SAFETY: Trivially safe. We know the FD is not referenced any longer.
+                        unsafe {
+                            libc::close(fd);
+                        }
+                    }
+                }
+                VirtioDeviceType::Block
                 | VirtioDeviceType::Pmem
                 | VirtioDeviceType::Fs
                 | VirtioDeviceType::Vsock => {}

@@ -46,7 +46,7 @@ use vmm_sys_util::eventfd::EventFd;
 pub use self::dbus::start_dbus_thread;
 pub use self::http::{start_http_fd_thread, start_http_path_thread};
 use crate::Error as VmmError;
-use crate::config::RestoreConfig;
+use crate::config::{RestoreConfig, RestoredNetConfig};
 use crate::device_tree::DeviceTree;
 use crate::vm::{Error as VmError, VmState};
 use crate::vm_config::{
@@ -249,6 +249,8 @@ pub struct VmCoredumpData {
 pub struct VmReceiveMigrationData {
     /// URL for the reception of migration state
     pub receiver_url: String,
+    /// Map with new network FDs on the new host.
+    pub net_fds: Option<Vec<RestoredNetConfig>>,
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]
@@ -258,6 +260,17 @@ pub struct VmSendMigrationData {
     /// Send memory across socket without copying
     #[serde(default)]
     pub local: bool,
+    /// Microsecond level downtime
+    #[serde(default = "default_downtime")]
+    pub downtime: u64,
+    /// Second level migration timeout
+    #[serde(default)]
+    pub migration_timeout: u64,
+}
+
+// Default value for downtime the same as qemu.
+fn default_downtime() -> u64 {
+    300
 }
 
 pub enum ApiResponsePayload {

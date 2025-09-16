@@ -479,6 +479,16 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .subcommand_matches("send-migration")
                     .unwrap()
                     .get_flag("send_migration_local"),
+                *matches
+                    .subcommand_matches("send-migration")
+                    .unwrap()
+                    .get_one::<u64>("downtime-ms")
+                    .unwrap_or(&300),
+                *matches
+                    .subcommand_matches("send-migration")
+                    .unwrap()
+                    .get_one::<u64>("migration-timeout-s")
+                    .unwrap_or(&3600),
             );
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
                 .map_err(Error::HttpApiClient)
@@ -693,6 +703,16 @@ fn dbus_api_do_command(matches: &ArgMatches, proxy: &DBusApi1ProxyBlocking<'_>) 
                     .subcommand_matches("send-migration")
                     .unwrap()
                     .get_flag("send_migration_local"),
+                *matches
+                    .subcommand_matches("send-migration")
+                    .unwrap()
+                    .get_one::<u64>("downtime-ms")
+                    .unwrap_or(&300),
+                *matches
+                    .subcommand_matches("send-migration")
+                    .unwrap()
+                    .get_one::<u64>("migration-timeout-s")
+                    .unwrap_or(&3600),
             );
             proxy.api_vm_send_migration(&send_migration_data)
         }
@@ -877,15 +897,21 @@ fn coredump_config(destination_url: &str) -> String {
 fn receive_migration_data(url: &str) -> String {
     let receive_migration_data = vmm::api::VmReceiveMigrationData {
         receiver_url: url.to_owned(),
+        // Only FDs transmitted via an SCM_RIGHTS UNIX Domain Socket message
+        // are valid. Transmitting specific FD nums via the HTTP API is
+        // almost always invalid.
+        net_fds: None,
     };
 
     serde_json::to_string(&receive_migration_data).unwrap()
 }
 
-fn send_migration_data(url: &str, local: bool) -> String {
+fn send_migration_data(url: &str, local: bool, downtime: u64, migration_timeout: u64) -> String {
     let send_migration_data = vmm::api::VmSendMigrationData {
         destination_url: url.to_owned(),
         local,
+        downtime,
+        migration_timeout,
     };
 
     serde_json::to_string(&send_migration_data).unwrap()
@@ -997,6 +1023,7 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
             .arg(
                 Arg::new("receive_migration_config")
                     .index(1)
+                    // Live migration with net_fds not supported in ch-remote.
                     .help("<receiver_url>"),
             ),
         Command::new("remove-device")
@@ -1046,6 +1073,24 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
         Command::new("resume").about("Resume the VM"),
         Command::new("send-migration")
             .about("Initiate a VM migration")
+            .arg(
+                Arg::new("downtime-ms")
+                    .long("downtime-ms")
+                    .visible_alias("downtime")
+                    .help("Set the expected maximum downtime in milliseconds")
+                    .num_args(1)
+                    .value_parser(clap::value_parser!(u64))
+                    .default_value("300"),
+            )
+            .arg(
+                Arg::new("migration-timeout-s")
+                    .long("migration-timeout-s")
+                    .visible_alias("migration-timeout")
+                    .help("Set the maximum allowed migration time in seconds")
+                    .num_args(1)
+                    .value_parser(clap::value_parser!(u64))
+                    .default_value("3600"),
+            )
             .arg(
                 Arg::new("send_migration_config")
                     .index(1)
