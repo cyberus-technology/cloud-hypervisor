@@ -1851,12 +1851,6 @@ impl ConsoleConfig {
             mode = ConsoleOutputMode::Tty
         } else if parser.is_set("null") {
             mode = ConsoleOutputMode::Null
-        } else if parser.is_set("file") {
-            mode = ConsoleOutputMode::File;
-            file =
-                Some(PathBuf::from(parser.get("file").ok_or(
-                    Error::Validation(ValidationError::ConsoleFileMissing),
-                )?));
         } else if parser.is_set("tcp") {
             mode = ConsoleOutputMode::Tcp;
             url = Some(
@@ -1864,6 +1858,18 @@ impl ConsoleConfig {
                     .get("tcp")
                     .ok_or(Error::Validation(ValidationError::ConsoleTcpAddressMissing))?,
             );
+            if parser.is_set("file") {
+                file =
+                    Some(PathBuf::from(parser.get("file").ok_or(
+                        Error::Validation(ValidationError::ConsoleFileMissing),
+                    )?));
+            }
+        } else if parser.is_set("file") {
+            mode = ConsoleOutputMode::File;
+            file =
+                Some(PathBuf::from(parser.get("file").ok_or(
+                    Error::Validation(ValidationError::ConsoleFileMissing),
+                )?));
         } else if parser.is_set("socket") {
             mode = ConsoleOutputMode::Socket;
             socket = Some(PathBuf::from(parser.get("socket").ok_or(
