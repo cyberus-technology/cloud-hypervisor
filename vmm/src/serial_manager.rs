@@ -333,8 +333,11 @@ impl SerialManager {
             .spawn(move || {
                 std::panic::catch_unwind(AssertUnwindSafe(move || {
                     let write_distributor = match &transport {
-                        ConsoleTransport::Tcp(_, _) => {
+                        ConsoleTransport::Tcp(_, file_opt) => {
                             let distributor = FanoutWriter::new();
+                            if let Some(file) = file_opt {
+                                distributor.add_writer("file".into(), Arc::clone(file));
+                            }
                             serial
                                 .as_ref()
                                 .lock()
