@@ -2535,6 +2535,12 @@ impl CommonConsoleConfig {
                     .get("tcp")
                     .ok_or(Error::Validation(ValidationError::ConsoleTcpAddressMissing))?,
             );
+            if parser.is_set("file") {
+                file =
+                    Some(PathBuf::from(parser.get("file").ok_or(
+                        Error::Validation(ValidationError::ConsoleFileMissing),
+                    )?));
+            }
         } else if parser.is_set("socket") {
             mode = ConsoleOutputMode::Socket;
             socket = Some(PathBuf::from(parser.get("socket").ok_or(

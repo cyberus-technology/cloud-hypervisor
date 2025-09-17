@@ -80,7 +80,7 @@ pub enum ConsoleTransport {
     Tty(Arc<File>),
     Null,
     Socket(Arc<LockedUnixListener>),
-    Tcp(Arc<TcpListener>),
+    Tcp(Arc<TcpListener>, Option<Arc<File>>),
     Off,
 }
 
@@ -323,7 +323,13 @@ pub(crate) fn pre_create_console_devices(vmm: &mut Vmm) -> ConsoleDeviceResult<C
                     .map_err(|_| ConsoleDeviceError::WrongTcpAddressFormat(url.to_string()))?;
                 let listener = TcpListener::bind(socket_addr)
                     .map_err(ConsoleDeviceError::CreateConsoleDevice)?;
-                ConsoleTransport::Tcp(Arc::new(listener))
+
+                let mut f = None;
+                if let Some(p) = &vmconfig.serial.common.file {
+                    let file = File::create(p).map_err(ConsoleDeviceError::CreateConsoleDevice)?;
+                    f = Some(Arc::new(file));
+                }
+                ConsoleTransport::Tcp(Arc::new(listener), f)
             }
             ConsoleOutputMode::Null => ConsoleTransport::Null,
             ConsoleOutputMode::Off => ConsoleTransport::Off,

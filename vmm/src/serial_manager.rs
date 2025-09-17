@@ -218,13 +218,13 @@ impl SerialManager {
                 return Ok(None);
             }
             ConsoleTransport::Socket(ref listener) => listener.as_raw_fd(),
-            ConsoleTransport::Tcp(ref listener) => listener.as_raw_fd(),
+            ConsoleTransport::Tcp(ref listener, _) => listener.as_raw_fd(),
             _ => return Ok(None),
         };
 
         let in_event = match &transport {
             ConsoleTransport::Socket(_) => EpollDispatch::Socket,
-            ConsoleTransport::Tcp(_) => EpollDispatch::Tcp,
+            ConsoleTransport::Tcp(_, _) => EpollDispatch::Tcp,
             _ => EpollDispatch::File,
         };
 
@@ -354,15 +354,21 @@ impl SerialManager {
                         apply_filter(&seccomp_filter).map_err(Error::ApplySeccompFilter)?;
                     }
 
-                    let write_distributor = FanoutWriter::new();
+                    let write_distributor = match &transport {
+                        ConsoleTransport::Tcp(_, _) => {
+                            let distributor = FanoutWriter::new();
+                            serial
+                                .as_ref()
+                                .lock()
+                                .unwrap()
+                                .set_out(Some(Box::new(distributor.clone())));
+                            Some(distributor)
+                        }
+                        _ => None,
+                    };
 
                     let mut events =
                         [epoll::Event::new(epoll::Events::empty(), 0); EPOLL_EVENTS_LEN];
-                    serial
-                        .as_ref()
-                        .lock()
-                        .unwrap()
-                        .set_out(Some(Box::new(write_distributor.clone())));
 
                     loop {
                         let num_events =
@@ -444,10 +450,12 @@ impl SerialManager {
                                             .shutdown(Shutdown::Both)
                                             .map_err(Error::AcceptConnection)?;
                                         active_tcp_stream.lock().unwrap().take();
-                                        write_distributor.remove_writer("tcp");
+                                        if let Some(distributor) = &write_distributor {
+                                            distributor.remove_writer("tcp");
+                                        }
                                     }
 
-                                    let ConsoleTransport::Tcp(ref listener) = transport else {
+                                    let ConsoleTransport::Tcp(ref listener, _) = transport else {
                                         unreachable!();
                                     };
 
@@ -474,7 +482,9 @@ impl SerialManager {
                                     *active_tcp_stream.lock().unwrap() =
                                         Some(active_tcp_stream_handle);
                                     reader_tcp = Some(tcp_stream);
-                                    write_distributor.add_writer("tcp".into(), writer);
+                                    if let Some(distributor) = &write_distributor {
+                                        distributor.add_writer("tcp".into(), writer);
+                                    }
                                 }
                                 EpollDispatch::File => {
                                     if event.events & libc::EPOLLIN as u32 != 0 {
@@ -495,7 +505,7 @@ impl SerialManager {
                                                     0
                                                 }
                                             }
-                                            ConsoleTransport::Tcp(_) => {
+                                            ConsoleTransport::Tcp(_, _) => {
                                                 if let Some(mut serial_reader) = reader_tcp.as_ref()
                                                 {
                                                     let count = serial_reader
@@ -508,7 +518,11 @@ impl SerialManager {
                                                             .map_err(Error::ShutdownConnection)?;
                                                         reader_tcp = None;
                                                         active_tcp_stream.lock().unwrap().take();
-                                                        write_distributor.remove_writer("tcp");
+                                                        if let Some(distributor) =
+                                                            &write_distributor
+                                                        {
+                                                            distributor.remove_writer("tcp");
+                                                        }
                                                     }
                                                     count
                                                 } else {
