@@ -583,7 +583,8 @@ pub struct SerialConfig {
 }
 
 impl SerialConfig {
-    pub const SYNTAX: &str = "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>\"";
+    pub const SYNTAX: &str =
+        "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>|tcp=<host:port>\"";
 }
 
 impl Default for SerialConfig {
