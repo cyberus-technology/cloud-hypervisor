@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -117,7 +118,7 @@ impl From<u64> for EpollDispatch {
 /// a TCP socket and a file.
 #[derive(Clone)]
 pub struct FanoutWriter {
-    writers: Arc<Mutex<HashMap<String, Box<dyn Write + Send>>>>,
+    writers: Arc<Mutex<HashMap<TypeId, Box<dyn Write + Send>>>>,
 }
 
 impl FanoutWriter {
@@ -127,14 +128,14 @@ impl FanoutWriter {
         }
     }
 
-    pub fn add_writer<W: Write + Send + 'static>(&self, key: String, writer: W) {
+    pub fn add_writer<W: Write + Send + 'static>(&self, writer: W) {
         let mut writers = self.writers.lock().unwrap();
-        writers.insert(key, Box::new(writer));
+        writers.insert(TypeId::of::<W>(), Box::new(writer));
     }
 
-    pub fn remove_writer(&self, key: &str) -> Option<Box<dyn Write + Send>> {
+    pub fn remove_writer(&self, id: TypeId) -> Option<Box<dyn Write + Send>> {
         let mut writers = self.writers.lock().unwrap();
-        writers.remove(key)
+        writers.remove(&id)
     }
 }
 
@@ -336,7 +337,7 @@ impl SerialManager {
                         ConsoleTransport::Tcp(_, file_opt) => {
                             let distributor = FanoutWriter::new();
                             if let Some(file) = file_opt {
-                                distributor.add_writer("file".into(), Arc::clone(file));
+                                distributor.add_writer(Arc::clone(file));
                             }
                             serial
                                 .as_ref()
@@ -428,7 +429,7 @@ impl SerialManager {
                                             .shutdown(Shutdown::Both)
                                             .map_err(Error::AcceptConnection)?;
                                         if let Some(distributor) = &write_distributor {
-                                            distributor.remove_writer("tcp");
+                                            distributor.remove_writer(TypeId::of::<TcpStream>());
                                         }
                                     }
 
@@ -455,7 +456,7 @@ impl SerialManager {
                                     .map_err(Error::Epoll)?;
                                     reader_tcp = Some(tcp_stream);
                                     if let Some(distributor) = &write_distributor {
-                                        distributor.add_writer("tcp".into(), writer);
+                                        distributor.add_writer(writer);
                                     }
                                 }
                                 EpollDispatch::File => {
@@ -499,7 +500,9 @@ impl SerialManager {
                                                         if let Some(distributor) =
                                                             &write_distributor
                                                         {
-                                                            distributor.remove_writer("tcp");
+                                                            distributor.remove_writer(
+                                                                TypeId::of::<TcpStream>(),
+                                                            );
                                                         }
                                                     }
                                                     count
