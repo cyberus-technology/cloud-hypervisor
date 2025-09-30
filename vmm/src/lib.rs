@@ -1160,7 +1160,7 @@ impl Vmm {
             false
         } else {
             let iteration = s.iteration - AUTO_CONVERGE_ITERATION_DELAY;
-            iteration % AUTO_CONVERGE_ITERATION_INCREASE == 0
+            iteration.is_multiple_of(AUTO_CONVERGE_ITERATION_INCREASE)
         }
     }
 
