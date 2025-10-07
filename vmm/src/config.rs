@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::result;
 use std::str::FromStr;
 
+use arch::CpuProfile;
 use clap::ArgMatches;
 use log::{debug, warn};
 use option_parser::{
@@ -606,7 +607,8 @@ impl CpusConfig {
             .add("max_phys_bits")
             .add("affinity")
             .add("features")
-            .add("nested");
+            .add("nested")
+            .add("profile");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u32 = parser
@@ -638,6 +640,12 @@ impl CpusConfig {
                     })
                     .collect()
             });
+
+        let profile = parser
+            .convert::<CpuProfile>("profile")
+            .map_err(Error::ParseCpus)?
+            .unwrap_or_default();
+
         let features_list = parser
             .convert::<StringList>("features")
             .map_err(Error::ParseCpus)?
@@ -682,6 +690,7 @@ impl CpusConfig {
             affinity,
             features,
             nested,
+            profile,
         })
     }
 }
