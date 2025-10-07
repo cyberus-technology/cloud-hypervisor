@@ -34,6 +34,9 @@ impl CpuProfile {
                 */
                 Some(
                     serde_json::from_slice(include_bytes!("cpu_profiles/dev_profile.json"))
+                        .inspect_err(|e| {
+                            error!("BUG: could not deserialize CPU profile. Got error: {:?}", e)
+                        })
                         .expect("should be able to deserialize pre-generated data"),
                 )
             }
