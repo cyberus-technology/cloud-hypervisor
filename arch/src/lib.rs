@@ -11,10 +11,15 @@
 #[macro_use]
 extern crate log;
 
+#[cfg(target_arch = "x86_64")]
+pub use crate::x86_64::cpu_profile::CpuProfile;
+
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, result};
 
+use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -55,6 +60,31 @@ pub enum Error {
 
 /// Type for returning public functions outcome.
 pub type Result<T> = result::Result<T, Error>;
+
+// If the target_arch is x86_64 we import CpuProfile from the x86_64 module, otherwise we
+// declare it here.
+#[cfg(not(target_arch = "x86_64"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+/// A [`CpuProfile`] is a mechanism for ensuring live migration compatibility
+/// between host's with potentially different CPU models.
+pub enum CpuProfile {
+    #[default]
+    Host,
+}
+
+impl FromStr for CpuProfile {
+    type Err = serde::de::value::Error;
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        // Should accept both plain strings, and strings surrounded by `"`.
+        let normalized = s
+            .strip_prefix('"')
+            .unwrap_or(s)
+            .strip_suffix('"')
+            .unwrap_or(s);
+        Self::deserialize(normalized.into_deserializer())
+    }
+}
 
 /// Type for memory region types.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
