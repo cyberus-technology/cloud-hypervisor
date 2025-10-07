@@ -10,6 +10,8 @@ fw_cfg = []
 kvm = ["hypervisor/kvm"]
 sev_snp = []
 tdx = []
+# Currently cpu profiles can only be generated with KVM
+cpu_profile_generation = ["kvm"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -19,6 +21,8 @@ libc = { workspace = true }
 linux-loader = { workspace = true, features = ["bzimage", "elf", "pe"] }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
+# We currently use this for (de-)serializing CPU profile data
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 vm-memory = { workspace = true, features = ["backend-bitmap", "backend-mmap"] }
