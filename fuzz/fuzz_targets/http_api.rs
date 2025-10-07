@@ -139,6 +139,7 @@ impl RequestHandler for StubApiRequestHandler {
                     features: CpuFeatures::default(),
                     nested: true,
                     core_scheduling: CoreScheduling::default(),
+                    profile: Default::default(),
                 },
                 memory: MemoryConfig {
                     size: 536_870_912,
