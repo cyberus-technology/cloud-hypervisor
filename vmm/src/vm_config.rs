@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, result};
 
+use arch::CpuProfile;
 use block::ImageType;
 use log::{debug, warn};
 use net_util::MacAddr;
@@ -72,6 +73,8 @@ pub struct CpusConfig {
     pub features: CpuFeatures,
     #[serde(default = "default_cpusconfig_nested")]
     pub nested: bool,
+    #[serde(default)]
+    pub profile: CpuProfile,
 }
 
 pub const DEFAULT_VCPUS: u32 = 1;
@@ -87,6 +90,7 @@ impl Default for CpusConfig {
             affinity: None,
             features: CpuFeatures::default(),
             nested: true,
+            profile: CpuProfile::default(),
         }
     }
 }
