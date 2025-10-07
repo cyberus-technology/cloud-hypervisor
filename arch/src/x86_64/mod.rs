@@ -29,7 +29,7 @@ use vm_memory::{
     GuestMemoryRegion,
 };
 
-use crate::{GuestMemoryMmap, InitramfsConfig, RegionType};
+use crate::{CpuProfile, GuestMemoryMmap, InitramfsConfig, RegionType};
 mod smbios;
 use std::arch::x86_64;
 #[cfg(feature = "tdx")]
@@ -87,6 +87,7 @@ pub struct CpuidConfig {
     #[cfg(feature = "tdx")]
     pub tdx: bool,
     pub amx: bool,
+    pub profile: CpuProfile,
 }
 
 #[derive(Debug, Error)]

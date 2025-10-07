@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::result;
 use std::str::FromStr;
 
+use arch::CpuProfile;
 use clap::ArgMatches;
 use option_parser::{
     ByteSized, IntegerList, OptionParser, OptionParserError, StringList, Toggle, Tuple,
@@ -597,6 +598,7 @@ impl CpusConfig {
             .add("kvm_hyperv")
             .add("max_phys_bits")
             .add("affinity")
+            .add("profile")
             .add("features");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
@@ -629,6 +631,12 @@ impl CpusConfig {
                     })
                     .collect()
             });
+
+        let profile = parser
+            .convert::<CpuProfile>("profile")
+            .map_err(Error::ParseCpus)?
+            .unwrap_or_default();
+
         let features_list = parser
             .convert::<StringList>("features")
             .map_err(Error::ParseCpus)?
@@ -660,6 +668,7 @@ impl CpusConfig {
             max_phys_bits,
             affinity,
             features,
+            profile,
         })
     }
 }

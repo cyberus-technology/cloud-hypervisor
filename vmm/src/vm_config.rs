@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, result};
 
+use arch::CpuProfile;
 use net_util::MacAddr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -68,6 +69,8 @@ pub struct CpusConfig {
     pub affinity: Option<Vec<CpuAffinity>>,
     #[serde(default)]
     pub features: CpuFeatures,
+    #[serde(default)]
+    pub profile: CpuProfile,
 }
 
 pub const DEFAULT_VCPUS: u32 = 1;
@@ -82,6 +85,7 @@ impl Default for CpusConfig {
             max_phys_bits: DEFAULT_MAX_PHYS_BITS,
             affinity: None,
             features: CpuFeatures::default(),
+            profile: CpuProfile::default(),
         }
     }
 }
