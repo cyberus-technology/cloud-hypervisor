@@ -18,7 +18,7 @@ mod mptable;
 pub mod regs;
 use std::mem;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use hypervisor::arch::x86::{CPUID_FLAG_VALID_INDEX, CpuIdEntry};
 use hypervisor::{CpuVendor, HypervisorCpuError, HypervisorError};
 use linux_loader::loader::bootparam::{boot_params, setup_header};
@@ -631,7 +631,7 @@ pub fn generate_common_cpuid(
     let use_custom_profile = config.profile != CpuProfile::Host;
     // Obtain cpuid entries that are adjusted to the specified CPU profile and the cpuid entries of the compatibility target
     // TODO: Try to write this in a clearer way
-    let (mut host_adjusted_to_profile, mut compatibility_target_cpuid) = {
+    let (mut host_adjusted_to_profile, mut compatibility_target_cpuid, profile_cpu_vendor) = {
         config
             .profile
             .data()
@@ -642,11 +642,23 @@ pub fn generate_common_cpuid(
                         &profile_data.adjustments,
                     )),
                     Some(profile_data.compatibility_target),
+                    Some(profile_data.cpu_vendor),
                 )
             })
-            .unwrap_or((None, None))
+            .unwrap_or((None, None, None))
     };
 
+    // There should be relatively few cases where live migration can succeed between hosts from different
+    // CPU vendors and making our checks account for that possibility would complicate things substantially.
+    // We thus require that the host's cpu vendor matches the one used to generate the CPU profile.
+    if let Some(profile_cpu_vendor) = profile_cpu_vendor
+        && profile_cpu_vendor != hypervisor.get_cpu_vendor()
+    {
+        return Err(Error::CpuProfileIncompatibility(anyhow!(
+            "Unable to utilize CPU profile: CPU vendor mismatch detected"
+        ))
+        .into());
+    }
     // We now make the modifications according to the config parameters to each of the cpuid entries
     // declared above and then perform a compatibility check.
     for cpuid_optiion in [
@@ -654,10 +666,10 @@ pub fn generate_common_cpuid(
         host_adjusted_to_profile.as_mut(),
         compatibility_target_cpuid.as_mut(),
     ] {
-        let Some(mut cpuid) = cpuid_optiion else {
+        let Some(cpuid) = cpuid_optiion else {
             break;
         };
-        CpuidPatch::patch_cpuid(&mut cpuid, &cpuid_patches);
+        CpuidPatch::patch_cpuid(cpuid, &cpuid_patches);
 
         #[cfg(feature = "tdx")]
         let tdx_capabilities = if config.tdx {
