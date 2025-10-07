@@ -1001,6 +1001,7 @@ impl CpuManager {
                     #[cfg(feature = "tdx")]
                     tdx,
                     amx: self.config.features.amx,
+                    profile: self.config.profile,
                 },
             )
             .map_err(Error::CommonCpuId)?
