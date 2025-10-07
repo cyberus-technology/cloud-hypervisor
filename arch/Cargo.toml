@@ -4,6 +4,12 @@ edition.workspace = true
 name = "arch"
 version = "0.1.0"
 
+# TODO: Consider making this a binary of the main package instead
+[[bin]]
+name = "generate-cpu-profile"
+path = "src/bin/generate-cpu-profile.rs"
+required-features = ["cpu_profile_generation"]
+
 [features]
 default = []
 fw_cfg = []

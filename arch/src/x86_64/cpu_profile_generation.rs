@@ -4,7 +4,10 @@ use crate::x86_64::cpuid_definitions::CpuidDefinitions;
 use crate::x86_64::{
     CpuidOutputRegisterAdjustments,
     cpu_profile::CpuProfileData,
-    cpuid_definitions::{Parameters, ProfilePolicy},
+    cpuid_definitions::{
+        Parameters, ProfilePolicy, hypervisor::KVM_CPUID_DEFINITIONS,
+        intel::INTEL_CPUID_DEFINITIONS,
+    },
 };
 
 use anyhow::Context;
@@ -14,6 +17,37 @@ use hypervisor::HypervisorType;
 use hypervisor::arch::x86::CpuIdEntry;
 use std::io::Write;
 use std::ops::RangeInclusive;
+
+/// Generate CPU profile data and convert it to a string, embeddable as Rust code, which is
+/// written to the given `writer` (e.g. a File).
+//
+// NOTE: The MVP only works with KVM as the hypervisor and Intel CPUs.
+#[cfg(feature = "kvm")]
+pub fn generate_profile_data(
+    mut writer: impl Write,
+    hypervisor: &dyn Hypervisor,
+) -> anyhow::Result<()> {
+    let cpu_vendor = hypervisor.get_cpu_vendor();
+    if cpu_vendor != CpuVendor::Intel {
+        unimplemented!("CPU profiles can only be generated for Intel CPUs at this point in time");
+    }
+    let hypervisor_type = hypervisor.hypervisor_type();
+    // This is just a reality check.
+    if hypervisor_type != HypervisorType::Kvm {
+        unimplemented!(
+            "CPU profiles can only be generated when using KVM as the hypervisor at this point in time"
+        );
+    }
+    let supported_cpuid_sorted = supported_cpuid_sorted(hypervisor)?;
+    generate_cpu_profile_data_with(
+        hypervisor_type,
+        cpu_vendor,
+        supported_cpuid_sorted,
+        &INTEL_CPUID_DEFINITIONS,
+        &KVM_CPUID_DEFINITIONS,
+        &mut writer,
+    )
+}
 
 /// Computes [`CpuProfileData`] based on the given sorted vector of CPUID entries, hypervisor type, cpu_vendor
 /// and cpuid_definitions.
