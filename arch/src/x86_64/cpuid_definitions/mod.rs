@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::x86_64::CpuidReg;
 
+pub mod hypervisor;
+pub mod intel;
+
 /// Parameters for inspecting CPUID definitions.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Parameters {
@@ -73,8 +76,11 @@ pub struct ValueDefinition {
 /// NOTE: The only way to interact with this value (beyond this crate) is via the const [`Self::as_slice()`](Self::as_slice) method.
 pub struct ValueDefinitions(&'static [ValueDefinition]);
 impl ValueDefinitions {
-    /// Constructor permitting less than 32 entries.
+    /// Constructor permitting at most 32 entries.
     const fn new(cpuid_descriptions: &'static [ValueDefinition]) -> Self {
+        // Note that this function is only called within this module, at compile time, hence it is fine to have some
+        // additional sanity checks such as the following assert.
+        assert!(cpuid_descriptions.len() <= 32);
         Self(cpuid_descriptions)
     }
     /// Converts this into a slice representation. This is the only way to read values of this type.
