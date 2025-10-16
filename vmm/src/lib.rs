@@ -52,8 +52,8 @@ use thiserror::Error;
 use tracer::trace_scoped;
 use vm_memory::bitmap::{AtomicBitmap, BitmapSlice};
 use vm_memory::{
-    GuestAddress, GuestAddressSpace, GuestMemory, ReadVolatile, VolatileMemoryError, VolatileSlice,
-    WriteVolatile,
+    GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, ReadVolatile,
+    VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::*;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
@@ -741,8 +741,15 @@ enum ReceiveMigrationState {
     /// We received file descriptors for memory. This can only happen on UNIX domain sockets.
     MemoryFdsReceived(Vec<(u32, File)>),
 
-    /// We received the VM configuration. We keep the memory configuration around to populate guest memory. From this point on, the sender can start sending memory updates.
-    Configured(Arc<Mutex<MemoryManager>>),
+    /// We received the VM configuration. We keep the memory configuration around to populate guest memory.
+    /// From this point on, the sender can start sending memory updates.
+    ///
+    /// While the memory manager can also be used to populate guest memory, we keep a direct reference to
+    /// the memory around to populate guest memory without having to acquire a lock.
+    Configured(
+        Arc<Mutex<MemoryManager>>,
+        GuestMemoryAtomic<GuestMemoryMmap>,
+    ),
 
     /// Memory is populated and we received the state. The VM is ready to go.
     StateReceived,
@@ -987,7 +994,8 @@ impl Vmm {
                     }
                 }
 
-                Ok(Configured(memory_manager))
+                let guest_memory = memory_manager.lock().unwrap().guest_memory();
+                Ok(Configured(memory_manager, guest_memory))
             };
 
         let recv_memory_fd =
@@ -1019,13 +1027,13 @@ impl Vmm {
                 Command::Config => configure_vm(socket, HashMap::from_iter(memory_files)),
                 _ => invalid_command(),
             },
-            Configured(memory_manager) => match req.command() {
+            Configured(memory_manager, guest_memory) => match req.command() {
                 Command::Memory => {
-                    self.vm_receive_memory(req, socket, &mut memory_manager.lock().unwrap())?;
-                    Ok(Configured(memory_manager))
+                    self.vm_receive_memory(req, socket, &guest_memory)?;
+                    Ok(Configured(memory_manager, guest_memory))
                 }
                 Command::State => {
-                    self.vm_receive_state(req, socket, memory_manager.clone())?;
+                    self.vm_receive_state(req, socket, memory_manager)?;
                     Ok(StateReceived)
                 }
                 _ => invalid_command(),
@@ -1214,14 +1222,14 @@ impl Vmm {
         &mut self,
         req: &Request,
         socket: &mut T,
-        memory_manager: &mut MemoryManager,
+        guest_mem: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> std::result::Result<(), MigratableError>
     where
         T: Read + ReadVolatile,
     {
         // Read table
         let ranges = MemoryRangeTable::read_from(socket, req.length())?;
-        let mem = memory_manager.guest_memory().memory();
+        let mem = guest_mem.memory();
 
         for range in ranges.regions() {
             let mut offset: u64 = 0;
