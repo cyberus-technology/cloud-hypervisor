@@ -1452,15 +1452,15 @@ impl Vmm {
         }
     }
 
+    // Send memory from the given table.
     // Returns true if there were dirty pages to send
-    fn vm_maybe_send_dirty_pages(
+    fn vm_send_memory(
         vm: &mut Vm,
         socket: &mut SocketStream,
         table: &MemoryRangeTable,
-    ) -> result::Result<bool, MigratableError> {
-        // But if there are no regions go straight to pause
+    ) -> result::Result<(), MigratableError> {
         if table.regions().is_empty() {
-            return Ok(false);
+            return Ok(());
         }
 
         Request::memory(table.length()).write_to(socket).unwrap();
@@ -1472,7 +1472,7 @@ impl Vmm {
             MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
         )?;
 
-        Ok(true)
+        Ok(())
     }
 
     fn can_increase_autoconverge_step(s: &MigrationState) -> bool {
@@ -1551,7 +1551,7 @@ impl Vmm {
 
             // Send the current dirty pages
             let transfer_start = Instant::now();
-            Self::vm_maybe_send_dirty_pages(vm, socket, &iteration_table)?;
+            Self::vm_send_memory(vm, socket, &iteration_table)?;
             let transfer_time = transfer_start.elapsed().as_millis() as f64;
 
             // Update bandwidth
@@ -1587,16 +1587,7 @@ impl Vmm {
         // Start logging dirty pages
         vm.start_dirty_log()?;
 
-        // Send memory table
-        let table = vm.memory_range_table()?;
-        Request::memory(table.length()).write_to(socket).unwrap();
-        table.write_to(socket)?;
-        // And then the memory itself
-        vm.send_memory_regions(&table, socket)?;
-        Response::read_from(socket)?.ok_or_abandon(
-            socket,
-            MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
-        )?;
+        Self::vm_send_memory(vm, socket, &vm.memory_range_table()?)?;
 
         // Define the maximum allowed downtime 2000 seconds(2000000 milliseconds)
         const MAX_MIGRATE_DOWNTIME: u64 = 2000000;
@@ -1637,7 +1628,7 @@ impl Vmm {
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
         final_table.extend(iteration_table.clone());
-        Self::vm_maybe_send_dirty_pages(vm, socket, &final_table)?;
+        Self::vm_send_memory(vm, socket, &final_table)?;
 
         // Update statistics
         s.pending_size = final_table.regions().iter().map(|range| range.length).sum();
