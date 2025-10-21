@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write, stdout};
 use std::net::{TcpListener, TcpStream};
+use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::AssertUnwindSafe;
@@ -927,6 +928,101 @@ impl ReceiveMigrationState {
     }
 }
 
+/// This struct keeps track of additional threads we use to send VM memory.
+struct SendAdditionalConnections {
+    guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
+    threads: Vec<thread::JoinHandle<()>>,
+    channels: Vec<std::sync::mpsc::Sender<MemoryRangeTable>>,
+}
+
+/// Send memory from the given table.
+fn vm_send_memory(
+    guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    socket: &mut SocketStream,
+    table: &MemoryRangeTable,
+) -> result::Result<(), MigratableError> {
+    if table.regions().is_empty() {
+        return Ok(());
+    }
+
+    Request::memory(table.length()).write_to(socket).unwrap();
+    table.write_to(socket)?;
+    // And then the memory itself
+    send_memory_regions(guest_memory, table, socket)?;
+    Response::read_from(socket)?.ok_or_abandon(
+        socket,
+        MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
+    )?;
+
+    Ok(())
+}
+
+impl SendAdditionalConnections {
+    fn new(
+        destination: &str,
+        connections: NonZeroU32,
+        guest_mem: &GuestMemoryAtomic<GuestMemoryMmap>,
+    ) -> std::result::Result<Self, MigratableError> {
+        let mut threads = Vec::new();
+        let mut channels = Vec::new();
+
+        for _ in 0..(connections.get() - 1) {
+            let socket = send_migration_socket(destination)?;
+            let guest_mem = guest_mem.clone();
+            let (send, recv) = std::sync::mpsc::channel::<MemoryRangeTable>();
+
+            let thread = thread::spawn(move || {
+                let mut socket = socket;
+                while let Ok(table) = recv.recv() {
+                    vm_send_memory(&guest_mem, &mut socket, &table).unwrap()
+                }
+            });
+
+            threads.push(thread);
+            channels.push(send);
+        }
+
+        Ok(Self {
+            guest_memory: guest_mem.clone(),
+            threads,
+            channels,
+        })
+    }
+
+    /// Send memory via all connections that we have. This may be just one.
+    /// `socket` is the original socket that was used to connect to the
+    /// destination.
+    fn send_memory(
+        &self,
+        table: &MemoryRangeTable,
+        socket: &mut SocketStream,
+    ) -> std::result::Result<(), MigratableError> {
+        warn!("Not sending via multiple connections yet");
+
+        Request::memory(table.length()).write_to(socket).unwrap();
+        table.write_to(socket)?;
+        // And then the memory itself
+        send_memory_regions(&self.guest_memory, table, socket)?;
+        Response::read_from(socket)?.ok_or_abandon(
+            socket,
+            MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
+        )?;
+
+        Ok(())
+    }
+}
+
+impl Drop for SendAdditionalConnections {
+    fn drop(&mut self) {
+        // Drop all channels, so the threads will exit.
+        self.channels.clear();
+
+        self.threads
+            .drain(..)
+            .for_each(|thread| thread.join().unwrap());
+    }
+}
+
 /// Establishes a connection to a migration destination socket (TCP or UNIX).
 fn send_migration_socket(
     destination_url: &str,
@@ -1011,29 +1107,6 @@ fn send_memory_regions(
             }
         }
     }
-
-    Ok(())
-}
-
-// Send memory from the given table.
-// Returns true if there were dirty pages to send
-fn vm_send_memory(
-    guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
-    socket: &mut SocketStream,
-    table: &MemoryRangeTable,
-) -> result::Result<(), MigratableError> {
-    if table.regions().is_empty() {
-        return Ok(());
-    }
-
-    Request::memory(table.length()).write_to(socket).unwrap();
-    table.write_to(socket)?;
-    // And then the memory itself
-    send_memory_regions(guest_memory, table, socket)?;
-    Response::read_from(socket)?.ok_or_abandon(
-        socket,
-        MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
-    )?;
 
     Ok(())
 }
@@ -1516,6 +1589,7 @@ impl Vmm {
 
     fn memory_copy_iterations(
         vm: &mut Vm,
+        mem_send: &SendAdditionalConnections,
         socket: &mut SocketStream,
         s: &mut MigrationState,
         migration_timeout: Duration,
@@ -1581,7 +1655,7 @@ impl Vmm {
 
             // Send the current dirty pages
             let transfer_start = Instant::now();
-            vm_send_memory(&vm.guest_memory(), socket, &iteration_table)?;
+            mem_send.send_memory(&iteration_table, socket)?;
             let transfer_time = transfer_start.elapsed().as_millis() as f64;
 
             // Update bandwidth
@@ -1614,10 +1688,16 @@ impl Vmm {
         s: &mut MigrationState,
         send_data_migration: &VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
+        let mem_send = SendAdditionalConnections::new(
+            &send_data_migration.destination_url,
+            send_data_migration.connections,
+            &vm.guest_memory(),
+        )?;
+
         // Start logging dirty pages
         vm.start_dirty_log()?;
 
-        vm_send_memory(&vm.guest_memory(), socket, &vm.memory_range_table()?)?;
+        mem_send.send_memory(&vm.memory_range_table()?, socket)?;
 
         // Define the maximum allowed downtime 2000 seconds(2000000 milliseconds)
         const MAX_MIGRATE_DOWNTIME: u64 = 2000000;
@@ -1643,8 +1723,14 @@ impl Vmm {
             )));
         }
 
-        let iteration_table =
-            Self::memory_copy_iterations(vm, socket, s, migration_timeout, migrate_downtime_limit)?;
+        let iteration_table = Self::memory_copy_iterations(
+            vm,
+            &mem_send,
+            socket,
+            s,
+            migration_timeout,
+            migrate_downtime_limit,
+        )?;
 
         info!("Entering downtime phase");
         s.downtime_start = Instant::now();
@@ -1659,8 +1745,7 @@ impl Vmm {
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
         final_table.extend(iteration_table.clone());
-        vm_send_memory(&vm.guest_memory(), socket, &final_table)?;
-
+        mem_send.send_memory(&final_table, socket)?;
         // Update statistics
         s.pending_size = final_table.regions().iter().map(|range| range.length).sum();
         s.total_transferred_bytes += s.pending_size;
