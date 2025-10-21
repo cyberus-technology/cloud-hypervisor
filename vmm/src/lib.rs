@@ -977,6 +977,67 @@ fn receive_migration_listener(
     }
 }
 
+fn send_memory_regions(
+    guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    ranges: &MemoryRangeTable,
+    fd: &mut SocketStream,
+) -> std::result::Result<(), MigratableError> {
+    let mem = guest_memory.memory();
+
+    for range in ranges.regions() {
+        let mut offset: u64 = 0;
+        // Here we are manually handling the retry in case we can't the
+        // whole region at once because we can't use the implementation
+        // from vm-memory::GuestMemory of write_all_to() as it is not
+        // following the correct behavior. For more info about this issue
+        // see: https://github.com/rust-vmm/vm-memory/issues/174
+        loop {
+            let bytes_written = mem
+                .write_volatile_to(
+                    GuestAddress(range.gpa + offset),
+                    fd,
+                    (range.length - offset) as usize,
+                )
+                .map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!(
+                        "Error transferring memory to socket: {}",
+                        e
+                    ))
+                })?;
+            offset += bytes_written as u64;
+
+            if offset == range.length {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// Send memory from the given table.
+// Returns true if there were dirty pages to send
+fn vm_send_memory(
+    guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    socket: &mut SocketStream,
+    table: &MemoryRangeTable,
+) -> result::Result<(), MigratableError> {
+    if table.regions().is_empty() {
+        return Ok(());
+    }
+
+    Request::memory(table.length()).write_to(socket).unwrap();
+    table.write_to(socket)?;
+    // And then the memory itself
+    send_memory_regions(guest_memory, table, socket)?;
+    Response::read_from(socket)?.ok_or_abandon(
+        socket,
+        MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
+    )?;
+
+    Ok(())
+}
+
 impl Vmm {
     pub const HANDLED_SIGNALS: [i32; 2] = [SIGTERM, SIGINT];
 
@@ -1444,29 +1505,6 @@ impl Vmm {
         Ok(())
     }
 
-    // Send memory from the given table.
-    // Returns true if there were dirty pages to send
-    fn vm_send_memory(
-        vm: &mut Vm,
-        socket: &mut SocketStream,
-        table: &MemoryRangeTable,
-    ) -> result::Result<(), MigratableError> {
-        if table.regions().is_empty() {
-            return Ok(());
-        }
-
-        Request::memory(table.length()).write_to(socket).unwrap();
-        table.write_to(socket)?;
-        // And then the memory itself
-        vm.send_memory_regions(table, socket)?;
-        Response::read_from(socket)?.ok_or_abandon(
-            socket,
-            MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
-        )?;
-
-        Ok(())
-    }
-
     fn can_increase_autoconverge_step(s: &MigrationState) -> bool {
         if s.iteration < AUTO_CONVERGE_ITERATION_DELAY {
             false
@@ -1543,7 +1581,7 @@ impl Vmm {
 
             // Send the current dirty pages
             let transfer_start = Instant::now();
-            Self::vm_send_memory(vm, socket, &iteration_table)?;
+            vm_send_memory(&vm.guest_memory(), socket, &iteration_table)?;
             let transfer_time = transfer_start.elapsed().as_millis() as f64;
 
             // Update bandwidth
@@ -1579,7 +1617,7 @@ impl Vmm {
         // Start logging dirty pages
         vm.start_dirty_log()?;
 
-        Self::vm_send_memory(vm, socket, &vm.memory_range_table()?)?;
+        vm_send_memory(&vm.guest_memory(), socket, &vm.memory_range_table()?)?;
 
         // Define the maximum allowed downtime 2000 seconds(2000000 milliseconds)
         const MAX_MIGRATE_DOWNTIME: u64 = 2000000;
@@ -1621,7 +1659,7 @@ impl Vmm {
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
         final_table.extend(iteration_table.clone());
-        Self::vm_send_memory(vm, socket, &final_table)?;
+        vm_send_memory(&vm.guest_memory(), socket, &final_table)?;
 
         // Update statistics
         s.pending_size = final_table.regions().iter().map(|range| range.length).sum();
