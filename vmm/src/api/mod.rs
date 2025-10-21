@@ -277,6 +277,10 @@ pub struct VmReceiveMigrationData {
     /// Map with new network FDs on the new host.
     #[serde(default)]
     pub net_fds: Vec<RestoredNetConfig>,
+    /// Optional URL if the TCP serial configuration must be changed during
+    /// migration. Example: "192.168.1.1:2222".
+    #[serde(default)]
+    pub tcp_serial_url: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -326,7 +330,7 @@ fn validate_tcp_migration_address(address: &str) -> Result<(), String> {
 
 impl VmReceiveMigrationData {
     pub const SYNTAX: &'static str = "VM receive migration parameters \
-        \"<receiver_url>\" or \"receiver_url=<url>[,tls_dir=<path>]\"";
+        \"<receiver_url>\" or \"receiver_url=<url>[,tls_dir=<path>,tcp_serial_url=<host:port>]\"";
 
     pub fn parse(migration: &str) -> Result<Self, VmReceiveMigrationConfigError> {
         let uses_key_value_syntax = migration.split(',').any(
@@ -338,6 +342,7 @@ impl VmReceiveMigrationData {
                 receiver_url: migration.to_owned(),
                 tls_dir: None,
                 net_fds: vec![],
+                tcp_serial_url: None,
             };
 
             data.validate()?;
@@ -346,7 +351,10 @@ impl VmReceiveMigrationData {
         }
 
         let mut parser = OptionParser::new();
-        parser.add("receiver_url").add("tls_dir");
+        parser
+            .add("receiver_url")
+            .add("tls_dir")
+            .add("tcp_serial_url");
         parser
             .parse(migration)
             .map_err(VmReceiveMigrationConfigError::ParseError)?;
@@ -360,11 +368,15 @@ impl VmReceiveMigrationData {
             .convert::<String>("tls_dir")
             .map_err(VmReceiveMigrationConfigError::ParseError)?
             .map(|path| PathBuf::from(&path));
+        let tcp_serial_url = parser
+            .convert::<String>("tcp_serial_url")
+            .map_err(VmReceiveMigrationConfigError::ParseError)?;
 
         let data = Self {
             receiver_url,
             tls_dir,
             net_fds: vec![],
+            tcp_serial_url,
         };
 
         data.validate()?;
@@ -1984,6 +1996,7 @@ mod unit_tests {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: None,
                 net_fds: vec![],
+                tcp_serial_url: None,
             }
         );
 
@@ -1998,8 +2011,8 @@ mod unit_tests {
 
         let tls_dir = std::env::temp_dir();
         let data = VmReceiveMigrationData::parse(&format!(
-            "receiver_url=tcp:192.168.1.1:8080,tls_dir={}",
-            tls_dir.display()
+            "receiver_url=tcp:192.168.1.1:8080,tls_dir={},tcp_serial_url=1.2.3.4:6789",
+            tls_dir.display(),
         ))
         .unwrap();
         assert_eq!(
@@ -2008,6 +2021,7 @@ mod unit_tests {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: Some(tls_dir),
                 net_fds: vec![],
+                tcp_serial_url: Some("1.2.3.4:6789".to_string()),
             }
         );
 
