@@ -260,6 +260,9 @@ pub struct VmCoredumpData {
 pub struct VmReceiveMigrationData {
     /// URL for the reception of migration state
     pub receiver_url: String,
+    /// Optional URL if the TCP serial configuration must be changed during
+    /// migration. Example: "192.168.1.1:2222".
+    pub tcp_serial_url: Option<String>,
     /// Map with new network FDs on the new host.
     pub net_fds: Option<Vec<RestoredNetConfig>>,
 }
