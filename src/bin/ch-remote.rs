@@ -897,6 +897,7 @@ fn coredump_config(destination_url: &str) -> String {
 fn receive_migration_data(url: &str) -> String {
     let receive_migration_data = vmm::api::VmReceiveMigrationData {
         receiver_url: url.to_owned(),
+        tcp_serial_url: None,
         // Only FDs transmitted via an SCM_RIGHTS UNIX Domain Socket message
         // are valid. Transmitting specific FD nums via the HTTP API is
         // almost always invalid.
