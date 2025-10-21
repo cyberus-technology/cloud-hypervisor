@@ -21,8 +21,8 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, RecvError, SendError, Sender, TrySendError};
+use std::sync::{Arc, Barrier, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::{Duration, Instant};
 use std::{io, result, thread};
@@ -868,6 +868,11 @@ impl ReceiveAdditionalConnections {
                             error!("Failed to receive memory: {e}");
                             break;
                         }
+
+                        if let Err(e) = Response::ok().write_to(&mut socket) {
+                            error!("Failed to send response: {e}");
+                            break;
+                        }
                     }
                 }));
             }
@@ -935,11 +940,19 @@ impl ReceiveMigrationState {
     }
 }
 
+/// The different kinds of messages we can send to memory sending threads.
+#[derive(Debug)]
+enum SendMemoryThreadMessage {
+    Memory(Arc<MemoryRangeTable>),
+    Barrier(Arc<Barrier>),
+    Disconnect,
+}
+
 /// This struct keeps track of additional threads we use to send VM memory.
 struct SendAdditionalConnections {
     guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
     threads: Vec<thread::JoinHandle<()>>,
-    channels: Vec<std::sync::mpsc::Sender<MemoryRangeTable>>,
+    channels: Vec<std::sync::mpsc::SyncSender<SendMemoryThreadMessage>>,
 }
 
 /// Send memory from the given table.
@@ -965,6 +978,27 @@ fn vm_send_memory(
 }
 
 impl SendAdditionalConnections {
+    /// How many requests can be waiting to be sent for each connection. This
+    /// can be set to zero to disable buffering. Whether we need to buffer
+    /// requests is currently unclear. If this is set too high, some connections
+    /// might go unused, because work pools up on some connections.
+    const BUFFERED_REQUESTS_PER_THREAD: usize = 1;
+
+    /// The size of each chunk of memory to send.
+    ///
+    /// We want to make this large, because each chunk is acknowledged and we
+    /// wait for the ack before sending the next chunk. The challenge is that if
+    /// it is _too_ large, we become more sensitive to network issues, like
+    /// packet drops in individual connections, because large amounts of data
+    /// can pool when throughput on one connection is temporarily reduced.
+    ///
+    /// We can consider making this configurable, but a better network protocol
+    /// that doesn't require ACKs would be more efficient.
+    ///
+    /// The best-case throughput per connection can be estimated via:
+    /// effective_throughput = chunk_size / (chunk_size / throughput_per_connection + round_trip_time)
+    const CHUNK_SIZE: u64 = 64 /* MiB */ << 20;
+
     fn new(
         destination: &str,
         connections: NonZeroU32,
@@ -976,13 +1010,32 @@ impl SendAdditionalConnections {
         for _ in 0..(connections.get() - 1) {
             let socket = send_migration_socket(destination)?;
             let guest_mem = guest_mem.clone();
-            let (send, recv) = std::sync::mpsc::channel::<MemoryRangeTable>();
+            let (send, recv) = std::sync::mpsc::sync_channel::<SendMemoryThreadMessage>(
+                Self::BUFFERED_REQUESTS_PER_THREAD,
+            );
 
             let thread = thread::spawn(move || {
+                info!("Spawned thread to send VM memory.");
+
+                let mut total_sent = 0;
                 let mut socket = socket;
-                while let Ok(table) = recv.recv() {
-                    vm_send_memory(&guest_mem, &mut socket, &table).unwrap();
+
+                for msg in recv {
+                    match msg {
+                        SendMemoryThreadMessage::Memory(table) => {
+                            vm_send_memory(&guest_mem, &mut socket, &table).unwrap();
+                            total_sent +=
+                                table.ranges().iter().map(|range| range.length).sum::<u64>();
+                        }
+                        SendMemoryThreadMessage::Barrier(barrier) => {
+                            barrier.wait();
+                        }
+                        SendMemoryThreadMessage::Disconnect => {
+                            break;
+                        }
+                    }
                 }
+                info!("Sent {} MiB via additional connection.", total_sent >> 20);
             });
 
             threads.push(thread);
@@ -996,24 +1049,67 @@ impl SendAdditionalConnections {
         })
     }
 
+    /// Wait until all data that is in-flight has actually been sent and acknowledged.
+    fn wait_for_pending_data(&self) {
+        assert_eq!(self.channels.len(), self.threads.len());
+
+        // TODO We don't actually need the threads to block at the barrier. We
+        // can probably find a better implementation that involves less
+        // synchronization.
+
+        let barrier = Arc::new(Barrier::new(self.channels.len() + 1));
+
+        for channel in &self.channels {
+            channel
+                .send(SendMemoryThreadMessage::Barrier(barrier.clone()))
+                // The unwrap only fails fi
+                .unwrap();
+        }
+
+        barrier.wait();
+    }
+
     /// Send memory via all connections that we have. This may be just one.
     /// `socket` is the original socket that was used to connect to the
     /// destination.
+    ///
+    /// When this function returns, all memory has been sent and acknowledged.
     fn send_memory(
         &self,
         table: &MemoryRangeTable,
         socket: &mut SocketStream,
     ) -> std::result::Result<(), MigratableError> {
-        warn!("Not sending via multiple connections yet");
+        let thread_len = self.threads.len();
+        assert_eq!(thread_len, self.channels.len());
 
-        Request::memory(table.length()).write_to(socket).unwrap();
-        table.write_to(socket)?;
-        // And then the memory itself
-        send_memory_regions(&self.guest_memory, table, socket)?;
-        Response::read_from(socket)?.ok_or_abandon(
-            socket,
-            MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
-        )?;
+        // The chunk size is chosen to be big enough so that even very fast
+        // links need some milliseconds to send it.
+        'next_partition: for chunk in table.partition(Self::CHUNK_SIZE) {
+            let chunk = Arc::new(chunk);
+
+            // Find the first free channel and send the chunk via it.
+            //
+            // TODO A better implementation wouldn't always start at the
+            // first thread, but go round-robin.
+            for channel in &self.channels {
+                match channel.try_send(SendMemoryThreadMessage::Memory(chunk.clone())) {
+                    Ok(()) => continue 'next_partition,
+                    Err(TrySendError::Full(_)) => {
+                        // Try next channel.
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        return Err(MigratableError::MigrateSend(anyhow!(
+                            "Sending thread died?"
+                        )));
+                    }
+                }
+            }
+
+            // Fallback to sending the chunk via the control connection.
+            vm_send_memory(&self.guest_memory, socket, &chunk)?;
+        }
+
+        self.wait_for_pending_data();
 
         Ok(())
     }
@@ -1021,12 +1117,16 @@ impl SendAdditionalConnections {
 
 impl Drop for SendAdditionalConnections {
     fn drop(&mut self) {
-        // Drop all channels, so the threads will exit.
-        self.channels.clear();
+        info!("Sending disconnect message to channels");
+        self.channels
+            .drain(..)
+            .for_each(|channel| channel.send(SendMemoryThreadMessage::Disconnect).unwrap());
 
+        info!("Waiting for threads to finish");
         self.threads
             .drain(..)
             .for_each(|thread| thread.join().unwrap());
+        info!("Threads finished");
     }
 }
 
