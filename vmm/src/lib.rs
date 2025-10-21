@@ -968,7 +968,12 @@ impl Vmm {
             |socket: &mut SocketStream,
              memory_files: HashMap<u32, File>|
              -> std::result::Result<Arc<Mutex<MemoryManager>>, MigratableError> {
-                let memory_manager = self.vm_receive_config(req, socket, memory_files)?;
+                let memory_manager = self.vm_receive_config(
+                    req,
+                    socket,
+                    memory_files,
+                    receive_data_migration.tcp_serial_url.clone(),
+                )?;
 
                 // Apply external FDs to virtio-net devices.
                 if !receive_data_migration.net_fds.is_empty() {
@@ -1051,6 +1056,7 @@ impl Vmm {
         req: &Request,
         socket: &mut T,
         existing_memory_files: HashMap<u32, File>,
+        tcp_serial_url: Option<String>,
     ) -> std::result::Result<Arc<Mutex<MemoryManager>>, MigratableError>
     where
         T: Read,
@@ -1075,6 +1081,12 @@ impl Vmm {
 
         let config = vm_migration_config.vm_config.clone();
         self.vm_config = Some(vm_migration_config.vm_config);
+
+        if let Some(tcp_serial_url) = tcp_serial_url {
+            let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
+            vm_config.serial.url = Some(tcp_serial_url);
+        }
+
         self.console_info = Some(pre_create_console_devices(self).map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error creating console devices: {e:?}"))
         })?);
