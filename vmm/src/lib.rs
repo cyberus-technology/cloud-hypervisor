@@ -921,7 +921,12 @@ impl Vmm {
             |socket: &mut SocketStream,
              memory_files: HashMap<u32, File>|
              -> std::result::Result<ReceiveMigrationConfiguredData, MigratableError> {
-                let memory_manager = self.vm_receive_config(req, socket, memory_files)?;
+                let memory_manager = self.vm_receive_config(
+                    req,
+                    socket,
+                    memory_files,
+                    receive_data_migration.tcp_serial_url.clone(),
+                )?;
 
                 if !receive_data_migration.net_fds.is_empty() {
                     let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
@@ -1064,6 +1069,7 @@ impl Vmm {
         req: &Request,
         socket: &mut T,
         existing_memory_files: HashMap<u32, File>,
+        tcp_serial_url: Option<String>,
     ) -> std::result::Result<Arc<Mutex<MemoryManager>>, MigratableError>
     where
         T: Read,
@@ -1088,6 +1094,12 @@ impl Vmm {
 
         let config = vm_migration_config.vm_config.clone();
         self.vm_config = Some(vm_migration_config.vm_config);
+
+        if let Some(tcp_serial_url) = tcp_serial_url {
+            let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
+            vm_config.serial.common.url = Some(tcp_serial_url);
+        }
+
         self.console_info = Some(pre_create_console_devices(self).map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error creating console devices: {e:?}"))
         })?);
@@ -2590,10 +2602,11 @@ impl RequestHandler for Vmm {
             .map_err(MigratableError::MigrateReceive)?;
 
         info!(
-            "Receiving migration: receiver_url={},tls={},net_fds={:?}",
+            "Receiving migration: receiver_url={},tls={},net_fds={:?}, tcp_url={:?}",
             receive_data_migration.receiver_url,
             receive_data_migration.tls_dir.is_some(),
-            &receive_data_migration.net_fds
+            &receive_data_migration.net_fds,
+            &receive_data_migration.tcp_serial_url,
         );
 
         let mut listener = migration_transport::receive_migration_listener(
