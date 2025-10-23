@@ -4132,9 +4132,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_config_validation() {
-        let mut valid_config = VmConfig {
+    fn valid_vmconfig() -> VmConfig {
+        VmConfig {
             cpus: CpusConfig {
                 boot_vcpus: 1,
                 max_vcpus: 1,
@@ -4213,16 +4212,19 @@ mod tests {
             landlock_rules: None,
             #[cfg(feature = "ivshmem")]
             ivshmem: None,
-        };
+        }
+    }
 
-        valid_config.validate().unwrap();
+    #[test]
+    fn test_config_validation() {
+        valid_vmconfig().validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.serial.mode = ConsoleOutputMode::Tty;
         invalid_config.console.mode = ConsoleOutputMode::Tty;
-        valid_config.validate().unwrap();
+        valid_vmconfig().validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.payload = None;
         assert_eq!(
             invalid_config.validate(),
@@ -4231,7 +4233,7 @@ mod tests {
             ))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.serial.mode = ConsoleOutputMode::File;
         invalid_config.serial.file = None;
         assert_eq!(
@@ -4239,7 +4241,7 @@ mod tests {
             Err(ValidationError::ConsoleFileMissing)
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.cpus.max_vcpus = 16;
         invalid_config.cpus.boot_vcpus = 32;
         assert_eq!(
@@ -4247,7 +4249,7 @@ mod tests {
             Err(ValidationError::CpusMaxLowerThanBoot)
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.cpus.max_vcpus = 16;
         invalid_config.cpus.boot_vcpus = 16;
         invalid_config.cpus.topology = Some(CpuTopology {
@@ -4261,7 +4263,7 @@ mod tests {
             Err(ValidationError::CpuTopologyCount)
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.disks = Some(vec![DiskConfig {
             vhost_socket: Some("/path/to/sock".to_owned()),
             path: Some(PathBuf::from("/path/to/image")),
@@ -4272,7 +4274,7 @@ mod tests {
             Err(ValidationError::DiskSocketAndPath)
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.memory.shared = true;
         invalid_config.disks = Some(vec![DiskConfig {
             path: None,
@@ -4284,7 +4286,7 @@ mod tests {
             Err(ValidationError::VhostUserMissingSocket)
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.disks = Some(vec![DiskConfig {
             path: None,
             vhost_user: true,
@@ -4296,7 +4298,7 @@ mod tests {
             Err(ValidationError::VhostUserRequiresSharedMemory)
         );
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.disks = Some(vec![DiskConfig {
             path: None,
             vhost_user: true,
@@ -4306,7 +4308,7 @@ mod tests {
         still_valid_config.memory.shared = true;
         still_valid_config.validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.net = Some(vec![NetConfig {
             vhost_user: true,
             ..net_fixture()
@@ -4316,7 +4318,7 @@ mod tests {
             Err(ValidationError::VhostUserRequiresSharedMemory)
         );
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.net = Some(vec![NetConfig {
             vhost_user: true,
             vhost_socket: Some("/path/to/sock".to_owned()),
@@ -4325,7 +4327,7 @@ mod tests {
         still_valid_config.memory.shared = true;
         still_valid_config.validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.net = Some(vec![NetConfig {
             fds: Some(vec![0]),
             ..net_fixture()
@@ -4335,7 +4337,7 @@ mod tests {
             Err(ValidationError::VnetReservedFd(0))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.net = Some(vec![NetConfig {
             offload_csum: false,
             ..net_fixture()
@@ -4345,27 +4347,27 @@ mod tests {
             Err(ValidationError::NoHardwareChecksumOffload)
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig();
         invalid_config.fs = Some(vec![fs_fixture()]);
         assert_eq!(
             invalid_config.validate(),
             Err(ValidationError::VhostUserRequiresSharedMemory)
         );
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.memory.shared = true;
         still_valid_config.validate().unwrap();
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.memory.hugepages = true;
         still_valid_config.validate().unwrap();
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.memory.hugepages = true;
         still_valid_config.memory.hugepage_size = Some(2 << 20);
         still_valid_config.validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.memory.hugepages = false;
         invalid_config.memory.hugepage_size = Some(2 << 20);
         assert_eq!(
@@ -4373,7 +4375,7 @@ mod tests {
             Err(ValidationError::HugePageSizeWithoutHugePages)
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.memory.hugepages = true;
         invalid_config.memory.hugepage_size = Some(3 << 20);
         assert_eq!(
@@ -4381,11 +4383,11 @@ mod tests {
             Err(ValidationError::InvalidHugePageSize(3 << 20))
         );
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.platform = Some(platform_fixture());
         still_valid_config.validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             num_pci_segments: MAX_NUM_PCI_SEGMENTS + 1,
             ..platform_fixture()
@@ -4397,14 +4399,14 @@ mod tests {
             ))
         );
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
         });
         still_valid_config.validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![MAX_NUM_PCI_SEGMENTS + 1, MAX_NUM_PCI_SEGMENTS + 2]),
             ..platform_fixture()
@@ -4414,7 +4416,7 @@ mod tests {
             Err(ValidationError::InvalidPciSegment(MAX_NUM_PCI_SEGMENTS + 1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             iommu_address_width_bits: MAX_IOMMU_ADDRESS_WIDTH_BITS + 1,
             ..platform_fixture()
@@ -4426,7 +4428,7 @@ mod tests {
             ))
         );
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4438,7 +4440,7 @@ mod tests {
         }]);
         still_valid_config.validate().unwrap();
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4450,7 +4452,7 @@ mod tests {
         }]);
         still_valid_config.validate().unwrap();
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4462,7 +4464,7 @@ mod tests {
         }]);
         still_valid_config.validate().unwrap();
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4474,7 +4476,7 @@ mod tests {
         }]);
         still_valid_config.validate().unwrap();
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig().clone();
         still_valid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4488,7 +4490,7 @@ mod tests {
         });
         still_valid_config.validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4503,7 +4505,7 @@ mod tests {
             Err(ValidationError::OnIommuSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4518,7 +4520,7 @@ mod tests {
             Err(ValidationError::OnIommuSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             num_pci_segments: MAX_NUM_PCI_SEGMENTS,
             iommu_segments: Some(vec![1, 2, 3]),
@@ -4534,7 +4536,7 @@ mod tests {
             Err(ValidationError::OnIommuSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             num_pci_segments: MAX_NUM_PCI_SEGMENTS,
             iommu_segments: Some(vec![1, 2, 3]),
@@ -4550,7 +4552,7 @@ mod tests {
             Err(ValidationError::OnIommuSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4567,7 +4569,7 @@ mod tests {
             Err(ValidationError::OnIommuSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.memory.shared = true;
         invalid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
@@ -4583,7 +4585,7 @@ mod tests {
             Err(ValidationError::IommuNotSupportedOnSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
             ..platform_fixture()
@@ -4597,7 +4599,7 @@ mod tests {
             Err(ValidationError::OnIommuSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.memory.shared = true;
         invalid_config.platform = Some(PlatformConfig {
             iommu_segments: Some(vec![1, 2, 3]),
@@ -4612,7 +4614,7 @@ mod tests {
             Err(ValidationError::IommuNotSupportedOnSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.platform = Some(PlatformConfig {
             num_pci_segments: 2,
             ..platform_fixture()
@@ -4634,7 +4636,7 @@ mod tests {
             Err(ValidationError::PciSegmentReused(1, 0, 1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.pci_segments = Some(vec![PciSegmentConfig {
             pci_segment: 0,
             mmio32_aperture_weight: 1,
@@ -4645,7 +4647,7 @@ mod tests {
             Err(ValidationError::InvalidPciSegmentApertureWeight(0))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.pci_segments = Some(vec![PciSegmentConfig {
             pci_segment: 0,
             mmio32_aperture_weight: 0,
@@ -4656,7 +4658,7 @@ mod tests {
             Err(ValidationError::InvalidPciSegmentApertureWeight(0))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.numa = Some(vec![
             NumaConfig {
                 guest_numa_id: 0,
@@ -4673,7 +4675,7 @@ mod tests {
             Err(ValidationError::DefaultPciSegmentInvalidNode(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig().clone();
         invalid_config.numa = Some(vec![
             NumaConfig {
                 guest_numa_id: 0,
@@ -4691,7 +4693,7 @@ mod tests {
             Err(ValidationError::InvalidPciSegment(1))
         );
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig();
         invalid_config.disks = Some(vec![DiskConfig {
             rate_limit_group: Some("foo".into()),
             ..disk_fixture()
@@ -4702,7 +4704,7 @@ mod tests {
         );
 
         // Test serial length validation
-        let mut valid_serial_config = valid_config.clone();
+        let mut valid_serial_config = valid_vmconfig();
         valid_serial_config.disks = Some(vec![DiskConfig {
             serial: Some("valid_serial".to_string()),
             ..disk_fixture()
@@ -4710,7 +4712,7 @@ mod tests {
         valid_serial_config.validate().unwrap();
 
         // Test empty string serial (should be valid)
-        let mut empty_serial_config = valid_config.clone();
+        let mut empty_serial_config = valid_vmconfig();
         empty_serial_config.disks = Some(vec![DiskConfig {
             serial: Some("".to_string()),
             ..disk_fixture()
@@ -4718,7 +4720,7 @@ mod tests {
         empty_serial_config.validate().unwrap();
 
         // Test None serial (should be valid)
-        let mut none_serial_config = valid_config.clone();
+        let mut none_serial_config = valid_vmconfig();
         none_serial_config.disks = Some(vec![DiskConfig {
             serial: None,
             ..disk_fixture()
@@ -4727,7 +4729,7 @@ mod tests {
 
         // Test maximum length serial (exactly VIRTIO_BLK_ID_BYTES)
         let max_serial = "a".repeat(VIRTIO_BLK_ID_BYTES as usize);
-        let mut max_serial_config = valid_config.clone();
+        let mut max_serial_config = valid_vmconfig();
         max_serial_config.disks = Some(vec![DiskConfig {
             serial: Some(max_serial),
             ..disk_fixture()
@@ -4736,7 +4738,7 @@ mod tests {
 
         // Test serial length exceeding VIRTIO_BLK_ID_BYTES
         let long_serial = "a".repeat(VIRTIO_BLK_ID_BYTES as usize + 1);
-        let mut invalid_serial_config = valid_config.clone();
+        let mut invalid_serial_config = valid_vmconfig();
         invalid_serial_config.disks = Some(vec![DiskConfig {
             serial: Some(long_serial.clone()),
             ..disk_fixture()
@@ -4749,7 +4751,7 @@ mod tests {
             ))
         );
 
-        let mut still_valid_config = valid_config.clone();
+        let mut still_valid_config = valid_vmconfig();
         still_valid_config.devices = Some(vec![
             DeviceConfig {
                 path: "/device1".into(),
@@ -4762,7 +4764,7 @@ mod tests {
         ]);
         still_valid_config.validate().unwrap();
 
-        let mut invalid_config = valid_config.clone();
+        let mut invalid_config = valid_vmconfig();
         invalid_config.devices = Some(vec![
             DeviceConfig {
                 path: "/device1".into(),
@@ -4777,7 +4779,7 @@ mod tests {
         #[cfg(feature = "sev_snp")]
         {
             // Payload with empty host data
-            let mut config_with_no_host_data = valid_config.clone();
+            let mut config_with_no_host_data = valid_vmconfig();
             config_with_no_host_data.payload = Some(PayloadConfig {
                 kernel: Some(PathBuf::from("/path/to/kernel")),
                 firmware: None,
@@ -4793,7 +4795,7 @@ mod tests {
             config_with_no_host_data.validate().unwrap_err();
 
             // Payload with no host data provided
-            let mut valid_config_with_no_host_data = valid_config.clone();
+            let mut valid_config_with_no_host_data = valid_vmconfig();
             valid_config_with_no_host_data.payload = Some(PayloadConfig {
                 kernel: Some(PathBuf::from("/path/to/kernel")),
                 firmware: None,
@@ -4809,7 +4811,7 @@ mod tests {
             valid_config_with_no_host_data.validate().unwrap();
 
             // Payload with invalid host data length i.e less than 64
-            let mut config_with_invalid_host_data = valid_config.clone();
+            let mut config_with_invalid_host_data = valid_vmconfig();
             config_with_invalid_host_data.payload = Some(PayloadConfig {
                 kernel: Some(PathBuf::from("/path/to/kernel")),
                 firmware: None,
@@ -4827,7 +4829,7 @@ mod tests {
             config_with_invalid_host_data.validate().unwrap_err();
         }
 
-        let mut still_valid_config = valid_config;
+        let mut still_valid_config = valid_vmconfig();
         // SAFETY: Safe as the file was just opened
         let fd1 = unsafe { libc::dup(File::open("/dev/null").unwrap().as_raw_fd()) };
         // SAFETY: Safe as the file was just opened
