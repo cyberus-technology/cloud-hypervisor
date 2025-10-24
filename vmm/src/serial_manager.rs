@@ -340,15 +340,15 @@ impl SerialManager {
 
                     if let ConsoleOutput::Tcp(_, Some(f)) = &in_file {
                         write_distributor.add_writer(f.clone());
+                        serial
+                            .as_ref()
+                            .lock()
+                            .unwrap()
+                            .set_out(Some(Box::new(write_distributor.clone())));
                     }
 
                     let mut events =
                         [epoll::Event::new(epoll::Events::empty(), 0); EPOLL_EVENTS_LEN];
-                    serial
-                        .as_ref()
-                        .lock()
-                        .unwrap()
-                        .set_out(Some(Box::new(write_distributor.clone())));
 
                     loop {
                         let num_events = match epoll::wait(epoll_fd, timeout, &mut events[..]) {
