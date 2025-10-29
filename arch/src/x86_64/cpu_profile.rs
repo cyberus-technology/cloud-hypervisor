@@ -16,6 +16,7 @@ pub enum CpuProfile {
     // Having such a variant would be good for testing in CI, but should not become part of the shipped
     // cloud hypervisor.
     DevLaptop,
+    Skylake,
 }
 
 impl CpuProfile {
@@ -40,6 +41,13 @@ impl CpuProfile {
                         .expect("should be able to deserialize pre-generated data"),
                 )
             }
+            Self::Skylake => Some(
+                serde_json::from_slice(include_bytes!("cpu_profiles/skylake-profile.json"))
+                    .inspect_err(|e| {
+                        error!("BUG: could not deserialize CPU profile. Got error: {:?}", e)
+                    })
+                    .expect("should be able to deserialize pre-generated data"),
+            ),
         }
     }
 
