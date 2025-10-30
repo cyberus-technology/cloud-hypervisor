@@ -32,10 +32,21 @@
 
 use std::fs::File;
 use std::os::unix::io::IntoRawFd;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::{LazyLock, Mutex};
 
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
 use vmm_sys_util::eventfd::EventFd;
+
+/// Helper to make the VmSendMigration call blocking as long as a migration is ongoing.
+#[allow(clippy::type_complexity)]
+pub static ONGOING_LIVEMIGRATION: LazyLock<(
+    SyncSender<Result<(), vm_migration::MigratableError>>,
+    Mutex<Receiver<Result<(), vm_migration::MigratableError>>>,
+)> = LazyLock::new(|| {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+    (sender, Mutex::new(receiver))
+});
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::api::VmCoredump;
@@ -230,7 +241,6 @@ vm_action_put_handler_body!(VmRemoveDevice);
 vm_action_put_handler_body!(VmResizeDisk);
 vm_action_put_handler_body!(VmResizeZone);
 vm_action_put_handler_body!(VmSnapshot);
-vm_action_put_handler_body!(VmSendMigration);
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 vm_action_put_handler_body!(VmCoredump);
@@ -381,6 +391,46 @@ impl PutHandler for VmReceiveMigration {
 }
 
 impl GetHandler for VmReceiveMigration {}
+
+// Special Handling for virtio-net Devices Backed by Network File Descriptors
+//
+// See above.
+impl PutHandler for VmSendMigration {
+    fn handle_request(
+        &'static self,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+        body: &Option<Body>,
+        _files: Vec<File>,
+    ) -> std::result::Result<Option<Body>, HttpError> {
+        if let Some(body) = body {
+            let res = self
+                .send(
+                    api_notifier,
+                    api_sender,
+                    serde_json::from_slice(body.raw())?,
+                )
+                .map_err(HttpError::ApiError)?;
+
+            info!("live migration started");
+
+            let (_, receiver) = &*ONGOING_LIVEMIGRATION;
+
+            info!("waiting for live migration result");
+            let mig_res = receiver.lock().unwrap().recv().unwrap();
+            info!("received live migration result");
+
+            // We forward the migration error here to the guest
+            mig_res
+                .map(|_| res)
+                .map_err(|e| HttpError::ApiError(ApiError::VmSendMigration(e)))
+        } else {
+            Err(HttpError::BadRequest)
+        }
+    }
+}
+
+impl GetHandler for VmSendMigration {}
 
 impl PutHandler for VmResize {
     fn handle_request(
