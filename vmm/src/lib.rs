@@ -61,6 +61,7 @@ use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 
+use crate::api::http::http_endpoint::ONGOING_LIVEMIGRATION;
 use crate::api::{
     ApiRequest, ApiResponse, RequestHandler, VmInfoResponse, VmReceiveMigrationData,
     VmSendMigrationData, VmmPingResponse,
@@ -2436,6 +2437,13 @@ impl Vmm {
 
         match migration_res {
             Ok(()) => {
+                {
+                    info!("Sending Receiver in HTTP thread that migration succeeded");
+                    let (sender, _) = &*ONGOING_LIVEMIGRATION;
+                    // unblock API call; propagate migration result
+                    sender.send(Ok(())).unwrap();
+                }
+
                 // Shutdown the VM after the migration succeeded
                 if let Err(e) = self.exit_evt.write(1) {
                     error!("Failed shutting down the VM after migration: {e}");
@@ -2443,6 +2451,13 @@ impl Vmm {
             }
             Err(e) => {
                 error!("Migration failed: {e}");
+                {
+                    info!("Sending Receiver in HTTP thread that migration failed");
+                    let (sender, _) = &*ONGOING_LIVEMIGRATION;
+                    // unblock API call; propagate migration result
+                    sender.send(Err(e)).unwrap();
+                }
+                // we don't fail the VMM here, it just continues running its VM
             }
         }
     }
@@ -2961,10 +2976,18 @@ impl RequestHandler for Vmm {
     }
 
     fn vm_resize_disk(&mut self, id: String, desired_size: u64) -> result::Result<(), VmError> {
+        info!("request to resize disk: id={id}");
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
 
         match self.vm {
-            MaybeVmOwnership::Vmm(ref mut vm) => vm.resize_disk(&id, desired_size),
+            MaybeVmOwnership::Vmm(ref mut vm) => {
+                if let Err(e) = vm.resize_disk(&id, desired_size) {
+                    error!("Error when resizing disk: {e:?}");
+                    Err(e)
+                } else {
+                    Ok(())
+                }
+            }
             MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => Err(VmError::ResizeDisk),
         }
