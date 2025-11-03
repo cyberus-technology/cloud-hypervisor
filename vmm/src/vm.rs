@@ -1087,7 +1087,7 @@ impl Vm {
                 #[cfg(feature = "tdx")]
                 tdx_enabled,
                 None,
-                None,
+                Default::default(),
             )
             .map_err(Error::MemoryManager)?
         };
