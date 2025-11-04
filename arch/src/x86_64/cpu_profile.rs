@@ -17,6 +17,7 @@ pub enum CpuProfile {
     // cloud hypervisor.
     DevLaptop,
     Skylake,
+    SapphireRapids,
 }
 
 impl CpuProfile {
@@ -43,6 +44,13 @@ impl CpuProfile {
             }
             Self::Skylake => Some(
                 serde_json::from_slice(include_bytes!("cpu_profiles/skylake-profile.json"))
+                    .inspect_err(|e| {
+                        error!("BUG: could not deserialize CPU profile. Got error: {:?}", e)
+                    })
+                    .expect("should be able to deserialize pre-generated data"),
+            ),
+            Self::SapphireRapids => Some(
+                serde_json::from_slice(include_bytes!("cpu_profiles/sapphire-rapids.json"))
                     .inspect_err(|e| {
                         error!("BUG: could not deserialize CPU profile. Got error: {:?}", e)
                     })
