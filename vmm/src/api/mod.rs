@@ -35,6 +35,7 @@ pub mod http;
 
 use std::io;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::mpsc::{RecvError, SendError, Sender, channel};
 
 use log::info;
@@ -266,6 +267,9 @@ pub struct VmReceiveMigrationData {
     pub tcp_serial_url: Option<String>,
     /// Map with new network FDs on the new host.
     pub net_fds: Vec<RestoredNetConfig>,
+    /// Directory containing the TLS server certificate (server-cert.pem) and TLS server key (server-key.pem).
+    #[serde(default)]
+    pub tls_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
@@ -288,6 +292,9 @@ pub struct VmSendMigrationData {
     /// The number of parallel connections for migration
     #[serde(default = "default_connections")]
     pub connections: NonZeroU32,
+    /// Directory containing the TLS root CA certificate (ca-cert.pem)
+    #[serde(default)]
+    pub tls_dir: Option<PathBuf>,
 }
 
 // Default value for downtime the same as qemu.

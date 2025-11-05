@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write, stdout};
 use std::net::{TcpListener, TcpStream};
-use std::num::NonZeroU32;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -56,8 +55,10 @@ use vm_memory::{
     VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::*;
-use vm_migration::tls::{TlsConnectionWrapper, TlsStream};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::tls::{TlsConnectionWrapper, TlsStream, TlsStreamWrapper};
+use vm_migration::{
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, tls,
+};
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
@@ -284,7 +285,7 @@ impl From<u64> for EpollDispatch {
 enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
-    Tls(Box<TlsStream>),
+    Tls(Box<TlsStreamWrapper>),
 }
 
 impl Read for SocketStream {
@@ -1262,8 +1263,7 @@ impl SendAdditionalConnections {
     const CHUNK_SIZE: u64 = 64 /* MiB */ << 20;
 
     fn new(
-        destination: &str,
-        connections: NonZeroU32,
+        send_data_migration: &VmSendMigrationData,
         guest_mem: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> std::result::Result<Self, MigratableError> {
         let mut threads = Vec::new();
@@ -1271,8 +1271,9 @@ impl SendAdditionalConnections {
         let cancel = Arc::new(AtomicBool::new(false));
         let (error_tx, error_rx) = std::sync::mpsc::channel::<MigratableError>();
 
-        for n in 0..(connections.get() - 1) {
-            let socket = (match send_migration_socket(destination) {
+        let additional_connections = send_data_migration.connections.get() - 1;
+        for n in 0..(additional_connections) {
+            let socket = (match send_migration_socket(send_data_migration) {
                 Err(e) if n == 0 => {
                     // If we encounter a problem on the first additional
                     // connection, we just assume the other side doesn't support
@@ -1448,17 +1449,30 @@ impl Drop for SendAdditionalConnections {
 
 /// Establishes a connection to a migration destination socket (TCP or UNIX).
 fn send_migration_socket(
-    destination_url: &str,
+    send_data_migration: &VmSendMigrationData,
 ) -> std::result::Result<SocketStream, MigratableError> {
-    if let Some(address) = destination_url.strip_prefix("tcp:") {
+    if let Some(address) = send_data_migration.destination_url.strip_prefix("tcp:") {
         info!("Connecting to TCP socket at {address}");
 
         let socket = TcpStream::connect(address).map_err(|e| {
             MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
         })?;
 
-        Ok(SocketStream::Tcp(socket))
-    } else if let Some(path) = destination_url.strip_prefix("unix:") {
+        if let Some(tls_dir) = &send_data_migration.tls_dir {
+            info!("Live Migration will be encrypted using TLS.");
+            // The address may still contain a port. I think we should build something more robust to also handle IPv6.
+            let tls_stream = tls::client_stream(
+                socket,
+                tls_dir,
+                address.split_once(':').map_or(address, |(host, _)| host),
+            )?;
+            Ok(SocketStream::Tls(Box::new(TlsStreamWrapper::new(
+                TlsStream::Client(tls_stream),
+            ))))
+        } else {
+            Ok(SocketStream::Tcp(socket))
+        }
+    } else if let Some(path) = &send_data_migration.destination_url.strip_prefix("unix:") {
         info!("Connecting to UNIX socket at {path:?}");
 
         let socket = UnixStream::connect(path).map_err(|e| {
@@ -1468,22 +1482,30 @@ fn send_migration_socket(
         Ok(SocketStream::Unix(socket))
     } else {
         Err(MigratableError::MigrateSend(anyhow!(
-            "Invalid destination: {destination_url}"
+            "Invalid destination: {}",
+            send_data_migration.destination_url
         )))
     }
 }
 
 /// Creates a listener socket for receiving incoming migration connections (TCP or UNIX).
 fn receive_migration_listener(
-    receiver_url: &str,
+    receiver_data_migration: &VmReceiveMigrationData,
 ) -> std::result::Result<ReceiveListener, MigratableError> {
-    if let Some(address) = receiver_url.strip_prefix("tcp:") {
-        TcpListener::bind(address)
-            .map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error binding to TCP socket: {e}"))
-            })
-            .map(ReceiveListener::Tcp)
-    } else if let Some(path) = receiver_url.strip_prefix("unix:") {
+    if let Some(address) = receiver_data_migration.receiver_url.strip_prefix("tcp:") {
+        let listener = TcpListener::bind(address).map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error binding to TCP socket: {e}"))
+        })?;
+
+        if let Some(tls_dir) = &receiver_data_migration.tls_dir {
+            Ok(ReceiveListener::Tls(
+                listener,
+                TlsConnectionWrapper::new(tls_dir),
+            ))
+        } else {
+            Ok(ReceiveListener::Tcp(listener))
+        }
+    } else if let Some(path) = receiver_data_migration.receiver_url.strip_prefix("unix:") {
         UnixListener::bind(path)
             .map_err(|e| {
                 MigratableError::MigrateReceive(anyhow!("Error binding to UNIX socket: {e}"))
@@ -1491,7 +1513,8 @@ fn receive_migration_listener(
             .map(|listener| ReceiveListener::Unix(listener, Some(path.into())))
     } else {
         Err(MigratableError::MigrateSend(anyhow!(
-            "Invalid source: {receiver_url}"
+            "Invalid source: {}",
+            receiver_data_migration.receiver_url
         )))
     }
 }
@@ -2113,11 +2136,7 @@ impl Vmm {
         s: &mut MigrationState,
         send_data_migration: &VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
-        let mem_send = SendAdditionalConnections::new(
-            &send_data_migration.destination_url,
-            send_data_migration.connections,
-            &vm.guest_memory(),
-        )?;
+        let mem_send = SendAdditionalConnections::new(send_data_migration, &vm.guest_memory())?;
 
         // Start logging dirty pages
         vm.start_dirty_log()?;
@@ -2197,7 +2216,7 @@ impl Vmm {
         let mut s = MigrationState::new();
 
         // Set up the socket connection
-        let mut socket = send_migration_socket(&send_data_migration.destination_url)?;
+        let mut socket = send_migration_socket(send_data_migration)?;
 
         // Start the migration
         Request::start().write_to(&mut socket)?;
@@ -3357,7 +3376,7 @@ impl RequestHandler for Vmm {
             receive_data_migration.receiver_url, &receive_data_migration.net_fds
         );
 
-        let mut listener = receive_migration_listener(&receive_data_migration.receiver_url)?;
+        let mut listener = receive_migration_listener(&receive_data_migration)?;
         // Accept the connection and get the socket
         let mut socket = listener.accept().map_err(|e| {
             warn!("Failed to accept migration connection: {e}");
