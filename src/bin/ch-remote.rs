@@ -11,6 +11,7 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process;
 
 use api_client::{
@@ -491,7 +492,8 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .subcommand_matches("send-migration")
                     .unwrap()
                     .get_one::<String>("send_migration_config")
-                    .unwrap(),
+                    .unwrap()
+                    .to_owned(),
                 matches
                     .subcommand_matches("send-migration")
                     .unwrap()
@@ -513,6 +515,11 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .copied()
                     .and_then(NonZeroU32::new)
                     .unwrap_or(NonZeroU32::new(1).unwrap()),
+                matches
+                    .subcommand_matches("send-migration")
+                    .unwrap()
+                    .get_one::<PathBuf>("tls-dir")
+                    .cloned(),
             );
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
                 .map_err(Error::HttpApiClient)
@@ -523,7 +530,13 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .subcommand_matches("receive-migration")
                     .unwrap()
                     .get_one::<String>("receive_migration_config")
-                    .unwrap(),
+                    .unwrap()
+                    .to_owned(),
+                matches
+                    .subcommand_matches("receive-migration")
+                    .unwrap()
+                    .get_one::<PathBuf>("tls-dir")
+                    .cloned(),
             );
             simple_api_command(
                 socket,
@@ -930,32 +943,35 @@ fn coredump_config(destination_url: &str) -> String {
     serde_json::to_string(&coredump_config).unwrap()
 }
 
-fn receive_migration_data(url: &str) -> String {
+fn receive_migration_data(url: String, tls_dir: Option<PathBuf>) -> String {
     let receive_migration_data = vmm::api::VmReceiveMigrationData {
-        receiver_url: url.to_owned(),
+        receiver_url: url,
         tcp_serial_url: None,
         // Only FDs transmitted via an SCM_RIGHTS UNIX Domain Socket message
         // are valid. Transmitting specific FD nums via the HTTP API is
         // almost always invalid.
         net_fds: None,
+        tls_dir,
     };
 
     serde_json::to_string(&receive_migration_data).unwrap()
 }
 
 fn send_migration_data(
-    url: &str,
+    url: String,
     local: bool,
     downtime: u64,
     migration_timeout: u64,
     connections: NonZeroU32,
+    tls_dir: Option<PathBuf>,
 ) -> String {
     let send_migration_data = vmm::api::VmSendMigrationData {
-        destination_url: url.to_owned(),
+        destination_url: url,
         local,
         downtime,
         migration_timeout,
         connections,
+        tls_dir,
     };
 
     serde_json::to_string(&send_migration_data).unwrap()
@@ -1069,6 +1085,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
                     .index(1)
                     // Live migration with net_fds not supported in ch-remote.
                     .help("<receiver_url>"),
+            )
+            .arg(
+                Arg::new("tls-dir")
+                    .long("tls-dir")
+                    .help("directory with TLS certificates")
+                    .num_args(1),
             ),
         Command::new("remove-device")
             .about("Remove VFIO and PCI device")
@@ -1167,6 +1189,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
                     .long("local")
                     .num_args(0)
                     .action(ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("tls-dir")
+                    .long("tls-dir")
+                    .help("directory with TLS certificates")
+                    .num_args(1),
             ),
         Command::new("shutdown").about("Shutdown the VM"),
         Command::new("shutdown-vmm").about("Shutdown the VMM"),
