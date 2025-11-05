@@ -415,8 +415,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "pku", description: "Protection keys for user-space", bits_range: (3, 3), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// Presumably this is set by the OS? TODO: Set applicability of the migration check to never
 		ValueDefinition{ short: "ospke", description: "OS protection keys enable", bits_range: (4, 4), policy: ProfilePolicy::Passthrough , migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// QEMU seems to set this unconditionally whenever KVM supports it (TODO: Would it be best to also set this unconditionally?)
-		ValueDefinition{ short: "waitpkg", description: "WAITPKG instructions", bits_range: (5, 5), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
+		// TODO: QEMU seems to set this unconditionally whenever KVM supports it (TODO: Would it be best to set this unconditionally?)
+		ValueDefinition{ short: "waitpkg", description: "WAITPKG instructions", bits_range: (5, 5), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 		ValueDefinition{ short: "avx512_vbmi2", description: "AVX-512 vector byte manipulation instructions group 2", bits_range: (6, 6), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: This may be useful for nested virtualization? Perhaps it should be opt-in rather than unconditionally disabled?
 		ValueDefinition{ short: "cet_ss", description: "CET shadow stack features", bits_range: (7, 7), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
