@@ -53,6 +53,7 @@ hypervisor = { path = "hypervisor" }
 libc = { workspace = true }
 log = { workspace = true, features = ["std"] }
 option_parser = { path = "option_parser" }
+rustls = { workspace = true }
 seccompiler = { workspace = true }
 serde_json = { workspace = true }
 signal-hook = { workspace = true }
@@ -164,6 +165,7 @@ flume = "0.11.1"
 itertools = "0.14.0"
 libc = "0.2.177"
 log = "0.4.28"
+rustls = "0.23.34"
 signal-hook = "0.3.18"
 thiserror = "2.0.17"
 uuid = { version = "1.18.1" }
