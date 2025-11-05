@@ -1221,6 +1221,15 @@ impl SendAdditionalConnections {
         let thread_len = self.threads.len();
         assert_eq!(thread_len, self.channels.len());
 
+        // In case, we didn't manage to establish additional connections, don't
+        // bother sending memory in chunks. This would just lower throughput,
+        // because we wait for a response after each chunk instead of sending
+        // everything in one go.
+        if thread_len == 0 {
+            vm_send_memory(&self.guest_memory, socket, table)?;
+            return Ok(());
+        }
+
         // The chunk size is chosen to be big enough so that even very fast
         // links need some milliseconds to send it.
         'next_partition: for chunk in table.partition(Self::CHUNK_SIZE) {
