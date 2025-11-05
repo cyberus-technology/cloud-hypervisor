@@ -60,6 +60,7 @@ use vm_memory::{
     VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::*;
+use vm_migration::tls::{TlsConnectionWrapper, TlsStream};
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
@@ -267,6 +268,7 @@ impl From<u64> for EpollDispatch {
 enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
+    Tls(TlsStream),
 }
 
 impl Read for SocketStream {
@@ -274,6 +276,7 @@ impl Read for SocketStream {
         match self {
             SocketStream::Unix(stream) => stream.read(buf),
             SocketStream::Tcp(stream) => stream.read(buf),
+            SocketStream::Tls(stream) => stream.read(buf),
         }
     }
 }
@@ -283,6 +286,7 @@ impl Write for SocketStream {
         match self {
             SocketStream::Unix(stream) => stream.write(buf),
             SocketStream::Tcp(stream) => stream.write(buf),
+            SocketStream::Tls(stream) => stream.write(buf),
         }
     }
 
@@ -290,6 +294,7 @@ impl Write for SocketStream {
         match self {
             SocketStream::Unix(stream) => stream.flush(),
             SocketStream::Tcp(stream) => stream.flush(),
+            SocketStream::Tls(stream) => stream.flush(),
         }
     }
 }
@@ -299,6 +304,7 @@ impl AsFd for SocketStream {
         match self {
             SocketStream::Unix(s) => s.as_fd(),
             SocketStream::Tcp(s) => s.as_fd(),
+            SocketStream::Tls(s) => s.as_fd(),
         }
     }
 }
@@ -311,6 +317,7 @@ impl ReadVolatile for SocketStream {
         match self {
             SocketStream::Unix(s) => s.read_volatile(buf),
             SocketStream::Tcp(s) => s.read_volatile(buf),
+            SocketStream::Tls(s) => s.read_volatile(buf),
         }
     }
 
@@ -321,6 +328,7 @@ impl ReadVolatile for SocketStream {
         match self {
             SocketStream::Unix(s) => s.read_exact_volatile(buf),
             SocketStream::Tcp(s) => s.read_exact_volatile(buf),
+            SocketStream::Tls(s) => s.read_exact_volatile(buf),
         }
     }
 }
@@ -333,6 +341,7 @@ impl WriteVolatile for SocketStream {
         match self {
             SocketStream::Unix(s) => s.write_volatile(buf),
             SocketStream::Tcp(s) => s.write_volatile(buf),
+            SocketStream::Tls(s) => s.write_volatile(buf),
         }
     }
 
@@ -343,6 +352,7 @@ impl WriteVolatile for SocketStream {
         match self {
             SocketStream::Unix(s) => s.write_all_volatile(buf),
             SocketStream::Tcp(s) => s.write_all_volatile(buf),
+            SocketStream::Tls(s) => s.write_all_volatile(buf),
         }
     }
 }
@@ -876,6 +886,7 @@ fn wait_for_readable(
 enum ReceiveListener {
     Tcp(TcpListener),
     Unix(UnixListener, Option<PathBuf>),
+    Tls(TcpListener, TlsConnectionWrapper),
 }
 
 impl AsFd for ReceiveListener {
@@ -883,6 +894,7 @@ impl AsFd for ReceiveListener {
         match self {
             ReceiveListener::Tcp(listener) => listener.as_fd(),
             ReceiveListener::Unix(listener, _) => listener.as_fd(),
+            ReceiveListener::Tls(listener, _) => listener.as_fd(),
         }
     }
 }
@@ -910,6 +922,11 @@ impl ReceiveListener {
 
                 Ok(socket)
             }
+            ReceiveListener::Tls(listener, conn) => listener.accept().map(|(socket, _)| {
+                conn.wrap(socket)
+                    .map(SocketStream::Tls)
+                    .map_err(std::io::Error::other)
+            })?,
         }
     }
 
@@ -929,6 +946,9 @@ impl ReceiveListener {
             ReceiveListener::Unix(listener, opt_path) => listener
                 .try_clone()
                 .map(|listener| ReceiveListener::Unix(listener, opt_path.clone())),
+            ReceiveListener::Tls(listener, conn) => listener
+                .try_clone()
+                .map(|listener| ReceiveListener::Tls(listener, conn.clone())),
         }
     }
 }
@@ -2209,6 +2229,11 @@ impl Vmm {
                     vm.send_memory_fds(unix_socket)?;
                 }
                 SocketStream::Tcp(_tcp_socket) => {
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "--local option is not supported with TCP sockets",
+                    )));
+                }
+                SocketStream::Tls(_tls_socket) => {
                     return Err(MigratableError::MigrateSend(anyhow!(
                         "--local option is not supported with TCP sockets",
                     )));
