@@ -43,7 +43,7 @@ impl CpuProfile {
                 )
             }
             Self::Skylake => Some(
-                serde_json::from_slice(include_bytes!("cpu_profiles/skylake-profile.json"))
+                serde_json::from_slice(include_bytes!("cpu_profiles/skylake.json"))
                     .inspect_err(|e| {
                         error!("BUG: could not deserialize CPU profile. Got error: {:?}", e)
                     })
