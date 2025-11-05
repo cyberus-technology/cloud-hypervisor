@@ -1140,8 +1140,19 @@ impl SendAdditionalConnections {
         let mut threads = Vec::new();
         let mut channels = Vec::new();
 
-        for _ in 0..(connections.get() - 1) {
-            let socket = send_migration_socket(destination)?;
+        for n in 0..(connections.get() - 1) {
+            let socket = (match send_migration_socket(destination) {
+                Err(e) if n == 0 => {
+                    // If we encounter a problem on the first additional
+                    // connection, we just assume the other side doesn't support
+                    // multiple connections and carry on.
+                    info!(
+                        "Couldn't establish additional connections for sending VM memory: {e}, ignoring!"
+                    );
+                    break;
+                }
+                otherwise => otherwise,
+            })?;
             let guest_mem = guest_mem.clone();
             let (send, recv) = std::sync::mpsc::sync_channel::<SendMemoryThreadMessage>(
                 Self::BUFFERED_REQUESTS_PER_THREAD,
