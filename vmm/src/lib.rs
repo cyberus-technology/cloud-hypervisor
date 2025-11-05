@@ -319,15 +319,6 @@ impl AsFd for SocketStream {
     }
 }
 
-impl AsRawFd for SocketStream {
-    fn as_raw_fd(&self) -> RawFd {
-        match self {
-            SocketStream::Unix(s) => s.as_raw_fd(),
-            SocketStream::Tcp(s) => s.as_raw_fd(),
-        }
-    }
-}
-
 impl ReadVolatile for SocketStream {
     fn read_volatile<B: BitmapSlice>(
         &mut self,
