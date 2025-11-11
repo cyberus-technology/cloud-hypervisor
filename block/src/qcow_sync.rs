@@ -41,6 +41,9 @@ impl DiskFile for QcowDiskSync {
     fn fd(&mut self) -> BorrowedDiskFd<'_> {
         BorrowedDiskFd::new(self.qcow_file.as_raw_fd())
     }
+    fn resize(&mut self, _size: u64) -> DiskFileResult<()> {
+        Err(DiskFileError::Unsupported)
+    }
 }
 
 pub struct QcowSync {
