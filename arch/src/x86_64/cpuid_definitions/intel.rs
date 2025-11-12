@@ -84,7 +84,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		// MSR related
 		ValueDefinition{ short: "xtpr", description: "xTPR Update Control", bits_range: (14, 14), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// MSR related
-		ValueDefinition{ short: "pdcm", description: "Perfmon and Debug Capability", bits_range: (15, 15), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "pdcm", description: "Perfmon and Debug Capability", bits_range: (15, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "pcid", description: "Process-context identifiers", bits_range: (17, 17), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "dca", description: "Direct Cache Access", bits_range: (18, 18), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sse4_1", description: "SSE4.1", bits_range: (19, 19), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -137,7 +137,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "fxsr", description: "FXSAVE and FXRSTOR instructions", bits_range: (24, 24), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sse", description: "SSE instructions", bits_range: (25, 25), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sse2", description: "SSE2 instructions", bits_range: (26, 26), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "ss", description: "Self Snoop", bits_range: (27, 27), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "ss", description: "Self Snoop", bits_range: (27, 27), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "htt", description: "Hyper-threading", bits_range: (28, 28), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "tm", description: "Thermal Monitor", bits_range: (29, 29), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Remove? CpuidDescription{ short: "ia64", description: "Legacy IA-64 (Itanium) support bit, now reserved", bits_range: (30, 30), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -364,7 +364,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 
 		  TODO: Check what KVM_GET_SUPPORTED_CPUID actually gives here (on the Skylake server)
 		  */
-		ValueDefinition{ short: "fdp_excptn_only", description: "FPU Data Pointer updated only on x87 exceptions", bits_range: (6, 6), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "fdp_excptn_only", description: "FPU Data Pointer updated only on x87 exceptions", bits_range: (6, 6), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "smep", description: "Supervisor Mode Execution Protection", bits_range: (7, 7), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "bmi2", description: "Bit manipulation extensions group 2", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "erms", description: "Enhanced REP MOVSB/STOSB", bits_range: (9, 9), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -377,7 +377,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "rtm", description: "Intel restricted transactional memory", bits_range: (11, 11), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "rdt_m", description: "Supports Intel Resource Director Technology Monitoring Capability if 1", bits_range: (12, 12), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// The KVM docs recommend always setting this (https://docs.kernel.org/virt/kvm/x86/errata.html#kvm-get-supported-cpuid-issues). TODO: Is it OK to just set this to 1? 
-		ValueDefinition{ short: "zero_fcs_fds", description: "Deprecates FPU CS and FPU DS values if 1", bits_range: (13, 13), policy: ProfilePolicy::Overwrite(1), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "zero_fcs_fds", description: "Deprecates FPU CS and FPU DS values if 1", bits_range: (13, 13), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// This has been deprecated
 		ValueDefinition{ short: "mpx", description: "Intel memory protection extensions", bits_range: (14, 14), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// This might be useful for certain high performance applications, but it also seems like a rather niche and advanced feature. QEMU does also not automatically enable this from what we can tell.
@@ -468,7 +468,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 			migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits
 		},
 		
-		ValueDefinition{ short: "md_clear", description: "VERW MD_CLEAR microcode support", bits_range: (10, 10), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "md_clear", description: "VERW MD_CLEAR microcode support", bits_range: (10, 10), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		
 		ValueDefinition{ short: "rtm_always_abort", description: "XBEGIN (RTM transaction) always aborts", bits_range: (11, 11), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		
@@ -493,9 +493,9 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		// MSR related
 		ValueDefinition{ short: "spec_ctrl", description: "Speculation Control (IBRS/IBPB: indirect branch restrictions)", bits_range: (26, 26), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// MSR related
-		ValueDefinition{ short: "intel_stibp", description: "Single thread indirect branch predictors", bits_range: (27, 27), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "intel_stibp", description: "Single thread indirect branch predictors", bits_range: (27, 27), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// MSR related
-		ValueDefinition{ short: "flush_l1d", description: "FLUSH L1D cache: IA32_FLUSH_CMD MSR", bits_range: (28, 28), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "flush_l1d", description: "FLUSH L1D cache: IA32_FLUSH_CMD MSR", bits_range: (28, 28), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// MSR related
 		ValueDefinition{ short: "arch_capabilities", description: "Intel IA32_ARCH_CAPABILITIES MSR", bits_range: (29, 29), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// MSR related

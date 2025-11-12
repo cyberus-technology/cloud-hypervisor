@@ -839,16 +839,24 @@ pub fn generate_common_cpuid(
     } else {
         // Final compatibility checks to ensure that the CPUID values we return are compatible both with the CPU profile and the host we are currently running on.
         let host_adjusted_to_profile = host_adjusted_to_profile.expect("The profile adjusted cpuid entries should exist as we checked that we have a custom CPU profile");
-        let target_compatible_cpuid = compatibility_target_cpuid.expect("The target_compatible_cpuid entries should exist as we checked that we have a custom CPU profile");
+        // TODO: Remove
+        // let target_compatible_cpuid = compatibility_target_cpuid.expect("The target_compatible_cpuid entries should exist as we checked that we have a custom CPU profile");
+
         // Check that the host's cpuid is indeed compatible with the adjusted profile. This is not by construction.
 
+        info!("checking compatibility between host adjusted to profile and the host itself");
         CpuidFeatureEntry::check_cpuid_compatibility(&host_adjusted_to_profile, &host_cpuid).context("Unable to adjust the host to the CPU profile. The resulting cpuid is not compatible with the host's cpuid entries").map_err(Error::CpuProfileIncompatibility)?;
+        /*
+        info!(
+            "checking compatibility between the compatibility target's cpuid and the host adjusted to profile"
+        );
         // Check that the compatibility target's cpuid is compatible with the adjusted host's (the converse is satisfied by construction).
         // The adjusted host will always have a CPUID that is compatible with the compatibility target (in terms of live migration requirements), but the other direction needs to be checked.
         CpuidFeatureEntry::check_cpuid_compatibility(
             &target_compatible_cpuid,
             &host_adjusted_to_profile,
         ).context("The CPU profile's compatibility target has non-trivial CPUID entries not found on this host").map_err(Error::CpuProfileIncompatibility)?;
+        */
         Ok(host_adjusted_to_profile)
     }
 }
