@@ -241,7 +241,6 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x5, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EAX },
 	ValueDefinitions::new(&[
-		// TODO: Perhaps there should be some CHV feature to opt-in to this for non-host cpu profiles?
 		ValueDefinition{ short: "min_mon_size", description: "Smallest monitor-line size, in bytes", bits_range: (0, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::LtEq },
 	])
 	),
@@ -249,7 +248,6 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x5, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EBX },
 	ValueDefinitions::new(&[
-		// TODO: Perhaps there should be some CHV feature to opt-in to this for non-host cpu profiles?
 		ValueDefinition{ short: "max_mon_size", description: "Largest monitor-line size, in bytes", bits_range: (0, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::GtEq },
 	])
 	),
@@ -258,7 +256,6 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	Parameters{ leaf: 0x5, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::ECX },
 	ValueDefinitions::new(&[
 		ValueDefinition{ short: "mwait_ext", description: "Enumeration of MONITOR/MWAIT extensions is supported", bits_range: (0, 0), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Perhaps there should be some CHV feature to opt-in to this for non-host cpu profiles?
 		ValueDefinition{ short: "mwait_irq_break", description: "Interrupts as a break-event for MWAIT is supported", bits_range: (1, 1), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
@@ -266,14 +263,14 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x5, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EDX },
 	ValueDefinitions::new(&[
-		ValueDefinition{ short: "n_c0_substates", description: "Number of C0 sub C-states supported using MWAIT", bits_range: (0, 3), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "n_c1_substates", description: "Number of C1 sub C-states supported using MWAIT", bits_range: (4, 7), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "n_c2_substates", description: "Number of C2 sub C-states supported using MWAIT", bits_range: (8, 11), policy: ProfilePolicy::Passthrough, migration_compatibility_req:  MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "n_c3_substates", description: "Number of C3 sub C-states supported using MWAIT", bits_range: (12, 15), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "n_c4_substates", description: "Number of C4 sub C-states supported using MWAIT", bits_range: (16, 19), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "n_c5_substates", description: "Number of C5 sub C-states supported using MWAIT", bits_range: (20, 23), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "n_c6_substates", description: "Number of C6 sub C-states supported using MWAIT", bits_range: (24, 27), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "n_c7_substates", description: "Number of C7 sub C-states supported using MWAIT", bits_range: (28, 31), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c0_substates", description: "Number of C0 sub C-states supported using MWAIT", bits_range: (0, 3), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c1_substates", description: "Number of C1 sub C-states supported using MWAIT", bits_range: (4, 7), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c2_substates", description: "Number of C2 sub C-states supported using MWAIT", bits_range: (8, 11), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req:  MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c3_substates", description: "Number of C3 sub C-states supported using MWAIT", bits_range: (12, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c4_substates", description: "Number of C4 sub C-states supported using MWAIT", bits_range: (16, 19), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c5_substates", description: "Number of C5 sub C-states supported using MWAIT", bits_range: (20, 23), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c6_substates", description: "Number of C6 sub C-states supported using MWAIT", bits_range: (24, 27), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "n_c7_substates", description: "Number of C7 sub C-states supported using MWAIT", bits_range: (28, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 	])
 	),
 
@@ -319,10 +316,11 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x6, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::ECX },
 	ValueDefinitions::new(&[
+		// MSR related
 		ValueDefinition{ short: "aperfmperf", description: "MPERF/APERF MSRs (effective frequency interface)", bits_range: (0, 0), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
 		ValueDefinition{ short: "epb", description: "IA32_ENERGY_PERF_BIAS MSR support", bits_range: (3, 3), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about the defaults for this one, but I think since we have disabled thread director support (0x6 EAX bit 23) we can probably just passthrough whatever here and. Not sure about migration compatibility (for the Host profile) though.
-		ValueDefinition{ short: "thrd_director_nclasses", description: "Number of classes, Intel thread director", bits_range: (8, 15), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "thrd_director_nclasses", description: "Number of classes, Intel thread director", bits_range: (8, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 	])
 	),
 
@@ -331,8 +329,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	ValueDefinitions::new(&[
 		ValueDefinition{ short: "perfcap_reporting", description: "Performance capability reporting", bits_range: (0, 0), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "encap_reporting", description: "Energy efficiency capability reporting", bits_range: (1, 1), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "feedback_sz", description: "Feedback interface structure size, in 4K pages", bits_range: (8, 11), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		ValueDefinition{ short: "this_lcpu_hwfdbk_idx", description: "This logical CPU hardware feedback interface index", bits_range: (16, 31), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "feedback_sz", description: "Feedback interface structure size, in 4K pages", bits_range: (8, 11), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "this_lcpu_hwfdbk_idx", description: "This logical CPU hardware feedback interface index", bits_range: (16, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 	])
 	),
 
@@ -351,17 +349,21 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	Parameters{ leaf: 0x7, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EBX },
 	ValueDefinitions::new(&[
 		ValueDefinition{ short: "fsgsbase", description: "FSBASE/GSBASE read/write support", bits_range: (0, 0), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "tsc_adjust", description: "IA32_TSC_ADJUST MSR supported", bits_range: (1, 1), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
+		ValueDefinition{ short: "tsc_adjust", description: "IA32_TSC_ADJUST MSR supported", bits_range: (1, 1), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// SGX is deprecated so we disable it unconditionally for all CPU profiles
 		ValueDefinition{ short: "sgx", description: "Intel SGX (Software Guard Extensions)", bits_range: (2, 2), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 		ValueDefinition{ short: "bmi1", description: "Bit manipulation extensions group 1", bits_range: (3, 3), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TSX related which is riddled with CVEs 
-		ValueDefinition{ short: "hle", description: "Hardware Lock Elision", bits_range: (4, 4), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// TSX related which is riddled with CVEs. Consider two profiles, or making it opt-in/out. QEMU always has a CPU model with and without TSX.
+		ValueDefinition{ short: "hle", description: "Hardware Lock Elision", bits_range: (4, 4), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "avx2", description: "AVX2 instruction set", bits_range: (5, 5), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		  /*The KVM docs recommend always setting this (https://docs.kernel.org/virt/kvm/x86/errata.html#kvm-get-supported-cpuid-issues).
 
 		  Keep in mind however that in my limited understanding this isn't about enabling or disabling a feature, but it describes critical behaviour.
-		  Hence I am wondering whether it should be a hard error if the host does not have this bit set, but the desired CPU profile does? */
+		  Hence I am wondering whether it should be a hard error if the host does not have this bit set, but the desired CPU profile does?
+
+		  TODO: Check what KVM_GET_SUPPORTED_CPUID actually gives here (on the Skylake server)
+		  */
 		ValueDefinition{ short: "fdp_excptn_only", description: "FPU Data Pointer updated only on x87 exceptions", bits_range: (6, 6), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "smep", description: "Supervisor Mode Execution Protection", bits_range: (7, 7), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "bmi2", description: "Bit manipulation extensions group 2", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -371,8 +373,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	      I included this because it seems like QEMU does (to the best of my understanding).
 		*/
 		ValueDefinition{ short: "invpcid", description: "INVPCID instruction (Invalidate Processor Context ID)", bits_range: (10, 10), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// This is TSX related from what I can tell. TSX is riddled with CVEs hence we disable this
-		ValueDefinition{ short: "rtm", description: "Intel restricted transactional memory", bits_range: (11, 11), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// This is TSX related from what I can tell. TSX is riddled with CVEs: Consider two profiles (one with it disabled) or an opt-in/out feature.
+		ValueDefinition{ short: "rtm", description: "Intel restricted transactional memory", bits_range: (11, 11), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "rdt_m", description: "Supports Intel Resource Director Technology Monitoring Capability if 1", bits_range: (12, 12), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// The KVM docs recommend always setting this (https://docs.kernel.org/virt/kvm/x86/errata.html#kvm-get-supported-cpuid-issues). TODO: Is it OK to just set this to 1? 
 		ValueDefinition{ short: "zero_fcs_fds", description: "Deprecates FPU CS and FPU DS values if 1", bits_range: (13, 13), policy: ProfilePolicy::Overwrite(1), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -409,13 +411,12 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "umip", description: "User mode instruction protection", bits_range: (2, 2), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 		// Also set by QEMU for CPU models from what we can tell
 		ValueDefinition{ short: "pku", description: "Protection keys for user-space", bits_range: (3, 3), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// Presumably this is set by the OS? TODO: Set applicability of the migration check to never
-		ValueDefinition{ short: "ospke", description: "OS protection keys enable", bits_range: (4, 4), policy: ProfilePolicy::Passthrough , migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "ospke", description: "OS protection keys enable", bits_range: (4, 4), policy: ProfilePolicy::Inherit , migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: QEMU seems to set this unconditionally whenever KVM supports it (TODO: Would it be best to set this unconditionally?)
 		ValueDefinition{ short: "waitpkg", description: "WAITPKG instructions", bits_range: (5, 5), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 		ValueDefinition{ short: "avx512_vbmi2", description: "AVX-512 vector byte manipulation instructions group 2", bits_range: (6, 6), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: This may be useful for nested virtualization? Perhaps it should be opt-in rather than unconditionally disabled?
-		ValueDefinition{ short: "cet_ss", description: "CET shadow stack features", bits_range: (7, 7), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "cet_ss", description: "CET shadow stack features", bits_range: (7, 7), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "gfni", description: "Galois field new instructions", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "vaes", description: "Vector AES instructions", bits_range: (9, 9), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "vpclmulqdq", description: "VPCLMULQDQ 256-bit instruction support", bits_range: (10, 10), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -427,34 +428,22 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "avx512_vpopcntdq", description: "AVX-512: POPCNT for vectors of DWORD/QWORD", bits_range: (14, 14), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 
 		ValueDefinition{ short: "la57", description: "57-bit linear addresses (five-level paging)", bits_range: (16, 16), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// MMX is deprecated, but we should perhaps still check for equality here when migrating
-		ValueDefinition{ short: "mawau_val_lm", description: "BNDLDX/BNDSTX MAWAU value in 64-bit mode", bits_range: (17, 21), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Eq },
+		ValueDefinition{ short: "mawau_val_lm", description: "BNDLDX/BNDSTX MAWAU value in 64-bit mode", bits_range: (17, 21), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Eq },
+		// MSR related
 		ValueDefinition{ short: "rdpid", description: "RDPID instruction", bits_range: (22, 22), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 		// We leave key locker support out for CPU profiles for the time being. We may want this to be opt-in in the future though
 		ValueDefinition{ short: "key_locker", description: "Intel key locker support", bits_range: (23, 23), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 		ValueDefinition{ short: "bus_lock_detect", description: "OS bus-lock detection", bits_range: (24, 24), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		/*
-		TODO: Should this be off by default? Can untrusted guests potentially abuse this to slow down other guests?
-	    According to https://www.felixcloutier.com/x86/cldemote :
-	    > On processors which do not support the CLDEMOTE instruction (including legacy hardware) the instruction will be treated as a NOP.
-	    This suggests that is should even be fine to migrate from a host with this feature to one which does not have it.
-	    TODO: Set migrationcheck applicability to never
-		*/
+
 		ValueDefinition{ short: "cldemote", description: "CLDEMOTE instruction", bits_range: (25, 25), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 
 		ValueDefinition{ short: "movdiri", description: "MOVDIRI instruction", bits_range: (27, 27), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "movdir64b", description: "MOVDIR64B instruction", bits_range: (28, 28), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		/*
-	      This could be important for nested virtualization and perhaps for certain other applications. It does not seem to be enabled for CPU models in QEMU however, hence we
-	      also leave it out for now, but should reconsider if/how to add it in the future.
-		*/
+
 		ValueDefinition{ short: "enqcmd", description: "Enqueue stores supported (ENQCMD{,S})", bits_range: (29, 29), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// SGX support is deprecated so we disable it unconditionally for CPU profiles
 		ValueDefinition{ short: "sgx_lc", description: "Intel SGX launch configuration", bits_range: (30, 30), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		/*
-	      I was not able to find much information on this feature. It seems like QEMU can emulate it, but does not set if for any available CPU model as far as I can tell.
-	      It also seems to be mainly relevant for hosts and not guests (except perhaps for nested virtualization).
-		*/
+
 		ValueDefinition{ short: "pks", description: "Protection keys for supervisor-mode pages", bits_range: (31, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
@@ -467,10 +456,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "avx512_4vnniw", description: "AVX-512 neural network instructions (Intel Xeon Phi only?)", bits_range: (2, 2), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "avx512_4fmaps", description: "AVX-512 multiply accumulation single precision (Intel Xeon Phi only?)", bits_range: (3, 3), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "fsrm", description: "Fast short REP MOV", bits_range: (4, 4), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: To me this seems very powerful and I am wondering if it can be abused by guests. Is it indeed right to disable this for all CPU profiles as I expect we should?
+		
 		ValueDefinition{ short: "uintr", description: "CPU supports user interrupts", bits_range: (5, 5), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "avx512_vp2intersect", description: "VP2INTERSECT{D,Q} instructions", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: This seems to be CVE related and we should investigate this more thoroughly
+		// MSR related
 		ValueDefinition{
 			short: "srdbs_ctrl",
 			description: "SRBDS mitigation MSR available: If 1, enumerates support for the IA32_MCU_OPT_CTRL MSR and indicates that its bit 0 (RNGDS_MITG_DIS) is also supported.",
@@ -478,40 +467,40 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 			policy: ProfilePolicy::Inherit,
 			migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits
 		},
-		// TODO: This seems to be CVE related and should be checked more carefully: See https://www.kernel.org/doc/html/next/x86/mds.html#microarchitectural-data-sampling-mds-mitigation
+		
 		ValueDefinition{ short: "md_clear", description: "VERW MD_CLEAR microcode support", bits_range: (10, 10), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: This seems to be CVE related and should be checked more carefully
+		
 		ValueDefinition{ short: "rtm_always_abort", description: "XBEGIN (RTM transaction) always aborts", bits_range: (11, 11), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: This seems to be CVE related and should be checked more carefully
+		
 		ValueDefinition{ short: "tsx_force_abort", description: "MSR TSX_FORCE_ABORT, RTM_ABORT bit, supported", bits_range: (13, 13), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+
 		ValueDefinition{ short: "serialize", description: "SERIALIZE instruction", bits_range: (14, 14), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure what to set here. I am guessing CPU profiles should not exist for hybrid CPUs in the first place (at least not for now).
+		
 		ValueDefinition{ short: "hybrid_cpu", description: "The CPU is identified as a 'hybrid part'", bits_range: (15, 15), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: This is TSX related which is riddled with CVEs. We should carefully decide what to do with regards to this feature.
 		ValueDefinition{ short: "tsxldtrk", description: "TSX suspend/resume load address tracking", bits_range: (16, 16), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// Seems rather complex. We disable it unconditionally for CPU profiles for now.
-		// TODO: Remember to set any other pconfig dependency to ony apply if this is set
+		// Might be relevant for confidential computing
 		ValueDefinition{ short: "pconfig", description: "PCONFIG instruction", bits_range: (18, 18), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// Seems to be mainly useful for debugging and monitoring, which are classes of features we tend to avoid advertising to the guest.
+		// MSR related
 		ValueDefinition{ short: "arch_lbr", description: "Intel architectural LBRs", bits_range: (19, 19), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Not sure if this is the best default, but QEMU also seems to disable this for CPU models
-		ValueDefinition{ short: "ibt", description: "CET indirect branch tracking", bits_range: (20, 20), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "ibt", description: "CET indirect branch tracking", bits_range: (20, 20), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "amx_bf16", description: "AMX-BF16: tile bfloat16 support", bits_range: (22, 22), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "avx512_fp16", description: "AVX-512 FP16 instructions", bits_range: (23, 23), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "amx_tile", description: "AMX-TILE: tile architecture support", bits_range: (24, 24), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 
 		ValueDefinition{ short: "amx_int8", description: "AMX-INT8: tile 8-bit integer support", bits_range: (25, 25), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Seems to be CVE related and should be checked more thoroughly
+		// MSR related
 		ValueDefinition{ short: "spec_ctrl", description: "Speculation Control (IBRS/IBPB: indirect branch restrictions)", bits_range: (26, 26), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: This is CVE related and should be checked more thoroughly
+		// MSR related
 		ValueDefinition{ short: "intel_stibp", description: "Single thread indirect branch predictors", bits_range: (27, 27), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Is it a good default to leave this out for CPU profiles. Do we perhaps need an option to opt-in?
-		ValueDefinition{ short: "flush_l1d", description: "FLUSH L1D cache: IA32_FLUSH_CMD MSR", bits_range: (28, 28), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Really not sure what policies to set for this one
+		// MSR related
+		ValueDefinition{ short: "flush_l1d", description: "FLUSH L1D cache: IA32_FLUSH_CMD MSR", bits_range: (28, 28), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
 		ValueDefinition{ short: "arch_capabilities", description: "Intel IA32_ARCH_CAPABILITIES MSR", bits_range: (29, 29), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Is this a good default for CPU profiles?
+		// MSR related
 		ValueDefinition{ short: "core_capabilities", description: "IA32_CORE_CAPABILITIES MSR", bits_range: (30, 30), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Spectre related. Should be checked carefully
+		// MSR related
 		ValueDefinition{ short: "spec_ctrl_ssbd", description: "Speculative store bypass disable", bits_range: (31, 31), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
