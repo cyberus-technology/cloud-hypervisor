@@ -52,7 +52,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x1, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EBX },
 	ValueDefinitions::new(&[
-		ValueDefinition{ short: "brand_id", description: "Brand index", bits_range: (0, 7), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		ValueDefinition{ short: "brand_id", description: "Brand index", bits_range: (0, 7), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 		ValueDefinition{ short: "clflush_size", description: "CLFLUSH instruction cache line size", bits_range: (8, 15), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 		// TODO: The logical CPU count may be relevant for live migration whenever pinning has been set up, but the pinning setup needs to make these checks and we don't set a general requirement here (at least for now)
 		ValueDefinition{ short: "n_logical_cpu", description: "Logical CPU count", bits_range: (16, 23), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore},
