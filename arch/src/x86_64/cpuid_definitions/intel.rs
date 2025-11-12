@@ -529,42 +529,43 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "fzrm", description: "Fast zero-length REP MOVSB", bits_range: (10, 10), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "fsrs", description: "Fast short REP STOSB", bits_range: (11, 11), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "fsrc", description: "Fast Short REP CMPSB/SCASB", bits_range: (12, 12), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// Not sure if not setting this is a good default. It is our understanding that QEMU doesn't enable this for CPU models, but CHV does set this unconditionally for all guests?
-		ValueDefinition{ short: "fred", description: "FRED: Flexible return and event delivery transitions", bits_range: (17, 17), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// Not sure if not setting this is a good default. It is our understanding that QEMU doesn't enable this for CPU models, but CHV does set this unconditionally for all guests?
-		ValueDefinition{ short: "lkgs", description: "LKGS: Load 'kernel' (userspace) GS", bits_range: (18, 18), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// QEMU also seems to not set this for CPU models
-		ValueDefinition{ short: "wrmsrns", description: "WRMSRNS instruction (WRMSR-non-serializing)", bits_range: (19, 19), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "fred", description: "FRED: Flexible return and event delivery transitions", bits_range: (17, 17), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "lkgs", description: "LKGS: Load 'kernel' (userspace) GS", bits_range: (18, 18), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "wrmsrns", description: "WRMSRNS instruction (WRMSR-non-serializing)", bits_range: (19, 19), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	
 		ValueDefinition{ short: "nmi_src", description: "NMI-source reporting with FRED event data", bits_range: (20, 20), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 
 		ValueDefinition{ short: "amx_fp16", description: "AMX-FP16: FP16 tile operations", bits_range: (21, 21), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "hreset", description: "History reset support", bits_range: (22, 22), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "avx_ifma", description: "Integer fused multiply add", bits_range: (23, 23), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// Seems to be related to spectre and should be checked carefully
-		ValueDefinition{ short: "lam", description: "Linear address masking", bits_range: (26, 26), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO:  Not sure if not setting this is the best default. I think that is also what QEMU does though.
-		ValueDefinition{ short: "rd_wr_msrlist", description: "RDMSRLIST/WRMSRLIST instructions", bits_range: (27, 27), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one
-		ValueDefinition{ short: "invd_disable_post_bios_done", description: "If 1, supports INVD execution prevention after BIOS Done", bits_range: (30, 30), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: This feature does not exist yet as far as we know
-		ValueDefinition{ short: "movrs", description: "MOVRS", bits_range: (31, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "lam", description: "Linear address masking", bits_range: (26, 26), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "rd_wr_msrlist", description: "RDMSRLIST/WRMSRLIST instructions", bits_range: (27, 27), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "invd_disable_post_bios_done", description: "If 1, supports INVD execution prevention after BIOS Done", bits_range: (30, 30), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "movrs", description: "MOVRS", bits_range: (31, 31), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
 
 	(
 	Parameters{ leaf: 0x7, sub_leaf:RangeInclusive::new( 1,  1), register: CpuidReg::EBX },
 	ValueDefinitions::new(&[
-		// TODO: Is disabling this a good default for CPU profiles?
+		
 		ValueDefinition{ short: "intel_ppin", description: "Protected processor inventory number (PPIN{,_CTL} MSRs)", bits_range: (0, 0), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// We zero this out for CPU profiles for the time being
+		
+		// MSR related
 		ValueDefinition{ short: "pbndkb", description: "PBNDKB instruction supported and enumerates the existence of the IA32_TSE_CAPABILITY MSR", bits_range: (1, 1), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
 
 	// TODO: Missing entry for (0x7, 1, ECX)
+	// Make the whole register zero though
 	//
-	// TODO: Double check the AVX VNNI instructions
 	(
 	Parameters{ leaf: 0x7, sub_leaf:RangeInclusive::new( 1,  1), register: CpuidReg::EDX },
 	ValueDefinitions::new(&[
@@ -573,20 +574,21 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		// NOTE: AMX currently requires opt-in, even for the host CPU profile. We still inherit this value for profiles as the value will be zeroed out if the user has not opted in for "amx" via CpuFeatures.
 		ValueDefinition{ short: "amx_complex", description: "AMX-COMPLEX instructions (starting from Granite Rapids)", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "avx_vnni_int16", description: "AVX-VNNI-INT16 instructions", bits_range: (10, 10), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one. TODO: THe current policy is probably wrong ..
-		ValueDefinition{ short: "utmr", description: "If 1, supports user-timer events", bits_range: (13, 13), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
+		
+		ValueDefinition{ short: "utmr", description: "If 1, supports user-timer events", bits_range: (13, 13), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 		ValueDefinition{ short: "prefetchit_0_1", description: "PREFETCHIT0/1 instructions", bits_range: (14, 14), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
+		// MSR related
+		ValueDefinition{ short: "user_msr", description: "If 1, supports the URDMSR and UWRMSR instructions", bits_range: (15, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
+		
+		ValueDefinition{ short: "uiret_uif", description: "If 1, UIRET sets UIF to the value of bit 1 of the RFLAGS image loaded from the stack", bits_range: (15, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 
-		ValueDefinition{ short: "user_msr", description: "If 1, supports the URDMSR and UWRMSR instructions", bits_range: (15, 15), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
-		// TODO: Check which policy to use
-		ValueDefinition{ short: "uiret_uif", description: "If 1, UIRET sets UIF to the value of bit 1 of the RFLAGS image loaded from the stack", bits_range: (15, 15), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
-		// TODO: Not sure about this one
 		ValueDefinition{ short: "cet_sss", description: "CET supervisor shadow stacks safe to use", bits_range: (18, 18), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 
 		ValueDefinition{ short: "avx10", description: "If 1, supports the Intel AVX10 instructions and indicates the presence of leaf 0x24", bits_range: (19, 19), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "apx_f", description: "If 1, the processor provides foundational support for Intel Advanced Performance Extensions", bits_range: (21, 21), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Should this perhaps be opt-in ?
+		
 		ValueDefinition{ short: "mwait", description: "If 1, MWAIT is supported even if (0x1 ECX bit 3 (monitor) is enumerated as 0)", bits_range: (23, 23), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
 		ValueDefinition{ short: "slsm", description: "If 1, indicates bit 0 of the IA32_INTEGRITY_STATUS MSR is supported. Bit 0 of this MSR indicates whether static lockstep is active on this logical processor", bits_range: (24, 24), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
@@ -597,19 +599,19 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x7, sub_leaf:RangeInclusive::new( 2,  2), register: CpuidReg::EDX },
 	ValueDefinitions::new(&[
-		// TODO: Not sure about this one
+		// MSR related
 		ValueDefinition{ short: "intel_psfd", description: "If 1, indicates bit 7 of the IA32_SPEC_CTRL_MSR is supported. Bit 7 of this MSR disables fast store forwarding predictor without disabling speculative store bypass", bits_range: (0, 0), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one and consider adding a better description
+		// MSR related
 		ValueDefinition{ short: "ipred_ctrl", description: "MSR bits IA32_SPEC_CTRL.IPRED_DIS_{U,S}", bits_range: (1, 1), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one and consider adding a better description
+		// MSR related
 		ValueDefinition{ short: "rrsba_ctrl", description: "MSR bits IA32_SPEC_CTRL.RRSBA_DIS_{U,S}", bits_range: (2, 2), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one and consider adding a better description
+		// MSR related
 		ValueDefinition{ short: "ddp_ctrl", description: "MSR bit  IA32_SPEC_CTRL.DDPD_U", bits_range: (3, 3), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one and consider adding a better description
+		// MSR related
 		ValueDefinition{ short: "bhi_ctrl", description: "MSR bit  IA32_SPEC_CTRL.BHI_DIS_S", bits_range: (4, 4), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one and consider adding a better description
+		// MSR related
 		ValueDefinition{ short: "mcdt_no", description: "MCDT mitigation not needed", bits_range: (5, 5), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this one and consider adding a better description
+		// MSR related
 		ValueDefinition{ short: "uclock_disable", description: "UC-lock disable is supported", bits_range: (6, 6), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
 	])
 	),
