@@ -622,8 +622,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x9, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EAX },
 	ValueDefinitions::new(&[
-		// TODO: Can this be used to check whether DCA is enabled? (or should one not rely on this and use another feature flag?)
-		ValueDefinition{ short: "dca_enabled_in_bios", description: "DCA is enabled in BIOS", bits_range: (0, 31), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore},
+		// MSR related
+		ValueDefinition{ short: "dca_cap_msr_value", description: "Value of bits [31:0] of IA32_PLATFORM_DCA_CAP MSR (address 1f8H)", bits_range: (0, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore},
 	])
 	),
 
@@ -631,6 +631,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	//                                 Architectural Performance Monitoring
 	// ===================================================================================================================
 	// We will just zero out everything to do with PMU for CPU profiles and require equality for migration to be considered compatible (for the time being).
+	// TODO: Left for another day
 	(
 	Parameters{ leaf: 0xa, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EAX },
 	ValueDefinitions::new(&[
@@ -676,6 +677,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	// ===================================================================================================================
 
 	// Leaf 0xB must be set by CHV itself (and do all necessary checks) hence we can ignore checking for migration compatibility here
+	// TODO: Set by cloud hypervisor. Set this to 0 with a comment that CHV will set it instead.
 	(
 	Parameters{ leaf: 0xb, sub_leaf:RangeInclusive::new( 0,  u32::MAX), register: CpuidReg::EAX },
 	ValueDefinitions::new(&[
@@ -711,7 +713,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	// ===================================================================================================================
 	//                                    Processor Extended State Enumeration Main Leaf
 	// ===================================================================================================================
-
+	// TODO: Figure out properly when to use Inherit vs Passthrough
+	// TODO: Check that CHV checks for migration compatibility here
 	(
 	Parameters{ leaf: 0xd, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EAX },
 	ValueDefinitions::new(&[
@@ -725,11 +728,11 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "xcr0_avx512_opmask", description: "XCR0.OPMASK (bit 5) supported (AVX-512 k0-k7 registers)", bits_range: (5, 5), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "xcr0_avx512_zmm_hi256", description: "XCR0.ZMM_Hi256 (bit 6) supported (AVX-512 ZMM0->ZMM7/15 registers)", bits_range: (6, 6), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "xcr0_avx512_hi16_zmm", description: "XCR0.HI16_ZMM (bit 7) supported (AVX-512 ZMM16->ZMM31 registers)", bits_range: (7, 7), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure which profile policy to apply here
-		ValueDefinition{ short: "xcr0_ia32_xss", description: "XCR0.IA32_XSS (bit 8) used for IA32_XSS", bits_range: (8, 8), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
+		ValueDefinition{ short: "xcr0_ia32_xss", description: "XCR0.IA32_XSS (bit 8) used for IA32_XSS", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "xcr0_pkru", description: "XCR0.PKRU (bit 9) supported (XSAVE PKRU registers)", bits_range: (9, 9), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure about this (could this be relevant for CVE mitigations?)
-		ValueDefinition{ short: "xcr0_ia32_xss_bits", description: "XCR0.IA32_XSS (bit 10 - 16) used for IA32_XSS", bits_range: (10, 16), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		
+		ValueDefinition{ short: "xcr0_ia32_xss_bits", description: "XCR0.IA32_XSS (bit 10 - 16) used for IA32_XSS", bits_range: (10, 16), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// NOTE: AMX currently requires opt-in, even for the host CPU profile. We still inherit this value for profiles as the relevant feature bits that userspae applications must check will be zeroed out if the user has not opted in for "amx" via CpuFeatures.
 		ValueDefinition{ short: "xcr0_tileconfig", description: "XCR0.TILECONFIG (bit 17) supported (AMX can manage TILECONFIG)", bits_range: (17, 17), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// NOTE: AMX currently requires opt-in, even for the host CPU profile. We still inherit this value for profiles as the relevant feature bits that userspae applications must check will be zeroed out if the user has not opted in for "amx" via CpuFeatures.
@@ -740,7 +743,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0xd, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EBX },
 	ValueDefinitions::new(&[
-		// We don't need migration compatibility requirements here since we check for each individual state component
+		// TODO: Check if CHV checks 0xd for migration compatibility already
 		ValueDefinition{ short: "xsave_sz_xcr0_enabled", description: "XSAVE/XRSTOR area byte size, for XCR0 enabled features", bits_range: (0, 31), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 	])
 	),
@@ -756,7 +759,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0xd, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EDX },
 	ValueDefinitions::new(&[
-		ValueDefinition{ short: "xcr0_upper_bits", description: "Reports the valid bit fields of the upper 32 bits of the XCR0 register", bits_range: (0, 31), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::Eq },
+		ValueDefinition{ short: "xcr0_upper_bits", description: "Reports the valid bit fields of the upper 32 bits of the XCR0 register", bits_range: (0, 31), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Eq },
 	])
 	),
 
@@ -1589,7 +1592,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	(
 	Parameters{ leaf: 0x24, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EAX },
 	ValueDefinitions::new(&[
-		ValueDefinition{ short: "converged_vector_isa_max_sub_leaves", description: "Reports the maximum number of sub-leaves that are supported in leaf 0x24", bits_range: (0, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::GtEq},
+		ValueDefinition{ short: "converged_vector_isa_max_sub_leaves", description: "Reports the maximum number of sub-leaves that are supported in leaf 0x24", bits_range: (0, 31), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::GtEq},
 	])
 	),
 
@@ -1777,7 +1780,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	Parameters{ leaf: 0x80000007, sub_leaf:RangeInclusive::new( 0,  0), register: CpuidReg::EDX },
 	ValueDefinitions::new(&[
 		// TODO: We may want some mechanism to let users opt-in to using an invariant TSC provided by the hardware (when available).
-		ValueDefinition{ short: "constant_tsc", description: "TSC ticks at constant rate across all P and C states", bits_range: (8, 8), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// TODO: Probably unconditionally set by CHV
+		ValueDefinition{ short: "constant_tsc", description: "TSC ticks at constant rate across all P and C states", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
 
