@@ -54,10 +54,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	ValueDefinitions::new(&[
 		ValueDefinition{ short: "brand_id", description: "Brand index", bits_range: (0, 7), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 		ValueDefinition{ short: "clflush_size", description: "CLFLUSH instruction cache line size", bits_range: (8, 15), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
-		// TODO: The logical CPU count may be relevant for live migration whenever pinning has been set up, but the pinning setup needs to make these checks and we don't set a general requirement here (at least for now)
-		ValueDefinition{ short: "n_logical_cpu", description: "Logical CPU count", bits_range: (16, 23), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore},
-		// TODO: Not sure about which policy to set for local_apic_id
-		ValueDefinition{ short: "local_apic_id", description: "Initial local APIC physical ID", bits_range: (24, 31), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
+		// This is set by cloud hypervisor
+		ValueDefinition{ short: "n_logical_cpu", description: "Logical CPU count", bits_range: (16, 23), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore},
+		// This is set by cloud hypervisor
+		ValueDefinition{ short: "local_apic_id", description: "Initial local APIC physical ID", bits_range: (24, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::Ignore },
 	])
 	),
 
