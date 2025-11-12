@@ -66,44 +66,43 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	ValueDefinitions::new(&[
 		ValueDefinition{ short: "sse3", description: "Streaming SIMD Extensions 3 (SSE3)", bits_range: (0, 0), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "pclmulqdq", description: "PCLMULQDQ instruction support", bits_range: (1, 1), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
-		// TODO: This seems to be debug related hence we set it to 0 for CPU profiles. Is this a good choice?
 		ValueDefinition{ short: "dtes64", description: "64-bit DS save area", bits_range: (2, 2), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Perhaps there should be some CHV feature for opting in to enabling this for non-host CPU profiles?
 		ValueDefinition{ short: "monitor", description: "MONITOR/MWAIT support", bits_range: (3, 3), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "ds_cpl", description: "CPL Qualified Debug Store", bits_range: (4, 4), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits},
-		// TODO: Is this a good default? Might be useful for nested virtualization ...
-		ValueDefinition{ short: "vmx", description: "Virtual Machine Extensions", bits_range: (5, 5), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: We choose to disable it for all CPU profiles for now. It is also not set for any CPU model in QEMU from what we can tell.
+		// TODO: Ideally configurable by the user (host must have this otherwise CHV will not run)
+		ValueDefinition{ short: "vmx", description: "Virtual Machine Extensions", bits_range: (5, 5), policy: ProfilePolicy::Overwrite(1), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "smx", description: "Safer Mode Extensions", bits_range: (6, 6), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "est", description: "Enhanced Intel SpeedStep", bits_range: (7, 7), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "tm2", description: "Thermal Monitor 2", bits_range: (8, 8), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "ssse3", description: "Supplemental SSE3", bits_range: (9, 9), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: It seems like this can only have performance implications, and nothing else. It would probably also be OK to ignore this when checking migration compatibility 
-		ValueDefinition{ short: "cid", description: "L1 Context ID", bits_range: (10, 10), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
+		ValueDefinition{ short: "cnxt_id", description: "L1 Context ID", bits_range: (10, 10), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sdbg", description: "Silicon Debug", bits_range: (11, 11), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "fma", description: "FMA extensions using YMM state", bits_range: (12, 12), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "cx16", description: "CMPXCHG16B instruction support", bits_range: (13, 13), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
 		ValueDefinition{ short: "xtpr", description: "xTPR Update Control", bits_range: (14, 14), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "pdcm", description: "Perfmon and Debug Capability", bits_range: (15, 15), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
+		ValueDefinition{ short: "pdcm", description: "Perfmon and Debug Capability", bits_range: (15, 15), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "pcid", description: "Process-context identifiers", bits_range: (17, 17), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "dca", description: "Direct Cache Access", bits_range: (18, 18), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "dca", description: "Direct Cache Access", bits_range: (18, 18), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sse4_1", description: "SSE4.1", bits_range: (19, 19), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sse4_2", description: "SSE4.2", bits_range: (20, 20), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Needs special support from KVM (See: https://docs.kernel.org/virt/kvm/api.html#kvm-get-supported-cpuid) and must be setup separately. I think this may be on by default in QEMU for all models?		
-		// Perhaps there should be some CHV feature to opt-in to this for non-host cpu profiles?
-		ValueDefinition{ short: "x2apic", description: "X2APIC support", bits_range: (21, 21), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// Set by Cloud hypervisor
+		ValueDefinition{ short: "x2apic", description: "X2APIC support", bits_range: (21, 21), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "movbe", description: "MOVBE instruction support", bits_range: (22, 22), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "popcnt", description: "POPCNT instruction support", bits_range: (23, 23), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Needs special support from KVM (See: https://docs.kernel.org/virt/kvm/api.html#kvm-get-supported-cpuid) and must be setup separately (NOTE: CHV is currently setting this unconditionally though. why?)
-		// Perhaps there should be some CHV feature to opt-in to this for non-host cpu profiles?
-		ValueDefinition{ short: "tsc_deadline_timer", description: "APIC timer one-shot operation", bits_range: (24, 24), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// Set by Cloud hypervisor
+		ValueDefinition{ short: "tsc_deadline_timer", description: "APIC timer one-shot operation", bits_range: (24, 24), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "aes", description: "AES instructions", bits_range: (25, 25), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "xsave", description: "XSAVE (and related instructions) support", bits_range: (26, 26), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Seems to no longer be supported by QEMU, but is by KVM? We disable this for now.
-		ValueDefinition{ short: "osxsave", description: "XSAVE (and related instructions) are enabled by OS", bits_range: (27, 27), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "osxsave", description: "XSAVE (and related instructions) are enabled by OS", bits_range: (27, 27), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "avx", description: "AVX instructions support", bits_range: (28, 28), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "f16c", description: "Half-precision floating-point conversion support", bits_range: (29, 29), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "rdrand", description: "RDRAND instruction support", bits_range: (30, 30), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// TODO: If set by CHV set to 0 and write comment
 		ValueDefinition{ short: "guest_status", description: "System is running as guest; (para-)virtualized system", bits_range: (31, 31), policy: ProfilePolicy::Passthrough, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
@@ -113,7 +112,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 	ValueDefinitions::new(&[
 		ValueDefinition{ short: "fpu", description: "Floating-Point Unit on-chip (x87)", bits_range: (0, 0), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "vme", description: "Virtual-8086 Mode Extensions", bits_range: (1, 1), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "de", description: "Debugging Extensions", bits_range: (2, 2), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "de", description: "Debugging Extensions", bits_range: (2, 2), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "pse", description: "Page Size Extension", bits_range: (3, 3), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Does this also need special handling like TSC_DEADLINE_TIMER?
 		ValueDefinition{ short: "tsc", description: "Time Stamp Counter", bits_range: (4, 4), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -121,8 +120,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "pae", description: "Physical Address Extensions", bits_range: (6, 6), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "mce", description: "Machine Check Exception", bits_range: (7, 7), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "cx8", description: "CMPXCHG8B instruction", bits_range: (8, 8), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Does this also require special handling like x2apic?
 		ValueDefinition{ short: "apic", description: "APIC on-chip", bits_range: (9, 9), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related (maybe not necessary to look into which ones)
 		ValueDefinition{ short: "sep", description: "SYSENTER, SYSEXIT, and associated MSRs", bits_range: (11, 11), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "mtrr", description: "Memory Type Range Registers", bits_range: (12, 12), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "pge", description: "Page Global Extensions", bits_range: (13, 13), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
@@ -130,19 +129,15 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "cmov", description: "Conditional Move Instruction", bits_range: (15, 15), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "pat", description: "Page Attribute Table", bits_range: (16, 16), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "pse36", description: "Page Size Extension (36-bit)", bits_range: (17, 17), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "pn", description: "Processor Serial Number", bits_range: (18, 18), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Could an untrusted guest potentially slow down other guests with this feature?
-		ValueDefinition{ short: "clflush", description: "CLFLUSH instruction", bits_range: (19, 19), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		ValueDefinition{ short: "dts", description: "Debug Store", bits_range: (21, 21), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "psn", description: "Processor Serial Number", bits_range: (18, 18), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "clfsh", description: "CLFLUSH instruction", bits_range: (19, 19), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		ValueDefinition{ short: "ds", description: "Debug Store", bits_range: (21, 21), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "acpi", description: "Thermal monitor and clock control", bits_range: (22, 22), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: MMX is deprecated as far as we know. Should we consider setting this to 0 by default for all CPU profiles?
 		ValueDefinition{ short: "mmx", description: "MMX instructions", bits_range: (23, 23), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "fxsr", description: "FXSAVE and FXRSTOR instructions", bits_range: (24, 24), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sse", description: "SSE instructions", bits_range: (25, 25), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "sse2", description: "SSE2 instructions", bits_range: (26, 26), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Not sure if we should support self snoop for CPU profiles. Qemu does though...
 		ValueDefinition{ short: "ss", description: "Self Snoop", bits_range: (27, 27), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
-		// TODO: Perhaps this needs to be configured purely through CPU features/Options instead? (Also seems to be related to CPU topology)
 		ValueDefinition{ short: "htt", description: "Hyper-threading", bits_range: (28, 28), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		ValueDefinition{ short: "tm", description: "Thermal Monitor", bits_range: (29, 29), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Remove? CpuidDescription{ short: "ia64", description: "Legacy IA-64 (Itanium) support bit, now reserved", bits_range: (30, 30), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
