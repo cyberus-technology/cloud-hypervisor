@@ -142,7 +142,8 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
 		ValueDefinition{ short: "tm", description: "Thermal Monitor", bits_range: (29, 29), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Remove? CpuidDescription{ short: "ia64", description: "Legacy IA-64 (Itanium) support bit, now reserved", bits_range: (30, 30), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 		// TODO: Not really sure what the default should be for PBE. It seems like it is something that needs to be enabled via the IA32_MISC_ENABLE MSR hence perhaps this should be set via CPU features? 
-		ValueDefinition{ short: "pbe", description: "Pending Break Enable", bits_range: (31, 31), policy: ProfilePolicy::Inherit, migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+		// MSR related
+		ValueDefinition{ short: "pbe", description: "Pending Break Enable", bits_range: (31, 31), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
 	])
 	),
 
