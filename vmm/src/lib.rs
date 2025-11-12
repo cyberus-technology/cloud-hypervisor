@@ -972,7 +972,7 @@ impl Vmm {
                         for net_config in vm_config.net.iter_mut().flatten() {
                             // update only if the net dev is backed by FDs
                             if net_config.id.as_ref() == Some(&net.id) && net_config.fds.is_some() {
-                                log::error!(
+                                log::debug!(
                                     "overwriting net fds: id={}, old={:?}, new={:?}",
                                     net.id,
                                     &net_config.fds,
