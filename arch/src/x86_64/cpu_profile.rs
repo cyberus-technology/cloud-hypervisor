@@ -80,9 +80,6 @@ pub struct CpuProfileData {
     pub(in crate::x86_64) cpu_vendor: CpuVendor,
     /// Adjustments necessary to become compatible with the desired target.
     pub(in crate::x86_64) adjustments: Vec<(Parameters, CpuidOutputRegisterAdjustments)>,
-    /// The result of adjusting the target host's default supported CPUID entries according
-    /// to CPU profile policy.
-    pub(in crate::x86_64) compatibility_target: Vec<CpuIdEntry>,
 }
 
 /* TODO: The [`CpuProfile`] struct will likely need a few more iterations. The following
@@ -130,7 +127,7 @@ impl CpuidOutputRegisterAdjustments {
     pub(in crate::x86_64) fn adjust_cpuid_entries(
         mut cpuid: Vec<CpuIdEntry>,
         adjustments: &[(Parameters, Self)],
-    ) -> Vec<CpuIdEntry> {
+    ) -> Result<Vec<CpuIdEntry>, MissingCpuidEntriesError> {
         for entry in &mut cpuid {
             for (reg, reg_value) in [
                 (CpuidReg::EAX, &mut entry.eax),
@@ -155,6 +152,37 @@ impl CpuidOutputRegisterAdjustments {
                 adjustment.adjust(reg_value);
             }
         }
-        cpuid
+        // Check that we found every value that was supposed to be replaced with something else than 0
+        let mut missing_entry = false;
+        for (param, adjustment) in adjustments {
+            if adjustment.replacements == 0 {
+                continue;
+            }
+            if !cpuid.iter().any(|entry| {
+                (entry.function == param.leaf) && (param.sub_leaf.contains(&entry.index))
+            }) {
+                error!(
+                    "cannot adjust CPU profile. No entry found matching the required parameters: {:?}",
+                    param
+                );
+                missing_entry = true;
+            }
+        }
+        if missing_entry {
+            Err(MissingCpuidEntriesError)
+        } else {
+            Ok(cpuid)
+        }
     }
 }
+
+#[derive(Debug)]
+pub(in crate::x86_64) struct MissingCpuidEntriesError;
+
+impl core::fmt::Display for MissingCpuidEntriesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Required CPUID entries not found")
+    }
+}
+
+impl core::error::Error for MissingCpuidEntriesError {}

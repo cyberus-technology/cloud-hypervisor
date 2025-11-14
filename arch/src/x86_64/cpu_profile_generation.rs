@@ -118,14 +118,10 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
         }
     }
 
-    let compatibility_target_cpuid =
-        CpuidOutputRegisterAdjustments::adjust_cpuid_entries(supported_cpuid_sorted, &adjustments);
-
     let profile_data = CpuProfileData {
         hypervisor: hypervisor_type,
         cpu_vendor,
         adjustments,
-        compatibility_target: compatibility_target_cpuid,
     };
 
     serde_json::to_writer(&mut writer, &profile_data)

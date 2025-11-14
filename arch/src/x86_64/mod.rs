@@ -631,22 +631,24 @@ pub fn generate_common_cpuid(
     let use_custom_profile = config.profile != CpuProfile::Host;
     // Obtain cpuid entries that are adjusted to the specified CPU profile and the cpuid entries of the compatibility target
     // TODO: Try to write this in a clearer way
-    let (mut host_adjusted_to_profile, mut compatibility_target_cpuid, profile_cpu_vendor) = {
+    let (host_adjusted_to_profile, profile_cpu_vendor) = {
         config
             .profile
             .data()
             .map(|profile_data| {
                 (
-                    Some(CpuidOutputRegisterAdjustments::adjust_cpuid_entries(
+                    CpuidOutputRegisterAdjustments::adjust_cpuid_entries(
                         host_cpuid.clone(),
                         &profile_data.adjustments,
-                    )),
-                    Some(profile_data.compatibility_target),
+                    )
+                    .map(Some),
                     Some(profile_data.cpu_vendor),
                 )
             })
-            .unwrap_or((None, None, None))
+            .unwrap_or((Ok(None), None))
     };
+    let mut host_adjusted_to_profile =
+        host_adjusted_to_profile.map_err(|e| Error::CpuProfileIncompatibility(e.into()))?;
 
     // There should be relatively few cases where live migration can succeed between hosts from different
     // CPU vendors and making our checks account for that possibility would complicate things substantially.
@@ -661,11 +663,7 @@ pub fn generate_common_cpuid(
     }
     // We now make the modifications according to the config parameters to each of the cpuid entries
     // declared above and then perform a compatibility check.
-    for cpuid_optiion in [
-        Some(&mut host_cpuid),
-        host_adjusted_to_profile.as_mut(),
-        compatibility_target_cpuid.as_mut(),
-    ] {
+    for cpuid_optiion in [Some(&mut host_cpuid), host_adjusted_to_profile.as_mut()] {
         let Some(cpuid) = cpuid_optiion else {
             break;
         };
@@ -839,24 +837,10 @@ pub fn generate_common_cpuid(
     } else {
         // Final compatibility checks to ensure that the CPUID values we return are compatible both with the CPU profile and the host we are currently running on.
         let host_adjusted_to_profile = host_adjusted_to_profile.expect("The profile adjusted cpuid entries should exist as we checked that we have a custom CPU profile");
-        // TODO: Remove
-        // let target_compatible_cpuid = compatibility_target_cpuid.expect("The target_compatible_cpuid entries should exist as we checked that we have a custom CPU profile");
 
         // Check that the host's cpuid is indeed compatible with the adjusted profile. This is not by construction.
-
         info!("checking compatibility between host adjusted to profile and the host itself");
         CpuidFeatureEntry::check_cpuid_compatibility(&host_adjusted_to_profile, &host_cpuid).context("Unable to adjust the host to the CPU profile. The resulting cpuid is not compatible with the host's cpuid entries").map_err(Error::CpuProfileIncompatibility)?;
-        /*
-        info!(
-            "checking compatibility between the compatibility target's cpuid and the host adjusted to profile"
-        );
-        // Check that the compatibility target's cpuid is compatible with the adjusted host's (the converse is satisfied by construction).
-        // The adjusted host will always have a CPUID that is compatible with the compatibility target (in terms of live migration requirements), but the other direction needs to be checked.
-        CpuidFeatureEntry::check_cpuid_compatibility(
-            &target_compatible_cpuid,
-            &host_adjusted_to_profile,
-        ).context("The CPU profile's compatibility target has non-trivial CPUID entries not found on this host").map_err(Error::CpuProfileIncompatibility)?;
-        */
         Ok(host_adjusted_to_profile)
     }
 }
