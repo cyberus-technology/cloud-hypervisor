@@ -528,7 +528,11 @@ impl CpuidFeatureEntry {
                 CpuidCompatibleCheck::BitwiseSubset => {
                     let different_feature_bits = src_vm_feature ^ dest_vm_feature;
                     let src_vm_feature_bits_only = different_feature_bits & src_vm_feature;
-                    src_vm_feature_bits_only == 0
+                    let is_subset = src_vm_feature_bits_only == 0;
+                    if !is_subset {
+                        todo!();
+                    }
+                    is_subset
                 }
                 CpuidCompatibleCheck::Equal => src_vm_feature == dest_vm_feature,
                 CpuidCompatibleCheck::NumNotGreater => src_vm_feature <= dest_vm_feature,
