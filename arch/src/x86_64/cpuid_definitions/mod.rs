@@ -58,7 +58,7 @@ pub enum MigrationCompatibilityRequirement {
 }
 
 /// A description of a range of bits in a register populated by the CPUID instruction with specific parameters.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ValueDefinition {
     /// A short name for the value obtainable through CPUID
     pub short: &'static str,

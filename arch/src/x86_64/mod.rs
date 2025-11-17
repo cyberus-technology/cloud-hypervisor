@@ -530,7 +530,45 @@ impl CpuidFeatureEntry {
                     let src_vm_feature_bits_only = different_feature_bits & src_vm_feature;
                     let is_subset = src_vm_feature_bits_only == 0;
                     if !is_subset {
-                        todo!();
+                        // The check failed: We give precise information per missing bit
+                        let mut bitmask = src_vm_feature_bits_only;
+                        while bitmask != 0 {
+                            let idx = bitmask.trailing_zeros();
+                            let lsb = bitmask & bitmask.wrapping_neg();
+                            bitmask ^= lsb;
+                            error!(
+                                "bit number: {} in leaf: {:#02x}, sub-leaf: {:#02x}, register: {:?}, is only present in the source vm cpuid",
+                                idx, entry.function, entry.index, entry.feature_reg
+                            );
+                            // Log more information about this feature, assuming an Intel CPU for now
+                            // TODO: Check against the CPU vendor before using the intel definitions
+                            if let Some((_, defs)) =
+                                cpuid_definitions::intel::INTEL_CPUID_DEFINITIONS
+                                    .0
+                                    .iter()
+                                    .find(|(param, _)| {
+                                        (param.leaf == entry.function)
+                                            && (param.sub_leaf.contains(&entry.index))
+                                    })
+                            {
+                                for def in defs.as_slice() {
+                                    // TODO: Might indeed be better to just use a normal range for the bits_range as per
+                                    // review comment(s)
+                                    if (u32::from(def.bits_range.0)) <= idx
+                                        && (idx <= u32::from(def.bits_range.1))
+                                    {
+                                        info!(
+                                            "On Intel processors bit: {} in leaf: {:#02x}, sub-leaf: {:#02x}, register: {:?}, corresponds to value definition: {:?} ",
+                                            idx,
+                                            entry.function,
+                                            entry.index,
+                                            entry.feature_reg,
+                                            def
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                     is_subset
                 }
