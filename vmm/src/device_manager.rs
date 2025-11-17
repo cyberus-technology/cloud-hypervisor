@@ -4820,7 +4820,7 @@ impl DeviceManager {
             &handle.id,
             handle.pci_segment,
             handle.dma_handler,
-            None,
+            handle.bdf_device,
         )?;
 
         // Update the PCIU bitmap
