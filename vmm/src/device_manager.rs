@@ -4786,7 +4786,7 @@ impl DeviceManager {
             handle.id.clone(),
             handle.pci_segment,
             handle.dma_handler,
-            None,
+            handle.bdf_device,
         )?;
 
         // Update the PCIU bitmap
