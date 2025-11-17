@@ -11,11 +11,6 @@ use serde::{Deserialize, Serialize};
 pub enum CpuProfile {
     #[default]
     Host,
-    /// Work in progress profile to test on when developing.
-    //TODO: Replace this with a feature gated x86-64-v1 variant that all x86_64 host's should satisfy.
-    // Having such a variant would be good for testing in CI, but should not become part of the shipped
-    // cloud hypervisor.
-    DevLaptop,
     Skylake,
     SapphireRapids,
 }
@@ -26,22 +21,6 @@ impl CpuProfile {
     pub(in crate::x86_64) fn data(&self) -> Option<CpuProfileData> {
         match self {
             Self::Host => None,
-            Self::DevLaptop => {
-                /*
-                We only use this for local testing when developing the PoC. We should
-                introduce some proper CPU profiles ASAP! We should also have a better
-                profile for testing that can run in CI one idea would be running the
-                profile generation CLI on a qemu VM configured for the kvm64 CPU model or
-                something like that.
-                */
-                Some(
-                    serde_json::from_slice(include_bytes!("cpu_profiles/dev_profile.json"))
-                        .inspect_err(|e| {
-                            error!("BUG: could not deserialize CPU profile. Got error: {:?}", e)
-                        })
-                        .expect("should be able to deserialize pre-generated data"),
-                )
-            }
             Self::Skylake => Some(
                 serde_json::from_slice(include_bytes!("cpu_profiles/skylake.json"))
                     .inspect_err(|e| {
