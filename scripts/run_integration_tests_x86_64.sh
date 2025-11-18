@@ -177,14 +177,16 @@ ulimit -l unlimited
 # Set number of open descriptors high enough for VFIO tests to run
 ulimit -n 4096
 
+# Common configuration for every test run
 export RUST_BACKTRACE=1
+export RUSTFLAGS="$RUSTFLAGS"
+
 time cargo test --release --target "$BUILD_TARGET" $test_features "common_parallel::$test_filter" -- ${test_binary_args[*]} --test-threads=$((($(nproc) * 3) / 4))
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests
 # running in parallel.
 if [ $RES -eq 0 ]; then
-    export RUST_BACKTRACE=1
     time cargo test --release --target "$BUILD_TARGET" $test_features "common_sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
     RES=$?
 fi
@@ -192,7 +194,6 @@ fi
 # Run tests on dbus_api
 if [ $RES -eq 0 ]; then
     cargo build --features "mshv,dbus_api" --all --release --target "$BUILD_TARGET"
-    export RUST_BACKTRACE=1
     # integration tests now do not reply on build feature "dbus_api"
     time cargo test $test_features "dbus_api::$test_filter" -- ${test_binary_args[*]}
     RES=$?
@@ -201,14 +202,12 @@ fi
 # Run tests on fw_cfg
 if [ $RES -eq 0 ]; then
     cargo build --features "mshv,fw_cfg" --all --release --target "$BUILD_TARGET"
-    export RUST_BACKTRACE=1
     time cargo test $test_features "fw_cfg::$test_filter" --target "$BUILD_TARGET" -- ${test_binary_args[*]}
     RES=$?
 fi
 
 if [ $RES -eq 0 ]; then
     cargo build --features "mshv,ivshmem" --all --release --target "$BUILD_TARGET"
-    export RUST_BACKTRACE=1
     time cargo test $test_features "ivshmem::$test_filter" --target "$BUILD_TARGET" -- ${test_binary_args[*]}
     RES=$?
 fi
