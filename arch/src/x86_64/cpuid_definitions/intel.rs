@@ -315,7 +315,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
                     short: "x2apic",
                     description: "X2APIC support",
                     bits_range: (21, 21),
-                    policy: ProfilePolicy::Overwrite(0),
+                    policy: ProfilePolicy::Overwrite(1),
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
                 ValueDefinition {
@@ -468,7 +468,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
                     short: "apic",
                     description: "APIC on-chip",
                     bits_range: (9, 9),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Overwrite(1),
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
                 // MSR related (maybe not necessary to look into which ones)
