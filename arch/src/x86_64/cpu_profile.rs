@@ -137,6 +137,10 @@ impl CpuidOutputRegisterAdjustments {
             if adjustment.replacements == 0 {
                 continue;
             }
+            if param.leaf == 0xd && (param.sub_leaf.contains(&3) || param.sub_leaf.contains(&4)) {
+                // TODO: Fix this via policies!
+                continue;
+            }
             if !cpuid.iter().any(|entry| {
                 (entry.function == param.leaf) && (param.sub_leaf.contains(&entry.index))
             }) {
