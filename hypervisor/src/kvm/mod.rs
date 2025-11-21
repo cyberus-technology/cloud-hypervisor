@@ -1869,6 +1869,7 @@ impl cpu::Vcpu for KvmVcpu {
     /// X86 specific call to setup the CPUID registers.
     ///
     fn set_cpuid2(&self, cpuid: &[CpuIdEntry]) -> cpu::Result<()> {
+        info!("setting cpuid2");
         let cpuid: Vec<kvm_bindings::kvm_cpuid_entry2> =
             cpuid.iter().map(|e| (*e).into()).collect();
         let kvm_cpuid = <CpuId>::from_entries(&cpuid)

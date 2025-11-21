@@ -604,6 +604,7 @@ pub fn generate_common_cpuid(
     hypervisor: &Arc<dyn hypervisor::Hypervisor>,
     config: &CpuidConfig,
 ) -> super::Result<Vec<CpuIdEntry>> {
+    info!("calling generate_common_cpuid");
     // SAFETY: cpuid called with valid leaves
     if unsafe { x86_64::__cpuid(1) }.ecx & (1 << HYPERVISOR_ECX_BIT) == 1 << HYPERVISOR_ECX_BIT {
         // SAFETY: cpuid called with valid leaves
@@ -945,6 +946,7 @@ pub fn configure_vcpu(
         debug!("{}", c);
     }
 
+    info!("Setting cpuid after updating topology in configure_vcpu");
     vcpu.set_cpuid2(&cpuid)
         .map_err(|e| Error::SetSupportedCpusFailed(e.into()))?;
 

@@ -848,6 +848,7 @@ impl CpuManager {
             let state: CpuState = snapshot.to_state().map_err(|e| {
                 Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {:?}", e))
             })?;
+            info!("Going to set cpuid in create_vcpu");
             vcpu.vcpu
                 .set_state(&state)
                 .map_err(|e| Error::VcpuCreate(anyhow!("Could not set the vCPU state {:?}", e)))?;
