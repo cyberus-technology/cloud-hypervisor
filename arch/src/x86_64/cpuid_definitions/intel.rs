@@ -1341,7 +1341,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
                     short: "hle",
                     description: "Hardware Lock Elision",
                     bits_range: (4, 4),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Overwrite(0),
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
                 ValueDefinition {
@@ -1397,12 +1397,12 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
                     policy: ProfilePolicy::Inherit,
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
-                // This is TSX related from what I can tell. TSX is riddled with CVEs: Consider two profiles (one with it disabled) or an opt-in/out feature.
+                // This is TSX related. TSX is riddled with CVEs: Consider two profiles (one with it disabled) or an opt-in/out feature.
                 ValueDefinition {
                     short: "rtm",
                     description: "Intel restricted transactional memory",
                     bits_range: (11, 11),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Overwrite(0),
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
                 ValueDefinition {
@@ -1813,14 +1813,14 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
                     short: "rtm_always_abort",
                     description: "XBEGIN (RTM transaction) always aborts",
                     bits_range: (11, 11),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Overwrite(0),
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
                 ValueDefinition {
                     short: "tsx_force_abort",
                     description: "MSR TSX_FORCE_ABORT, RTM_ABORT bit, supported",
                     bits_range: (13, 13),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Overwrite(0),
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
                 ValueDefinition {
@@ -1837,7 +1837,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<147> = const {
                     policy: ProfilePolicy::Inherit,
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
-                // TODO: This is TSX related which is riddled with CVEs. We should carefully decide what to do with regards to this feature.
+                // TODO: This is TSX related which is riddled with CVEs. We could consider an additional profile enabling TSX in the future, but we leave it out for now.
                 ValueDefinition {
                     short: "tsxldtrk",
                     description: "TSX suspend/resume load address tracking",
