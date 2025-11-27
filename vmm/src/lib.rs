@@ -55,7 +55,7 @@ use vm_memory::{
     VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
 use vm_migration::protocol::*;
-use vm_migration::tls::{TlsConnectionWrapper, TlsStream};
+use vm_migration::tls::{TlsConnectionWrapper, TlsStream, TlsStreamWrapper};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, tls,
 };
@@ -280,7 +280,7 @@ impl From<u64> for EpollDispatch {
 enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
-    Tls(Box<TlsStream>),
+    Tls(Box<TlsStreamWrapper>),
 }
 
 impl Read for SocketStream {
@@ -1454,7 +1454,9 @@ fn send_migration_socket(
                 send_data_migration.tls_dir.as_ref().unwrap(),
                 address.split_once(':').map_or(address, |(host, _)| host),
             )?;
-            Ok(SocketStream::Tls(Box::new(TlsStream::Client(tls_stream))))
+            Ok(SocketStream::Tls(Box::new(TlsStreamWrapper::new(
+                TlsStream::Client(tls_stream),
+            ))))
         }
     } else if let Some(path) = &send_data_migration.destination_url.strip_prefix("unix:") {
         info!("Connecting to UNIX socket at {path:?}");
