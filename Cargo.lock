@@ -493,7 +493,6 @@ dependencies = [
  "log",
  "net_util",
  "option_parser",
- "rustls",
  "seccompiler",
  "serde_json",
  "signal-hook",
