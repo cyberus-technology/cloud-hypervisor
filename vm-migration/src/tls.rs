@@ -46,12 +46,40 @@ pub enum TlsStream {
     Server(StreamOwned<ServerConnection, TcpStream>),
 }
 
+// The TLS-Stream objects cannot read or write volatile, thus we need a buffer
+// between the VolatileSlice and the TLS stream (see ReadVolatile and
+// WriteVolatile implementations below). Allocating this buffer in these
+// function calls would make it very slow, thus we tie the buffer to the stream
+// with this wrapper.
+pub struct TlsStreamWrapper {
+    stream: TlsStream,
+    // Used only in ReadVolatile and WriteVolatile
+    buf: Vec<u8>,
+}
+
+static MAX_CHUNK: usize = 1024 * 64;
+
+impl TlsStreamWrapper {
+    pub fn new(stream: TlsStream) -> Self {
+        Self {
+            stream,
+            buf: Vec::new(),
+        }
+    }
+}
+
 impl Read for TlsStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             TlsStream::Client(s) => s.read(buf),
             TlsStream::Server(s) => s.read(buf),
         }
+    }
+}
+
+impl Read for TlsStreamWrapper {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        Read::read(&mut self.stream, buf)
     }
 }
 
@@ -70,38 +98,81 @@ impl Write for TlsStream {
     }
 }
 
+impl Write for TlsStreamWrapper {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Write::write(&mut self.stream, buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.stream)
+    }
+}
+
 // Reading from or writing to these FDs would break the connection, because
 // those reads or writes wouldn't go through rustls. But the FD is used to wait
 // until it becomes readable.
-impl AsFd for TlsStream {
+impl AsFd for TlsStreamWrapper {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        match self {
+        match &self.stream {
             TlsStream::Client(s) => s.get_ref().as_fd(),
             TlsStream::Server(s) => s.get_ref().as_fd(),
         }
     }
 }
 
-impl ReadVolatile for TlsStream {
+impl ReadVolatile for TlsStreamWrapper {
     fn read_volatile<B: BitmapSlice>(
         &mut self,
         vs: &mut VolatileSlice<B>,
     ) -> std::result::Result<usize, VolatileMemoryError> {
-        let mut tmp = vec![0u8; vs.len()];
-        let n = Read::read(self, &mut tmp[..]).unwrap();
-        vs.copy_from(&tmp[..n]);
+        let len = vs.len().min(MAX_CHUNK);
+
+        if len == 0 {
+            return Ok(0);
+        }
+
+        if self.buf.len() < len {
+            self.buf.resize(len, 0);
+        }
+
+        let buf = &mut self.buf[..len];
+        let n =
+            Read::read(&mut self.stream, &mut buf[..len]).map_err(VolatileMemoryError::IOError)?;
+
+        if n == 0 {
+            return Ok(0);
+        }
+
+        vs.copy_from(&buf[..n]);
+        self.buf.clear();
+
         Ok(n)
     }
 }
 
-impl WriteVolatile for TlsStream {
+impl WriteVolatile for TlsStreamWrapper {
     fn write_volatile<B: BitmapSlice>(
         &mut self,
         vs: &VolatileSlice<B>,
     ) -> std::result::Result<usize, VolatileMemoryError> {
-        let mut tmp = vec![0u8; vs.len()];
-        let n = vs.copy_to(&mut tmp[..]);
-        let n = Write::write(self, &tmp[..n]).unwrap();
+        let len = vs.len().min(MAX_CHUNK);
+        if len == 0 {
+            return Ok(0);
+        }
+
+        if self.buf.len() < len {
+            self.buf.resize(len, 0);
+        }
+
+        let buf = &mut self.buf[..len];
+        let n = vs.copy_to(&mut buf[..len]);
+
+        if n == 0 {
+            return Ok(0);
+        }
+
+        let n = Write::write(&mut self.stream, &buf[..n]).map_err(VolatileMemoryError::IOError)?;
+        self.buf.clear();
+
         Ok(n)
     }
 }
@@ -130,7 +201,10 @@ impl TlsConnectionWrapper {
         Self { config }
     }
 
-    pub fn wrap(&self, socket: TcpStream) -> std::result::Result<TlsStream, MigratableError> {
+    pub fn wrap(
+        &self,
+        socket: TcpStream,
+    ) -> std::result::Result<TlsStreamWrapper, MigratableError> {
         let conn = ServerConnection::new(self.config.clone()).map_err(TlsError::RustlsError)?;
 
         let mut tls = StreamOwned::new(conn, socket);
@@ -146,7 +220,7 @@ impl TlsConnectionWrapper {
             }
         }
 
-        Ok(TlsStream::Server(tls))
+        Ok(TlsStreamWrapper::new(TlsStream::Server(tls)))
     }
 }
 
