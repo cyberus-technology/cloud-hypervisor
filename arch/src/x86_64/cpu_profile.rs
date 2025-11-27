@@ -1,4 +1,7 @@
-use crate::x86_64::{CpuidReg, cpuid_definitions::Parameters};
+use crate::x86_64::{
+    CpuidReg,
+    cpuid_definitions::{Parameters, deserialize_from_hex, serialize_as_hex},
+};
 use hypervisor::arch::x86::CpuIdEntry;
 use hypervisor::{CpuVendor, HypervisorType};
 use serde::{Deserialize, Serialize};
@@ -92,8 +95,12 @@ incompatible with live migration of course).
 /// Used for adjusting an entire cpuid output register (EAX, EBX, ECX or EDX)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct CpuidOutputRegisterAdjustments {
+    #[serde(serialize_with = "serialize_as_hex")]
+    #[serde(deserialize_with = "deserialize_from_hex")]
     pub(in crate::x86_64) replacements: u32,
     /// Used to zero out the area `replacements` occupy. This mask is not necessarily !replacements, as replacements may pack values of different types (i.e. it is wrong to think of it as a bitset conceptually speaking).
+    #[serde(serialize_with = "serialize_as_hex")]
+    #[serde(deserialize_with = "deserialize_from_hex")]
     pub(in crate::x86_64) mask: u32,
 }
 impl CpuidOutputRegisterAdjustments {
