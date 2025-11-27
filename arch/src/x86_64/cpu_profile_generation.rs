@@ -124,7 +124,7 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
         adjustments,
     };
 
-    serde_json::to_writer(&mut writer, &profile_data)
+    serde_json::to_writer_pretty(&mut writer, &profile_data)
         .context("failed to serialize the generated profile data to the given writer")?;
     writer
         .flush()
