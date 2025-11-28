@@ -1,6 +1,6 @@
-use crate::x86_64::CpuidReg;
 #[cfg(feature = "kvm")]
 use crate::x86_64::cpuid_definitions::CpuidDefinitions;
+use crate::x86_64::{AMX_BF16, AMX_INT8, AMX_TILE, CpuidReg};
 use crate::x86_64::{
     CpuidOutputRegisterAdjustments,
     cpu_profile::CpuProfileData,
@@ -133,10 +133,34 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
 
 /// Get the supported CPUID entries from the hypervisor and make sure that they are sorted by function and index
 fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry>> {
+    // Check for AMX compatibility. If this is supported we need to call arch_prctl before requesting the supported
+    // CPUID entries from the hypervisor
+
+    // TODO: It might actually be enough to just query arch_prctl directly
+    if supports_amx() {}
     hypervisor
         .get_supported_cpuid()
         .context("CPU profile data generation failed")
         .map(sort_entries)
+}
+
+fn supports_amx() -> bool {
+    // AMX is unfortunately not a stable feature in Rust yet, hence we need to
+    // manually query CPUID
+
+    // First check that leaf 0x7 can be queried (this check is almost redundant, but it doesn't hurt to be a bit thorough)
+
+    // SAFETY: leaf 0 is valid whenever the CPUID instruction is available
+    let max_std_leaf = unsafe { core::arch::x86_64::__cpuid(0).eax };
+    if max_std_leaf >= 0x7 {
+        // SAFETY: We checked the existence of this leaf
+        let leaf_0x7_subleaf_0_edx = unsafe { core::arch::x86_64::__cpuid(0x7).edx };
+        // It is probably enough to just check for AMX_TILE here, but in case that depends on arch_prctl,
+        // we check for the other basic AMX capabilities as well
+        (leaf_0x7_subleaf_0_edx & ((1 << AMX_TILE) | (1 << AMX_BF16) | (1 << AMX_INT8))) != 0
+    } else {
+        false
+    }
 }
 
 fn sort_entries(mut cpuid: Vec<CpuIdEntry>) -> Vec<CpuIdEntry> {
