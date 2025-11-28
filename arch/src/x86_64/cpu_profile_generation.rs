@@ -1,6 +1,6 @@
+use crate::x86_64::CpuidReg;
 #[cfg(feature = "kvm")]
 use crate::x86_64::cpuid_definitions::CpuidDefinitions;
-use crate::x86_64::{AMX_BF16, AMX_INT8, AMX_TILE, CpuidReg};
 use crate::x86_64::{
     CpuidOutputRegisterAdjustments,
     cpu_profile::CpuProfileData,
@@ -10,7 +10,7 @@ use crate::x86_64::{
     },
 };
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use hypervisor::CpuVendor;
 use hypervisor::Hypervisor;
 use hypervisor::HypervisorType;
@@ -135,34 +135,50 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
 fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry>> {
     // Check for AMX compatibility. If this is supported we need to call arch_prctl before requesting the supported
     // CPUID entries from the hypervisor
-
-    // TODO: It might actually be enough to just query arch_prctl directly
-    if supports_amx() {}
+    if amx_supported() {
+        request_guest_amx_support().map_err(|e| anyhow!(e))?;
+    }
     hypervisor
         .get_supported_cpuid()
         .context("CPU profile data generation failed")
         .map(sort_entries)
 }
 
-fn supports_amx() -> bool {
-    // AMX is unfortunately not a stable feature in Rust yet, hence we need to
-    // manually query CPUID
-
-    // First check that leaf 0x7 can be queried (this check is almost redundant, but it doesn't hurt to be a bit thorough)
-
-    // SAFETY: leaf 0 is valid whenever the CPUID instruction is available
-    let max_std_leaf = unsafe { core::arch::x86_64::__cpuid(0).eax };
-    if max_std_leaf >= 0x7 {
-        // SAFETY: We checked the existence of this leaf
-        let leaf_0x7_subleaf_0_edx = unsafe { core::arch::x86_64::__cpuid(0x7).edx };
-        // It is probably enough to just check for AMX_TILE here, but in case that depends on arch_prctl,
-        // we check for the other basic AMX capabilities as well
-        (leaf_0x7_subleaf_0_edx & ((1 << AMX_TILE) | (1 << AMX_BF16) | (1 << AMX_INT8))) != 0
+fn amx_supported() -> bool {
+    // TODO: The vmm crate also essentially does this. We should
+    // rather use this function (or some variant of it) there as well.
+    const ARCH_GET_XCOMP_SUPP: usize = 0x1021;
+    const ARCH_XCOMP_TILECFG: usize = 17;
+    const ARCH_XCOMP_TILEDATA: usize = 18;
+    let mut features: usize = 0;
+    let result =
+        unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_GET_XCOMP_SUPP, &raw mut features) };
+    let mask = (1 << ARCH_XCOMP_TILECFG) | (1 << ARCH_XCOMP_TILEDATA);
+    if result != 0 {
+        (features & mask) == mask
     } else {
         false
     }
 }
 
+fn request_guest_amx_support() -> Result<(), &'static str> {
+    // TODO: This constant is also used in `guest_amx_supported`
+    // We should deduplicate this
+    const ARCH_XCOMP_TILEDATA: usize = 18;
+    const ARCH_REQ_GUEST_PERM: usize = 0x1025;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_arch_prctl,
+            ARCH_REQ_GUEST_PERM,
+            ARCH_XCOMP_TILEDATA,
+        )
+    };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err("Failed to enable AMX tile state components for guests")
+    }
+}
 fn sort_entries(mut cpuid: Vec<CpuIdEntry>) -> Vec<CpuIdEntry> {
     cpuid.sort_by(|entry, other_entry| {
         let fn_cmp = entry.function.cmp(&other_entry.function);
