@@ -154,7 +154,7 @@ fn amx_supported() -> bool {
     let result =
         unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_GET_XCOMP_SUPP, &raw mut features) };
     let mask = (1 << ARCH_XCOMP_TILECFG) | (1 << ARCH_XCOMP_TILEDATA);
-    if result != 0 {
+    if result == 0 {
         (features & mask) == mask
     } else {
         false
@@ -173,12 +173,13 @@ fn request_guest_amx_support() -> Result<(), &'static str> {
             ARCH_XCOMP_TILEDATA,
         )
     };
-    if result != 0 {
+    if result == 0 {
         Ok(())
     } else {
         Err("Failed to enable AMX tile state components for guests")
     }
 }
+
 fn sort_entries(mut cpuid: Vec<CpuIdEntry>) -> Vec<CpuIdEntry> {
     cpuid.sort_by(|entry, other_entry| {
         let fn_cmp = entry.function.cmp(&other_entry.function);
