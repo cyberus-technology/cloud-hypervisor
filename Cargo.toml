@@ -6,7 +6,6 @@
 codegen-units = 1
 lto = true
 opt-level = "s"
-strip = true
 
 # Tradeof between performance and fast compilation times for local testing and
 # development with frequent rebuilds.
