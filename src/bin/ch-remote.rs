@@ -506,11 +506,13 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .unwrap()
                     .get_one::<u64>("migration-timeout-s")
                     .unwrap_or(&3600),
-                *matches
+                matches
                     .subcommand_matches("send-migration")
                     .unwrap()
-                    .get_one::<NonZeroU32>("connections")
-                    .unwrap_or(&NonZeroU32::new(1).unwrap()),
+                    .get_one::<u32>("connections")
+                    .copied()
+                    .and_then(NonZeroU32::new)
+                    .unwrap_or(NonZeroU32::new(1).unwrap()),
             );
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
                 .map_err(Error::HttpApiClient)
