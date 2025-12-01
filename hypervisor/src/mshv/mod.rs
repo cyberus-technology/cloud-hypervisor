@@ -398,7 +398,6 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         }
     }
 
-
     #[cfg(feature = "kvm")]
     fn check_extension_int(&self, _capability: kvm_ioctls::Cap) -> i32 {
         unimplemented!()
