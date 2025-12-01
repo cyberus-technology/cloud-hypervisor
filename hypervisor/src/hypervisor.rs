@@ -111,6 +111,16 @@ pub trait Hypervisor: Send + Sync {
     /// Return a hypervisor-agnostic Vm trait object
     ///
     fn create_vm(&self) -> Result<Arc<dyn Vm>>;
+
+    /// Query the hypervisor for the availability of an extension.
+    ///
+    ///
+    /// Generally 0 means no and 1 means yes, but some extensions may report
+    /// additional information in the integer return value.
+    ///
+    #[cfg(feature = "kvm")]
+    fn check_extension_int(&self, capability: kvm_ioctls::Cap) -> i32;
+
     ///
     /// Create a Vm of a specific type using the underlying hypervisor
     /// Return a hypervisor-agnostic Vm trait object
