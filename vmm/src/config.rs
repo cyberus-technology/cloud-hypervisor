@@ -3609,6 +3609,13 @@ mod tests {
                 ..disk_fixture()
             }
         );
+        assert_eq!(
+            DiskConfig::parse("path=/path/to_file,addr=15.0")?,
+            DiskConfig {
+                bdf_device: Some(21),
+                ..disk_fixture()
+            }
+        );
         Ok(())
     }
 
@@ -3698,6 +3705,14 @@ mod tests {
             }
         );
 
+        assert_eq!(
+            NetConfig::parse("mac=de:ad:be:ef:12:34,host_mac=12:34:de:ad:be:ef,addr=08.0")?,
+            NetConfig {
+                bdf_device: Some(8),
+                ..net_fixture()
+            }
+        );
+
         Ok(())
     }
 
@@ -3723,6 +3738,13 @@ mod tests {
             RngConfig::parse("iommu=on")?,
             RngConfig {
                 iommu: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            RngConfig::parse("addr=10.0")?,
+            RngConfig {
+                bdf_device: Some(16),
                 ..Default::default()
             }
         );
@@ -3753,6 +3775,14 @@ mod tests {
             FsConfig {
                 num_queues: 4,
                 queue_size: 1024,
+                ..fs_fixture()
+            }
+        );
+
+        assert_eq!(
+            FsConfig::parse("tag=mytag,socket=/tmp/sock,addr=0F.0")?,
+            FsConfig {
+                bdf_device: Some(15),
                 ..fs_fixture()
             }
         );
@@ -3793,6 +3823,13 @@ mod tests {
             PmemConfig {
                 discard_writes: true,
                 iommu: true,
+                ..pmem_fixture()
+            }
+        );
+        assert_eq!(
+            PmemConfig::parse("file=/tmp/pmem,size=128M,addr=1F.0")?,
+            PmemConfig {
+                bdf_device: Some(31),
                 ..pmem_fixture()
             }
         );
@@ -3958,6 +3995,13 @@ mod tests {
                 ..vdpa_fixture()
             }
         );
+        assert_eq!(
+            VdpaConfig::parse("path=/dev/vhost-vdpa,addr=0A.0")?,
+            VdpaConfig {
+                bdf_device: Some(10),
+                ..vdpa_fixture()
+            }
+        );
         Ok(())
     }
 
@@ -3998,6 +4042,18 @@ mod tests {
                 id: None,
                 pci_segment: 0,
                 bdf_device: None,
+            }
+        );
+
+        assert_eq!(
+            VsockConfig::parse("socket=/tmp/sock,cid=3,iommu=on,addr=08.0")?,
+            VsockConfig {
+                cid: 3,
+                socket: PathBuf::from("/tmp/sock"),
+                iommu: true,
+                id: None,
+                pci_segment: 0,
+                bdf_device: Some(8),
             }
         );
         Ok(())
@@ -4077,6 +4133,7 @@ mod tests {
                     id: Some("net0".to_owned()),
                     num_queues: 2,
                     fds: Some(vec![-1, -1, -1, -1]),
+                    bdf_device: Some(15),
                     ..net_fixture()
                 },
                 NetConfig {
