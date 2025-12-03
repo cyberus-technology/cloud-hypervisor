@@ -410,7 +410,7 @@ impl XsaveState {
     /// CPU vendor (AMX is currently only available on Intel CPUs).
     ///
     /// Returns `Ok` if AMX is supported on the host and `Err` otherwise.
-    fn amx_supported(hypervisor: &dyn Hypervisor) -> Result<(), AmxGuestSupportError> {
+    pub fn amx_supported(hypervisor: &dyn Hypervisor) -> Result<(), AmxGuestSupportError> {
         if !matches!(hypervisor.get_cpu_vendor(), CpuVendor::Intel) {
             return Err(AmxGuestSupportError::VendorDoesNotSupportAmx);
         }
