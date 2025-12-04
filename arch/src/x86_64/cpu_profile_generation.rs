@@ -144,10 +144,7 @@ fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<Cpu
                     .context("Could not generate profile. Failed to enable AMX tile state");
             }
         }
-        Err(e) => unreachable!(format!(
-            "Unexpected error when checking AMX support: error:={:?}",
-            e
-        )),
+        Err(_) => unreachable!("Unexpected error when checking AMX support"),
     }
 
     hypervisor
