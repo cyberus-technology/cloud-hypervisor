@@ -738,8 +738,9 @@ impl CpuManager {
 
         #[cfg(target_arch = "x86_64")]
         if config.features.amx {
-            hypervisor::arch::x86::XsaveState::enable_amx_state_components(hypervisor.as_ref())
-                .map_err(|e| crate::cpu::Error::AmxEnable(e.into()))?;
+            hypervisor
+                .enable_amx_state_components()
+                .map_err(|e| Error::AmxEnable(e.into()))?;
         }
 
         let proximity_domain_per_cpu: BTreeMap<u32, u32> = {
