@@ -19,6 +19,28 @@ for each submitted Pull Request (PR).
 
 ## Basic Checks
 
+```sh
+# We currently rely on nightly-only formatting features
+cargo +nightly fmt --all 
+cargo check --all-targets --tests
+cargo clippy --all-targets --tests
+# Please note that this will not execute integration tests.
+cargo test --all-targets --tests
+
+# To lint your last three commits
+gitlint --commits "HEAD~3..HEAD"
+```
+
+### \[Optional\] Run Integration Tests
+
+_Caution: These tests are taking a long time to complete (40+ mins) and need special setup._
+
+```sh
+ bash ./scripts/dev_cli.sh tests --integration -- --test-filter '<optionally filter test by name pattern>' 
+```
+
+### Setup Commit Hook
+
 Please consider creating the following hook as `.git/hooks/pre-commit` in order
 to ensure basic correctness of your code. You can extend this further if you
 have specific features that you regularly develop against.
@@ -27,8 +49,8 @@ have specific features that you regularly develop against.
 #!/bin/sh
 
 cargo +nightly fmt --all -- --check || exit 1
-cargo check --locked --all --all-targets --tests || exit 1
-cargo clippy --locked --all --all-targets --tests -- -D warnings || exit 1
+cargo check --locked --all-targets --tests || exit 1
+cargo clippy --locked --all-targets --tests -- -D warnings || exit 1
 ```
 
 You will need to `chmod +x .git/hooks/pre-commit` to have it run on every
