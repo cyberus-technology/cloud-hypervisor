@@ -8,6 +8,8 @@ extern crate event_monitor;
 #[macro_use]
 extern crate log;
 
+use anyhow::Context;
+
 /// Amount of iterations before auto-converging starts.
 const AUTO_CONVERGE_ITERATION_DELAY: u64 = 2;
 /// Step size in percent to increase the vCPU throttling.
@@ -2277,6 +2279,15 @@ impl Vmm {
                 "Live Migration is not supported when TDX is enabled"
             )));
         };
+        // TODO: Explain why we need to call this here.
+
+        if src_vm_config.lock().unwrap().cpus.features.amx {
+            let _ = self
+                .hypervisor
+                .enable_amx_state_components()
+                .context("Unable to enable AMX before generating CPUID")
+                .map_err(|e| MigratableError::MigrateReceive(e))?;
+        }
 
         // We check the `CPUID` compatibility of between the source vm and destination, which is
         // mostly about feature compatibility.
