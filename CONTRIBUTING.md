@@ -26,7 +26,7 @@ have specific features that you regularly develop against.
 ```sh
 #!/bin/sh
 
-cargo fmt -- --check || exit 1
+cargo +nightly fmt --all -- --check || exit 1
 cargo check --locked --all --all-targets --tests || exit 1
 cargo clippy --locked --all --all-targets --tests -- -D warnings || exit 1
 ```
