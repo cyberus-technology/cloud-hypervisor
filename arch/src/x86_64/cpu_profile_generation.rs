@@ -11,10 +11,9 @@ use crate::x86_64::{
 };
 
 use anyhow::{Context, anyhow};
-use hypervisor::Hypervisor;
 use hypervisor::HypervisorType;
 use hypervisor::arch::x86::CpuIdEntry;
-use hypervisor::{CpuVendor, arch::x86::XsaveState};
+use hypervisor::{Hypervisor, HypervisorError};
 use std::io::Write;
 use std::ops::RangeInclusive;
 
@@ -134,9 +133,21 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
 /// Get the supported CPUID entries from the hypervisor and make sure that they are sorted by function and index
 fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry>> {
     // Check for AMX compatibility. If this is supported we need to call arch_prctl before requesting the supported
-    // CPUID entries from the hypervisor
-    if XsaveState::amx_supported(hypervisor).is_ok() {
-        XsaveState::enable_amx_state_components(hypervisor).map_err(|e| anyhow!(e))?;
+    // CPUID entries from the hypervisor. We simply call the enable_amx_state_components method on the hypervisor and
+    // ignore any AMX not supported error to achieve this.
+
+    match hypervisor.enable_amx_state_components() {
+        Ok(()) => {}
+        Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => {
+            if !matches!(
+                amx_err,
+                hypervisor::arch::x86::AmxGuestSupportError::AmxNotSupported { errno }
+            ) {
+                return Err(amx_err)
+                    .context("Could not generate profile. Failed to enable AMX tile state");
+            }
+        }
+        Err(e) => unreachable!("Unexpected error when checking AMX support"),
     }
 
     hypervisor
