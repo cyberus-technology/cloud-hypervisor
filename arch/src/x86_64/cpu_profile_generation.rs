@@ -11,10 +11,10 @@ use crate::x86_64::{
 };
 
 use anyhow::{Context, anyhow};
-use hypervisor::CpuVendor;
 use hypervisor::Hypervisor;
 use hypervisor::HypervisorType;
 use hypervisor::arch::x86::CpuIdEntry;
+use hypervisor::{CpuVendor, arch::x86::XsaveState};
 use std::io::Write;
 use std::ops::RangeInclusive;
 
@@ -135,49 +135,14 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
 fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry>> {
     // Check for AMX compatibility. If this is supported we need to call arch_prctl before requesting the supported
     // CPUID entries from the hypervisor
-    if amx_supported() {
-        request_guest_amx_support().map_err(|e| anyhow!(e))?;
+    if XsaveState::amx_supported(hypervisor).is_ok() {
+        XsaveState::enable_amx_state_components(hypervisor).map_err(|e| anyhow!(e))?;
     }
+
     hypervisor
         .get_supported_cpuid()
         .context("CPU profile data generation failed")
         .map(sort_entries)
-}
-
-fn amx_supported() -> bool {
-    // TODO: The vmm crate also essentially does this. We should
-    // rather use this function (or some variant of it) there as well.
-    const ARCH_GET_XCOMP_SUPP: usize = 0x1021;
-    const ARCH_XCOMP_TILECFG: usize = 17;
-    const ARCH_XCOMP_TILEDATA: usize = 18;
-    let mut features: usize = 0;
-    let result =
-        unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_GET_XCOMP_SUPP, &raw mut features) };
-    let mask = (1 << ARCH_XCOMP_TILECFG) | (1 << ARCH_XCOMP_TILEDATA);
-    if result == 0 {
-        (features & mask) == mask
-    } else {
-        false
-    }
-}
-
-fn request_guest_amx_support() -> Result<(), &'static str> {
-    // TODO: This constant is also used in `guest_amx_supported`
-    // We should deduplicate this
-    const ARCH_XCOMP_TILEDATA: usize = 18;
-    const ARCH_REQ_GUEST_PERM: usize = 0x1025;
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_arch_prctl,
-            ARCH_REQ_GUEST_PERM,
-            ARCH_XCOMP_TILEDATA,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err("Failed to enable AMX tile state components for guests")
-    }
 }
 
 fn sort_entries(mut cpuid: Vec<CpuIdEntry>) -> Vec<CpuIdEntry> {
