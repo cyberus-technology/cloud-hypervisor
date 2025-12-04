@@ -135,15 +135,13 @@ fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<Cpu
 
     match hypervisor.enable_amx_state_components() {
         Ok(()) => {}
-        Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => {
-            if !matches!(
-                amx_err,
-                hypervisor::arch::x86::AmxGuestSupportError::AmxNotSupported { .. }
-            ) {
-                return Err(amx_err)
-                    .context("Could not generate profile. Failed to enable AMX tile state");
+        Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => match amx_err {
+            // TODO: Explain
+            err @ hypervisor::arch::x86::AmxGuestSupportError::AmxGuestTileRequest { .. } => {
+                return Err(err).context("Unable to enable AMX state tiles for guests");
             }
-        }
+            _ => {}
+        },
         Err(_) => unreachable!("Unexpected error when checking AMX support"),
     }
 
