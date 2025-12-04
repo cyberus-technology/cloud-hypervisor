@@ -1,21 +1,18 @@
-use crate::x86_64::CpuidReg;
-#[cfg(feature = "kvm")]
-use crate::x86_64::cpuid_definitions::CpuidDefinitions;
-use crate::x86_64::{
-    CpuidOutputRegisterAdjustments,
-    cpu_profile::CpuProfileData,
-    cpuid_definitions::{
-        Parameters, ProfilePolicy, hypervisor::KVM_CPUID_DEFINITIONS,
-        intel::INTEL_CPUID_DEFINITIONS,
-    },
-};
-
-use anyhow::{Context, anyhow};
-use hypervisor::HypervisorType;
-use hypervisor::arch::x86::CpuIdEntry;
-use hypervisor::{Hypervisor, HypervisorError};
 use std::io::Write;
 use std::ops::RangeInclusive;
+
+use anyhow::Context;
+use hypervisor::CpuVendor;
+use hypervisor::arch::x86::CpuIdEntry;
+use hypervisor::{Hypervisor, HypervisorError, HypervisorType};
+
+use crate::x86_64::cpu_profile::CpuProfileData;
+#[cfg(feature = "kvm")]
+use crate::x86_64::cpuid_definitions::CpuidDefinitions;
+use crate::x86_64::cpuid_definitions::hypervisor::KVM_CPUID_DEFINITIONS;
+use crate::x86_64::cpuid_definitions::intel::INTEL_CPUID_DEFINITIONS;
+use crate::x86_64::cpuid_definitions::{Parameters, ProfilePolicy};
+use crate::x86_64::{CpuidOutputRegisterAdjustments, CpuidReg};
 
 /// Generate CPU profile data and convert it to a string, embeddable as Rust code, which is
 /// written to the given `writer` (e.g. a File).
@@ -141,13 +138,16 @@ fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<Cpu
         Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => {
             if !matches!(
                 amx_err,
-                hypervisor::arch::x86::AmxGuestSupportError::AmxNotSupported { errno }
+                hypervisor::arch::x86::AmxGuestSupportError::AmxNotSupported { .. }
             ) {
                 return Err(amx_err)
                     .context("Could not generate profile. Failed to enable AMX tile state");
             }
         }
-        Err(e) => unreachable!("Unexpected error when checking AMX support"),
+        Err(e) => unreachable!(format!(
+            "Unexpected error when checking AMX support: error:={:?}",
+            e
+        )),
     }
 
     hypervisor

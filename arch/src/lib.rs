@@ -11,9 +11,6 @@
 #[macro_use]
 extern crate log;
 
-#[cfg(target_arch = "x86_64")]
-pub use crate::x86_64::cpu_profile::CpuProfile;
-
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -22,6 +19,9 @@ use std::{fmt, result};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[cfg(target_arch = "x86_64")]
+pub use crate::x86_64::cpu_profile::CpuProfile;
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vm_memory::bitmap::AtomicBitmap>;
 type GuestRegionMmap = vm_memory::GuestRegionMmap<vm_memory::bitmap::AtomicBitmap>;

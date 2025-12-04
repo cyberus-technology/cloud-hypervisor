@@ -1,6 +1,7 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::Write;
 use std::ops::RangeInclusive;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::x86_64::CpuidReg;
 

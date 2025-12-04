@@ -1,5 +1,6 @@
-use anyhow::Context;
 use std::io::BufWriter;
+
+use anyhow::Context;
 #[cfg(all(
     target_arch = "x86_64",
     feature = "cpu_profile_generation",

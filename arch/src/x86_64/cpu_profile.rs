@@ -1,10 +1,9 @@
-use crate::x86_64::{
-    CpuidReg,
-    cpuid_definitions::{Parameters, deserialize_from_hex, serialize_as_hex},
-};
 use hypervisor::arch::x86::CpuIdEntry;
 use hypervisor::{CpuVendor, HypervisorType};
 use serde::{Deserialize, Serialize};
+
+use crate::x86_64::CpuidReg;
+use crate::x86_64::cpuid_definitions::{Parameters, deserialize_from_hex, serialize_as_hex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
