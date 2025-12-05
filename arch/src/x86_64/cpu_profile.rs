@@ -20,8 +20,8 @@ pub enum CpuProfile {
 impl CpuProfile {
     // We can only generate CPU profiles for the KVM hypervisor for the time being.
     #[cfg(feature = "kvm")]
-    pub(in crate::x86_64) fn data(&self) -> Option<CpuProfileData> {
-        match self {
+    pub(in crate::x86_64) fn data(&self, amx: bool) -> Option<CpuProfileData> {
+        let mut data: CpuProfileData = match self {
             Self::Host => None,
             Self::Skylake => Some(
                 serde_json::from_slice(include_bytes!("cpu_profiles/skylake.json"))
@@ -37,7 +37,31 @@ impl CpuProfile {
                     })
                     .expect("should be able to deserialize pre-generated data"),
             ),
+        }?;
+
+        if amx {
+            for adj in data.adjustments.iter_mut() {
+                if adj.0.sub_leaf.start() != adj.0.sub_leaf.end() {
+                    continue;
+                }
+                let sub_leaf = *adj.0.sub_leaf.start();
+                let leaf = adj.0.leaf;
+                if (leaf == 0xd) && (sub_leaf == 0) && (adj.0.register == CpuidReg::EAX) {
+                    // TODO: Explain parameters
+                    adj.1.replacements &= !((1 << 17) | (1 << 18));
+                }
+
+                if (leaf == 0xd) && (sub_leaf == 1) && (adj.0.register == CpuidReg::ECX) {
+                    adj.1.replacements &= !((1 << 17) | (1 << 18));
+                }
+
+                if (leaf == 0xd) && ((sub_leaf == 17) | (sub_leaf == 18)) {
+                    adj.1.replacements = 0;
+                }
+            }
         }
+
+        Some(data)
     }
 
     #[cfg(not(feature = "kvm"))]

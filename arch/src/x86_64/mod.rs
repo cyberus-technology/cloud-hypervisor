@@ -677,7 +677,7 @@ pub fn generate_common_cpuid(
     let (host_adjusted_to_profile, profile_cpu_vendor) = {
         config
             .profile
-            .data()
+            .data(config.amx)
             .map(|profile_data| {
                 (
                     CpuidOutputRegisterAdjustments::adjust_cpuid_entries(
