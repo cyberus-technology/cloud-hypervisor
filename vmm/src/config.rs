@@ -175,6 +175,9 @@ pub enum Error {
     /// Failed Parsing FwCfgItem config
     #[error("Error parsing --fw-cfg-config items")]
     ParseFwCfgItem(#[source] OptionParserError),
+    /// Failed parsing addr option
+    #[error("Error parsing --addr")]
+    ParsePciAddr(#[source] OptionParserError),
 }
 
 #[derive(Debug, PartialEq, Eq, Error)]
@@ -1077,7 +1080,7 @@ impl DiskConfig {
          ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,\
          id=<device_id>,pci_segment=<segment_id>,rate_limit_group=<group_id>,\
          queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
-         serial=<serial_number>";
+         serial=<serial_number>,addr=<DD.F>";
 
     pub fn parse(disk: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1102,7 +1105,8 @@ impl DiskConfig {
             .add("pci_segment")
             .add("serial")
             .add("rate_limit_group")
-            .add("queue_affinity");
+            .add("queue_affinity")
+            .add("addr");
         parser.parse(disk).map_err(Error::ParseDisk)?;
 
         let path = parser.get("path").map(PathBuf::from);
@@ -1214,6 +1218,10 @@ impl DiskConfig {
             None
         };
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         Ok(DiskConfig {
             path,
             readonly,
@@ -1231,6 +1239,7 @@ impl DiskConfig {
             pci_segment,
             serial,
             queue_affinity,
+            bdf_device,
         })
     }
 
@@ -1302,7 +1311,7 @@ impl NetConfig {
     vhost_user=<vhost_user_enable>,socket=<vhost_user_socket_path>,vhost_mode=client|server,\
     bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
     ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,pci_segment=<segment_id>\
-    offload_tso=on|off,offload_ufo=on|off,offload_csum=on|off\"";
+    offload_tso=on|off,offload_ufo=on|off,offload_csum=on|off,addr=DD.F\"";
 
     pub fn parse(net: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1331,7 +1340,8 @@ impl NetConfig {
             .add("ops_size")
             .add("ops_one_time_burst")
             .add("ops_refill_time")
-            .add("pci_segment");
+            .add("pci_segment")
+            .add("addr");
         parser.parse(net).map_err(Error::ParseNetwork)?;
 
         let tap = parser.get("tap");
@@ -1447,6 +1457,10 @@ impl NetConfig {
             None
         };
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         let config = NetConfig {
             tap,
             ip,
@@ -1467,6 +1481,7 @@ impl NetConfig {
             offload_tso,
             offload_ufo,
             offload_csum,
+            bdf_device,
         };
         Ok(config)
     }
@@ -1531,7 +1546,7 @@ impl NetConfig {
 impl RngConfig {
     pub fn parse(rng: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
-        parser.add("src").add("iommu");
+        parser.add("src").add("iommu").add("addr");
         parser.parse(rng).map_err(Error::ParseRng)?;
 
         let src = PathBuf::from(
@@ -1545,19 +1560,27 @@ impl RngConfig {
             .unwrap_or(Toggle(false))
             .0;
 
-        Ok(RngConfig { src, iommu })
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
+        Ok(RngConfig {
+            src,
+            iommu,
+            bdf_device,
+        })
     }
 }
 
 impl BalloonConfig {
     pub const SYNTAX: &'static str = "Balloon parameters \"size=<balloon_size>,deflate_on_oom=on|off,\
-        free_page_reporting=on|off\"";
+        free_page_reporting=on|off,addr=<DD.F>\"";
 
     pub fn parse(balloon: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("size");
         parser.add("deflate_on_oom");
-        parser.add("free_page_reporting");
+        parser.add("free_page_reporting").add("addr");
         parser.parse(balloon).map_err(Error::ParseBalloon)?;
 
         let size = parser
@@ -1578,10 +1601,15 @@ impl BalloonConfig {
             .unwrap_or(Toggle(false))
             .0;
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         Ok(BalloonConfig {
             size,
             deflate_on_oom,
             free_page_reporting,
+            bdf_device,
         })
     }
 }
@@ -1589,7 +1617,8 @@ impl BalloonConfig {
 impl FsConfig {
     pub const SYNTAX: &'static str = "virtio-fs parameters \
     \"tag=<tag_name>,socket=<socket_path>,num_queues=<number_of_queues>,\
-    queue_size=<size_of_each_queue>,id=<device_id>,pci_segment=<segment_id>\"";
+    queue_size=<size_of_each_queue>,id=<device_id>,pci_segment=<segment_id>,\
+    addr=<DD.F>\"";
 
     pub fn parse(fs: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1599,7 +1628,8 @@ impl FsConfig {
             .add("num_queues")
             .add("socket")
             .add("id")
-            .add("pci_segment");
+            .add("pci_segment")
+            .add("addr");
         parser.parse(fs).map_err(Error::ParseFileSystem)?;
 
         let tag = parser.get("tag").ok_or(Error::ParseFsTagMissing)?;
@@ -1624,6 +1654,10 @@ impl FsConfig {
             .map_err(Error::ParseFileSystem)?
             .unwrap_or_default();
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         Ok(FsConfig {
             tag,
             socket,
@@ -1631,6 +1665,7 @@ impl FsConfig {
             queue_size,
             id,
             pci_segment,
+            bdf_device,
         })
     }
 
@@ -1756,7 +1791,7 @@ impl FwCfgItem {
 impl PmemConfig {
     pub const SYNTAX: &'static str = "Persistent memory parameters \
     \"file=<backing_file_path>,size=<persistent_memory_size>,iommu=on|off,\
-    discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>\"";
+    discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>,addr=<DD.F>\"";
 
     pub fn parse(pmem: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1766,7 +1801,8 @@ impl PmemConfig {
             .add("iommu")
             .add("discard_writes")
             .add("id")
-            .add("pci_segment");
+            .add("pci_segment")
+            .add("addr");
         parser.parse(pmem).map_err(Error::ParsePersistentMemory)?;
 
         let file = PathBuf::from(parser.get("file").ok_or(Error::ParsePmemFileMissing)?);
@@ -1790,6 +1826,10 @@ impl PmemConfig {
             .map_err(Error::ParsePersistentMemory)?
             .unwrap_or_default();
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         Ok(PmemConfig {
             file,
             size,
@@ -1797,6 +1837,7 @@ impl PmemConfig {
             discard_writes,
             id,
             pci_segment,
+            bdf_device,
         })
     }
 
@@ -1829,7 +1870,8 @@ impl ConsoleConfig {
             .add("file")
             .add("iommu")
             .add("tcp")
-            .add("socket");
+            .add("socket")
+            .add("addr");
         parser.parse(console).map_err(Error::ParseConsole)?;
 
         let mut file: Option<PathBuf> = default_consoleconfig_file();
@@ -1877,12 +1919,17 @@ impl ConsoleConfig {
             .unwrap_or(Toggle(false))
             .0;
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         Ok(Self {
             file,
             mode,
             iommu,
             socket,
             url,
+            bdf_device,
         })
     }
 }
@@ -1942,7 +1989,8 @@ impl DebugConsoleConfig {
 }
 
 impl DeviceConfig {
-    pub const SYNTAX: &'static str = "Direct device assignment parameters \"path=<device_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\"";
+    pub const SYNTAX: &'static str = "Direct device assignment parameters \"\
+    path=<device_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\"";
 
     pub fn parse(device: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -2046,7 +2094,7 @@ impl UserDeviceConfig {
 impl VdpaConfig {
     pub const SYNTAX: &'static str = "vDPA device \
         \"path=<device_path>,num_queues=<number_of_queues>,iommu=on|off,\
-        id=<device_id>,pci_segment=<segment_id>\"";
+        id=<device_id>,pci_segment=<segment_id>,addr=<DD.F>\"";
 
     pub fn parse(vdpa: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -2055,7 +2103,8 @@ impl VdpaConfig {
             .add("num_queues")
             .add("iommu")
             .add("id")
-            .add("pci_segment");
+            .add("pci_segment")
+            .add("addr");
         parser.parse(vdpa).map_err(Error::ParseVdpa)?;
 
         let path = parser
@@ -2077,12 +2126,17 @@ impl VdpaConfig {
             .map_err(Error::ParseVdpa)?
             .unwrap_or_default();
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         Ok(VdpaConfig {
             path,
             num_queues,
             iommu,
             id,
             pci_segment,
+            bdf_device,
         })
     }
 
@@ -2106,7 +2160,8 @@ impl VdpaConfig {
 
 impl VsockConfig {
     pub const SYNTAX: &'static str = "Virtio VSOCK parameters \
-        \"cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\"";
+        \"cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>,\
+        pci_segment=<segment_id>,addr=<DD.F>\"";
 
     pub fn parse(vsock: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -2115,7 +2170,8 @@ impl VsockConfig {
             .add("cid")
             .add("iommu")
             .add("id")
-            .add("pci_segment");
+            .add("pci_segment")
+            .add("addr");
         parser.parse(vsock).map_err(Error::ParseVsock)?;
 
         let socket = parser
@@ -2137,12 +2193,17 @@ impl VsockConfig {
             .map_err(Error::ParseVsock)?
             .unwrap_or_default();
 
+        let (bdf_device, _bdf_function) = parser
+            .get_pci_device_function()
+            .map_err(Error::ParsePciAddr)?;
+
         Ok(VsockConfig {
             cid,
             socket,
             iommu,
             id,
             pci_segment,
+            bdf_device,
         })
     }
 
@@ -3453,6 +3514,7 @@ mod tests {
             pci_segment: 0,
             serial: None,
             queue_affinity: None,
+            bdf_device: None,
         }
     }
 
@@ -3571,6 +3633,7 @@ mod tests {
             offload_tso: true,
             offload_ufo: true,
             offload_csum: true,
+            bdf_device: None,
         }
     }
 
@@ -3653,6 +3716,7 @@ mod tests {
             RngConfig {
                 src: PathBuf::from("/dev/random"),
                 iommu: true,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3673,6 +3737,7 @@ mod tests {
             queue_size: 1024,
             id: None,
             pci_segment: 0,
+            bdf_device: None,
         }
     }
 
@@ -3703,6 +3768,7 @@ mod tests {
             discard_writes: false,
             id: None,
             pci_segment: 0,
+            bdf_device: None,
         }
     }
 
@@ -3746,6 +3812,7 @@ mod tests {
                 file: None,
                 socket: None,
                 url: None,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3756,6 +3823,7 @@ mod tests {
                 file: None,
                 socket: None,
                 url: None,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3766,6 +3834,7 @@ mod tests {
                 file: None,
                 socket: None,
                 url: None,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3776,6 +3845,7 @@ mod tests {
                 file: None,
                 socket: None,
                 url: None,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3786,6 +3856,7 @@ mod tests {
                 file: Some(PathBuf::from("/tmp/console")),
                 socket: None,
                 url: None,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3796,6 +3867,7 @@ mod tests {
                 file: None,
                 socket: None,
                 url: None,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3806,6 +3878,7 @@ mod tests {
                 file: Some(PathBuf::from("/tmp/console")),
                 socket: None,
                 url: None,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3816,6 +3889,7 @@ mod tests {
                 file: None,
                 socket: Some(PathBuf::from("/tmp/serial.sock")),
                 url: None,
+                bdf_device: None,
             }
         );
         Ok(())
@@ -3867,6 +3941,7 @@ mod tests {
             iommu: false,
             id: None,
             pci_segment: 0,
+            bdf_device: None,
         }
     }
 
@@ -3911,6 +3986,7 @@ mod tests {
                 iommu: false,
                 id: None,
                 pci_segment: 0,
+                bdf_device: None,
             }
         );
         assert_eq!(
@@ -3921,6 +3997,7 @@ mod tests {
                 iommu: true,
                 id: None,
                 pci_segment: 0,
+                bdf_device: None,
             }
         );
         Ok(())
@@ -4173,6 +4250,7 @@ mod tests {
             rng: RngConfig {
                 src: PathBuf::from("/dev/urandom"),
                 iommu: false,
+                bdf_device: None,
             },
             balloon: None,
             fs: None,
@@ -4183,6 +4261,7 @@ mod tests {
                 iommu: false,
                 socket: None,
                 url: None,
+                bdf_device: None,
             },
             console: ConsoleConfig {
                 file: None,
@@ -4190,6 +4269,7 @@ mod tests {
                 iommu: false,
                 socket: None,
                 url: None,
+                bdf_device: None,
             },
             #[cfg(target_arch = "x86_64")]
             debug_console: DebugConsoleConfig::default(),
@@ -4485,6 +4565,7 @@ mod tests {
             id: None,
             iommu: true,
             pci_segment: 1,
+            bdf_device: None,
         });
         still_valid_config.validate().unwrap();
 
@@ -4561,6 +4642,7 @@ mod tests {
             id: None,
             iommu: false,
             pci_segment: 1,
+            bdf_device: None,
         });
         assert_eq!(
             invalid_config.validate(),
