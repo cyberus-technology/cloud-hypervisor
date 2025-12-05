@@ -210,6 +210,10 @@ pub trait Hypervisor: Send + Sync {
     /// and the TILEDATA state component holds the actual elements of these tiles used by matrix operations.
     #[cfg(target_arch = "x86_64")]
     fn enable_amx_state_components(&self) -> Result<()> {
+        // TODO: Remove this and go with upstream solution
+        use crate::arch::x86::XSAVE_FAM_LENGTH;
+        let size = self.check_extension_int(kvm_ioctls::Cap::Xsave2) as usize;
+        let _ = XSAVE_FAM_LENGTH.set(size);
         let cpu_vendor = self.get_cpu_vendor();
         crate::arch::x86::amx_supported(cpu_vendor)
             .map_err(HypervisorError::CouldNotEnableAmxStateComponents)?;

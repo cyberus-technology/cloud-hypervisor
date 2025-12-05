@@ -317,7 +317,7 @@ pub struct MsrEntry {
 ///
 /// IMPORTANT: This static should only be updated via methods on [`XsaveState`].
 #[cfg(feature = "kvm")]
-static XSAVE_FAM_LENGTH: OnceLock<usize> = OnceLock::new();
+pub(crate) static XSAVE_FAM_LENGTH: OnceLock<usize> = OnceLock::new();
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct XsaveState(#[cfg(feature = "kvm")] pub(crate) kvm_bindings::Xsave);
