@@ -39,7 +39,7 @@ impl CpuProfile {
             ),
         }?;
 
-        if amx {
+        if !amx {
             for adj in data.adjustments.iter_mut() {
                 if adj.0.sub_leaf.start() != adj.0.sub_leaf.end() {
                     continue;
