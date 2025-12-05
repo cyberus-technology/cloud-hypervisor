@@ -139,10 +139,52 @@ impl CpuidOutputRegisterAdjustments {
         }
         // Check that we found every value that was supposed to be replaced with something else than 0
         let mut missing_entry = false;
+
+        let eax_0xd_0 = cpuid
+            .iter()
+            .find(|entry| (entry.function == 0xd) && (entry.index == 0))
+            .map(|entry| entry.eax)
+            .unwrap_or(0);
+        let ecx_0xd_1 = cpuid
+            .iter()
+            .find(|entry| (entry.function == 0xd) && (entry.index == 1))
+            .map(|entry| entry.ecx)
+            .unwrap_or(0);
+
+        let edx_0xd_0 = cpuid
+            .iter()
+            .find(|entry| (entry.function == 0xd) && (entry.index == 0))
+            .map(|entry| entry.edx)
+            .unwrap_or(0);
+        let edx_0xd_1 = cpuid
+            .iter()
+            .find(|entry| (entry.function == 0xd) && (entry.index == 1))
+            .map(|entry| entry.edx)
+            .unwrap_or(0);
+
         for (param, adjustment) in adjustments {
             if adjustment.replacements == 0 {
                 continue;
             }
+            let sub_start = *param.sub_leaf.start();
+            let sub_end = *param.sub_leaf.end();
+            if (param.leaf == 0xd) && (sub_start >= 2) && (sub_start < 32) && (sub_start == sub_end)
+            {
+                if (((1 << sub_start) & eax_0xd_0) == 0) && (((1 << sub_start) & ecx_0xd_1) == 0) {
+                    // This means that the sub-leaf is to be considered invalid anyway and it is OK if we don't find it
+                    continue;
+                }
+            }
+
+            if (param.leaf == 0xd) && (sub_start >= 32) && (sub_start < 64) {
+                if (((1 << (sub_start - 32)) & edx_0xd_0) == 0)
+                    && (((1 << (sub_start - 32)) & edx_0xd_1) == 0)
+                {
+                    // This means that the sub-leaf is to be considered invalid anyway and it is OK if we don't find it
+                    continue;
+                }
+            }
+
             if param.leaf == 0xd && (param.sub_leaf.contains(&3) || param.sub_leaf.contains(&4)) {
                 // TODO: Fix this via policies!
                 continue;
