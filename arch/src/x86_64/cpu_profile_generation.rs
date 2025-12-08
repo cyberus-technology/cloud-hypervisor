@@ -66,8 +66,8 @@ fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::
     for (b, brand_byte) in cpu_vendor_str
         .as_bytes()
         .iter()
-        .chain(profile_name.as_bytes())
         .chain(std::iter::once(&b' '))
+        .chain(profile_name.as_bytes())
         .zip(brand_string_bytes.iter_mut())
     {
         *brand_byte = *b;
