@@ -58,7 +58,7 @@ fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::
         .expect("Should be possible to serialize CPU vendor to a string");
     let cpu_vendor_str = cpu_vendor_str.trim_start_matches('"').trim_end_matches('"');
     let mut brand_string_bytes = [0_u8; 4 * 3 * 4];
-    if cpu_vendor_str.len() + profile_name.len() > brand_string_bytes.len() {
+    if cpu_vendor_str.len() + 1 + profile_name.len() > brand_string_bytes.len() {
         return Err(anyhow!(
             "The profile name is too long. Try using a shorter name"
         ));
@@ -67,6 +67,7 @@ fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::
         .as_bytes()
         .iter()
         .chain(profile_name.as_bytes())
+        .chain(std::iter::once(&b' '))
         .zip(brand_string_bytes.iter_mut())
     {
         *brand_byte = *b;
