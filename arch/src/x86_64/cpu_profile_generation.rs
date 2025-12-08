@@ -22,7 +22,7 @@ use crate::x86_64::{CpuidOutputRegisterAdjustments, CpuidReg};
 pub fn generate_profile_data(
     mut writer: impl Write,
     hypervisor: &dyn Hypervisor,
-    profile_name: String,
+    profile_name: &str,
 ) -> anyhow::Result<()> {
     let cpu_vendor = hypervisor.get_cpu_vendor();
     if cpu_vendor != CpuVendor::Intel {
@@ -53,7 +53,7 @@ pub fn generate_profile_data(
 }
 
 /// Prepare the bytes which the brand string should consist of
-fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: String) -> anyhow::Result<[u8; 48]> {
+fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::Result<[u8; 48]> {
     let cpu_vendor_str: String = serde_json::to_string(&cpu_vendor)
         .expect("Should be possible to serialize CPU vendor to a string");
     let mut brand_string_bytes = [0_u8; 4 * 3 * 4];
