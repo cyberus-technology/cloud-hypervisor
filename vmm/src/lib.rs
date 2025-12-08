@@ -22,6 +22,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender, TrySendError};
 use std::sync::{Arc, Barrier, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
@@ -1086,6 +1087,13 @@ struct SendAdditionalConnections {
     guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
     threads: Vec<thread::JoinHandle<()>>,
     channels: Vec<std::sync::mpsc::SyncSender<SendMemoryThreadMessage>>,
+    // If an error occurs in one of the worker threads, the worker signals this
+    // using this flag. Only the main thread checks this variable, the other
+    // workers will be stopped in the destructor.
+    cancel: Arc<AtomicBool>,
+    // The first worker encountering an error will transmit the error using
+    // this channel.
+    error_rx: std::sync::mpsc::Receiver<MigratableError>,
 }
 
 /// Send memory from the given table.
@@ -1098,7 +1106,7 @@ fn vm_send_memory(
         return Ok(());
     }
 
-    Request::memory(table.length()).write_to(socket).unwrap();
+    Request::memory(table.length()).write_to(socket)?;
     table.write_to(socket)?;
     // And then the memory itself
     send_memory_regions(guest_memory, table, socket)?;
@@ -1139,6 +1147,8 @@ impl SendAdditionalConnections {
     ) -> std::result::Result<Self, MigratableError> {
         let mut threads = Vec::new();
         let mut channels = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (error_tx, error_rx) = std::sync::mpsc::channel::<MigratableError>();
 
         for n in 0..(connections.get() - 1) {
             let socket = (match send_migration_socket(destination) {
@@ -1157,6 +1167,8 @@ impl SendAdditionalConnections {
             let (send, recv) = std::sync::mpsc::sync_channel::<SendMemoryThreadMessage>(
                 Self::BUFFERED_REQUESTS_PER_THREAD,
             );
+            let cancel = cancel.clone();
+            let err_tx = error_tx.clone();
 
             let thread = thread::spawn(move || {
                 info!("Spawned thread to send VM memory.");
@@ -1167,9 +1179,27 @@ impl SendAdditionalConnections {
                 for msg in recv {
                     match msg {
                         SendMemoryThreadMessage::Memory(table) => {
-                            vm_send_memory(&guest_mem, &mut socket, &table).unwrap();
-                            total_sent +=
-                                table.ranges().iter().map(|range| range.length).sum::<u64>();
+                            match vm_send_memory(&guest_mem, &mut socket, &table) {
+                                Ok(()) => {
+                                    total_sent += table
+                                        .ranges()
+                                        .iter()
+                                        .map(|range| range.length)
+                                        .sum::<u64>();
+                                }
+                                Err(e) => {
+                                    // Only the first thread that encounters an
+                                    // error sends it to the main thread.
+                                    if cancel.swap(true, Ordering::AcqRel)
+                                        && let Err(e) = err_tx.send(e)
+                                    {
+                                        error!("Could not send error to main thread: {e}");
+                                    }
+                                    // After that we exit gracefully. Note that
+                                    // this also closes our mpsc channel.
+                                    break;
+                                }
+                            }
                         }
                         SendMemoryThreadMessage::Barrier(barrier) => {
                             barrier.wait();
@@ -1190,6 +1220,8 @@ impl SendAdditionalConnections {
             guest_memory: guest_mem.clone(),
             threads,
             channels,
+            cancel,
+            error_rx,
         })
     }
 
@@ -1238,6 +1270,11 @@ impl SendAdditionalConnections {
         // The chunk size is chosen to be big enough so that even very fast
         // links need some milliseconds to send it.
         'next_partition: for chunk in table.partition(Self::CHUNK_SIZE) {
+            // If one of the workers encountered an error, we return it.
+            if self.cancel.load(Ordering::Acquire) {
+                return Err(self.error_rx.recv().unwrap());
+            }
+
             let chunk = Arc::new(chunk);
 
             // Find the first free channel and send the chunk via it.
@@ -1271,9 +1308,14 @@ impl SendAdditionalConnections {
 impl Drop for SendAdditionalConnections {
     fn drop(&mut self) {
         info!("Sending disconnect message to channels");
-        self.channels
-            .drain(..)
-            .for_each(|channel| channel.send(SendMemoryThreadMessage::Disconnect).unwrap());
+        self.channels.drain(..).for_each(|channel| {
+            // One of the workers may have died and thus closed the channel.
+            // Thus we cannot simply do send().unwrap().
+            let e = channel.send(SendMemoryThreadMessage::Disconnect);
+            if let Err(e) = e {
+                error!("Could not send disconnect message to worker thread: {e}");
+            }
+        });
 
         info!("Waiting for threads to finish");
         self.threads
