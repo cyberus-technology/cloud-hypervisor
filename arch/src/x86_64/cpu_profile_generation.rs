@@ -56,6 +56,7 @@ pub fn generate_profile_data(
 fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::Result<[u8; 48]> {
     let cpu_vendor_str: String = serde_json::to_string(&cpu_vendor)
         .expect("Should be possible to serialize CPU vendor to a string");
+    let cpu_vendor_str = cpu_vendor_str.trim_start_matches('"').trim_end_matches('"');
     let mut brand_string_bytes = [0_u8; 4 * 3 * 4];
     if cpu_vendor_str.len() + profile_name.len() > brand_string_bytes.len() {
         return Err(anyhow!(

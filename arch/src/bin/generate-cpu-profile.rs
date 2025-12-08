@@ -3,7 +3,7 @@
     feature = "cpu_profile_generation",
     feature = "kvm"
 ))]
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use clap::{Arg, Command};
 use std::io::BufWriter;
 
@@ -13,9 +13,7 @@ fn main() -> anyhow::Result<()> {
         .arg_required_else_help(true)
         .arg(
             Arg::new("name")
-                .help(
-                    "The name of the CPU profile. The name may may only contain ASCII characters.",
-                )
+                .help("The name to give the CPU profile")
                 .num_args(1)
                 .required(true),
         )
