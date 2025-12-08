@@ -1,16 +1,27 @@
-use std::io::BufWriter;
-
-use anyhow::{Context, anyhow};
-#[cfg(all(
+#![cfg(all(
     target_arch = "x86_64",
     feature = "cpu_profile_generation",
     feature = "kvm"
 ))]
+use anyhow::{Context, anyhow};
+use clap::{Arg, Command};
+use std::io::BufWriter;
+
 fn main() -> anyhow::Result<()> {
-    // TODO: Consider using clap for argument parsing and allow the user to specify it with --name
-    let profile_name = std::env::args()
-        .nth(1)
-        .ok_or(anyhow!("A name for the profile needs to be provided"))?;
+    let cmd_arg = Command::new("generate-cpu-profile")
+        .version(env!("CARGO_PKG_VERSION"))
+        .arg_required_else_help(true)
+        .arg(
+            Arg::new("name")
+                .help(
+                    "The name of the CPU profile. The name may may only contain ASCII characters.",
+                )
+                .num_args(1)
+                .required(true),
+        )
+        .get_matches();
+
+    let profile_name = cmd_arg.get_one::<String>("name").unwrap();
 
     let hypervisor = hypervisor::new().context("Could not obtain hypervisor")?;
     // TODO: Consider letting the user provide a file path as a target instead of writing to stdout.
