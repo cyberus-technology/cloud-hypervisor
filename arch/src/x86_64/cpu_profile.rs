@@ -40,6 +40,7 @@ impl CpuProfile {
         }?;
 
         if !amx {
+            // In this case we will need to wipe out the AMX tile state components (if they are included in the profile)
             for adj in data.adjustments.iter_mut() {
                 if adj.0.sub_leaf.start() != adj.0.sub_leaf.end() {
                     continue;
@@ -47,7 +48,6 @@ impl CpuProfile {
                 let sub_leaf = *adj.0.sub_leaf.start();
                 let leaf = adj.0.leaf;
                 if (leaf == 0xd) && (sub_leaf == 0) && (adj.0.register == CpuidReg::EAX) {
-                    // TODO: Explain parameters
                     adj.1.replacements &= !((1 << 17) | (1 << 18));
                 }
 
@@ -209,10 +209,6 @@ impl CpuidOutputRegisterAdjustments {
                 }
             }
 
-            if param.leaf == 0xd && (param.sub_leaf.contains(&3) || param.sub_leaf.contains(&4)) {
-                // TODO: Fix this via policies!
-                continue;
-            }
             if !cpuid.iter().any(|entry| {
                 (entry.function == param.leaf) && (param.sub_leaf.contains(&entry.index))
             }) {
