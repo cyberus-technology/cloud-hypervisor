@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::ops::RangeInclusive;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use hypervisor::CpuVendor;
 use hypervisor::arch::x86::CpuIdEntry;
 use hypervisor::{Hypervisor, HypervisorError, HypervisorType};
@@ -22,11 +22,13 @@ use crate::x86_64::{CpuidOutputRegisterAdjustments, CpuidReg};
 pub fn generate_profile_data(
     mut writer: impl Write,
     hypervisor: &dyn Hypervisor,
+    profile_name: String,
 ) -> anyhow::Result<()> {
     let cpu_vendor = hypervisor.get_cpu_vendor();
     if cpu_vendor != CpuVendor::Intel {
         unimplemented!("CPU profiles can only be generated for Intel CPUs at this point in time");
     }
+
     let hypervisor_type = hypervisor.hypervisor_type();
     // This is just a reality check.
     if hypervisor_type != HypervisorType::Kvm {
@@ -34,7 +36,12 @@ pub fn generate_profile_data(
             "CPU profiles can only be generated when using KVM as the hypervisor at this point in time"
         );
     }
-    let supported_cpuid_sorted = supported_cpuid_sorted(hypervisor)?;
+
+    let brand_string_bytes = cpu_brand_string_bytes(cpu_vendor, profile_name)?;
+    let cpuid = supported_cpuid(hypervisor)?;
+    let cpuid = overwrite_brand_string(cpuid, brand_string_bytes);
+    let supported_cpuid_sorted = sort_entries(cpuid);
+
     generate_cpu_profile_data_with(
         hypervisor_type,
         cpu_vendor,
@@ -45,6 +52,26 @@ pub fn generate_profile_data(
     )
 }
 
+/// Prepare the bytes which the brand string should consist of
+fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: String) -> anyhow::Result<[u8; 48]> {
+    let cpu_vendor_str: String = serde_json::to_string(&cpu_vendor)
+        .expect("Should be possible to serialize CPU vendor to a string");
+    let mut brand_string_bytes = [0_u8; 4 * 3 * 4];
+    if cpu_vendor_str.len() + profile_name.len() > brand_string_bytes.len() {
+        return Err(anyhow!(
+            "The profile name is too long. Try using a shorter name"
+        ));
+    }
+    for (b, brand_byte) in cpu_vendor_str
+        .as_bytes()
+        .iter()
+        .chain(profile_name.as_bytes())
+        .zip(brand_string_bytes.iter_mut())
+    {
+        *brand_byte = *b;
+    }
+    Ok(brand_string_bytes)
+}
 /// Computes [`CpuProfileData`] based on the given sorted vector of CPUID entries, hypervisor type, cpu_vendor
 /// and cpuid_definitions.
 ///
@@ -127,12 +154,11 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
         .context("CPU profile generation failed: Unable to flush cpu profile data")
 }
 
-/// Get the supported CPUID entries from the hypervisor and make sure that they are sorted by function and index
-fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry>> {
+/// Get as many of the supported CPUID entries from the hypervisor as possible.
+fn supported_cpuid(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry>> {
     // Check for AMX compatibility. If this is supported we need to call arch_prctl before requesting the supported
     // CPUID entries from the hypervisor. We simply call the enable_amx_state_components method on the hypervisor and
     // ignore any AMX not supported error to achieve this.
-
     match hypervisor.enable_amx_state_components() {
         Ok(()) => {}
         Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => match amx_err {
@@ -148,11 +174,43 @@ fn supported_cpuid_sorted(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<Cpu
     hypervisor
         .get_supported_cpuid()
         .context("CPU profile data generation failed")
-        .map(sort_entries)
 }
 
+/// Overwrite the Processor brand string with the giveb `brand_string_bytes`
+fn overwrite_brand_string(
+    mut cpuid: Vec<CpuIdEntry>,
+    brand_string_bytes: [u8; 48],
+) -> Vec<CpuIdEntry> {
+    let mut iter = brand_string_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c));
+    let mut overwrite = |leaf: u32| CpuIdEntry {
+        function: leaf,
+        index: 0,
+        flags: 0,
+        eax: iter.next().unwrap_or(0),
+        ebx: iter.next().unwrap_or(0),
+        ecx: iter.next().unwrap_or(0),
+        edx: iter.next().unwrap_or(0),
+    };
+    for leaf in [0x80000002, 0x80000003, 0x80000004] {
+        if let Some(entry) = cpuid
+            .iter_mut()
+            .find(|entry| (entry.function == leaf) && (entry.index == 0))
+        {
+            *entry = overwrite(leaf);
+        } else {
+            cpuid.push(overwrite(leaf));
+        }
+    }
+    cpuid
+}
+
+/// Sort the CPUID entries by function and index
 fn sort_entries(mut cpuid: Vec<CpuIdEntry>) -> Vec<CpuIdEntry> {
-    cpuid.sort_by(|entry, other_entry| {
+    cpuid.sort_unstable_by(|entry, other_entry| {
         let fn_cmp = entry.function.cmp(&other_entry.function);
         if fn_cmp == core::cmp::Ordering::Equal {
             entry.index.cmp(&other_entry.index)
