@@ -7,6 +7,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 use std::sync::Arc;
+pub mod cpuid_definitions;
 pub mod interrupts;
 pub mod layout;
 mod mpspec;
@@ -20,6 +21,7 @@ use linux_loader::loader::bootparam::{boot_params, setup_header};
 use linux_loader::loader::elf::start_info::{
     hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vm_memory::{
     Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
@@ -181,7 +183,7 @@ pub fn get_max_x2apic_id(topology: (u16, u16, u16, u16)) -> u32 {
     )
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CpuidReg {
     EAX,
     EBX,
