@@ -598,7 +598,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<154> = const {
                     policy: ProfilePolicy::Static(0),
                     migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits,
                 },
-                // TODO: Remove? CpuidDescription{ short: "ia64", description: "Legacy IA-64 (Itanium) support bit, now reserved", bits_range: (30, 30), policy: ProfilePolicy::Overwrite(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
+                // TODO: Remove? CpuidDescription{ short: "ia64", description: "Legacy IA-64 (Itanium) support bit, now reserved", bits_range: (30, 30), policy: ProfilePolicy::Static(0), migration_compatibility_req: MigrationCompatibilityRequirement::ContainsBits },
                 // TODO: Not really sure what the default should be for PBE. It seems like it is something that needs to be enabled via the IA32_MISC_ENABLE MSR hence perhaps this should be set via CPU features?
                 // MSR related
                 ValueDefinition {

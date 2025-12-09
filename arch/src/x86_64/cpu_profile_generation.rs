@@ -178,7 +178,7 @@ fn supported_cpuid(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry
         .context("CPU profile data generation failed")
 }
 
-/// Overwrite the Processor brand string with the giveb `brand_string_bytes`
+/// Overwrite the Processor brand string with the given `brand_string_bytes`
 fn overwrite_brand_string(
     mut cpuid: Vec<CpuIdEntry>,
     brand_string_bytes: [u8; 48],
