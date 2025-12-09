@@ -92,9 +92,9 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
     let mut adjustments: Vec<(Parameters, CpuidOutputRegisterAdjustments)> = Vec::new();
 
     for (parameter, values) in processor_cpuid_definitions
-        .0
+        .as_slice()
         .iter()
-        .chain(hypervisor_cpuid_definitions.0.iter())
+        .chain(hypervisor_cpuid_definitions.as_slice().iter())
     {
         for (sub_leaf_range, maybe_matching_register_output_value) in
             extract_parameter_matches(parameter, &supported_cpuid_sorted)

@@ -544,7 +544,7 @@ impl CpuidFeatureEntry {
                             // TODO: Check against the CPU vendor before using the intel definitions
                             if let Some((_, defs)) =
                                 cpuid_definitions::intel::INTEL_CPUID_DEFINITIONS
-                                    .0
+                                    .as_slice()
                                     .iter()
                                     .find(|(param, _)| {
                                         (param.leaf == entry.function)

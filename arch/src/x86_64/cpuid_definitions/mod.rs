@@ -122,5 +122,11 @@ impl ValueDefinitions {
 // TODO: Consider introducing a const as_slice method to make it impossible for the parameter -> value definitions
 // constraints being broken.
 pub struct CpuidDefinitions<const NUM_PARAMETERS: usize>(
-    pub [(Parameters, ValueDefinitions); NUM_PARAMETERS],
+    [(Parameters, ValueDefinitions); NUM_PARAMETERS],
 );
+
+impl<const NUM_PARAMETERS: usize> CpuidDefinitions<NUM_PARAMETERS> {
+    pub const fn as_slice(&self) -> &[(Parameters, ValueDefinitions); NUM_PARAMETERS] {
+        &self.0
+    }
+}
