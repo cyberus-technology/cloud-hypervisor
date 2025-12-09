@@ -74,6 +74,11 @@ pub struct ValueDefinition {
     /// A description of the value obtainable through CPUID
     pub description: &'static str,
     /// The range of bits in the output register corresponding to this feature or value.
+    ///
+    /// This is not a `RangeInclusive<u8>` because that type does unfortunately not implement `Copy`.
+    //
+    // TODO: `Copy` does not seem to be necessary for the time being, maybe we could implement this in terms of
+    // a `RangeInclusive<u8>`?
     pub bits_range: (u8, u8),
     /// The policy corresponding to this value when building CPU profiles.
     pub policy: ProfilePolicy,
