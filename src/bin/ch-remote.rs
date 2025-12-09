@@ -1085,6 +1085,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
                     .index(1)
                     // Live migration with net_fds not supported in ch-remote.
                     .help("<receiver_url>"),
+            )
+            .arg(
+                Arg::new("tls-dir")
+                    .long("tls-dir")
+                    .help("directory with TLS certificates")
+                    .num_args(1),
             ),
         Command::new("remove-device")
             .about("Remove VFIO and PCI device")
@@ -1183,6 +1189,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
                     .long("local")
                     .num_args(0)
                     .action(ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("tls-dir")
+                    .long("tls-dir")
+                    .help("directory with TLS certificates")
+                    .num_args(1),
             ),
         Command::new("shutdown").about("Shutdown the VM"),
         Command::new("shutdown-vmm").about("Shutdown the VMM"),
