@@ -396,9 +396,7 @@ impl XsaveState {
                 ((size as usize) - size_of::<kvm_bindings::kvm_xsave>())
                     .div_ceil(size_of::<kvm_bindings::__u32>())
             };
-            XSAVE_FAM_LENGTH
-                .set(fam_length)
-                .expect("This should only be set once");
+            let _ = XSAVE_FAM_LENGTH.set(fam_length);
         }
 
         Ok(())
