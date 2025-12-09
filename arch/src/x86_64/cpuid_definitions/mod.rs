@@ -66,21 +66,6 @@ pub enum ProfilePolicy {
     Static(u32),
 }
 
-/// Describes how values within a CPUID output on two different hosts must relate to another in order for live-migration to be considered acceptable.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum MigrationCompatibilityRequirement {
-    /// The value must be equal.
-    Eq,
-    /// The target host must have at least the same bits set.
-    ContainsBits,
-    /// The target's value must be greater or equal to the source's.
-    GtEq,
-    /// The target's value must be less than or equal to the source's.
-    LtEq,
-    /// The value does not have to be compared.
-    Ignore,
-}
-
 /// A description of a range of bits in a register populated by the CPUID instruction with specific parameters.
 #[derive(Clone, Copy, Debug)]
 pub struct ValueDefinition {
@@ -92,7 +77,6 @@ pub struct ValueDefinition {
     pub bits_range: (u8, u8),
     /// The policy corresponding to this value when building CPU profiles.
     pub policy: ProfilePolicy,
-    pub migration_compatibility_req: MigrationCompatibilityRequirement,
 }
 
 /// Describes values within a register populated by the CPUID instruction with specific parameters.
