@@ -965,7 +965,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -1312,6 +1312,370 @@
           "end": 4
         },
         "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 5,
+          "end": 5
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 6,
+          "end": 6
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 7,
+          "end": 7
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 8,
+          "end": 8
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 9,
+          "end": 9
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 10,
+          "end": 63
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 3,
+          "end": 3
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 4,
+          "end": 4
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 3,
+          "end": 3
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 4,
+          "end": 4
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 3,
+          "end": 3
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 4,
+          "end": 4
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 3,
+          "end": 3
+        },
+        "register": "EDX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 4,
+          "end": 4
+        },
+        "register": "EDX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 5,
+          "end": 5
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000040",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 6,
+          "end": 6
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000200",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 7,
+          "end": 7
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000400",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 8,
+          "end": 8
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 9,
+          "end": 9
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000008",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 10,
+          "end": 63
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 5,
+          "end": 5
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000440",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 6,
+          "end": 6
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000480",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 7,
+          "end": 7
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000680",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 8,
+          "end": 8
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 9,
+          "end": 9
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000a80",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0x0000000d",
+        "sub_leaf": {
+          "start": 10,
+          "end": 63
+        },
+        "register": "EBX"
       },
       {
         "replacements": "0x00000000",
@@ -2518,8 +2882,8 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "replacements": "0x65746e49",
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2532,8 +2896,8 @@
         "register": "EBX"
       },
       {
-        "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "replacements": "0x6b53206c",
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2546,8 +2910,8 @@
         "register": "ECX"
       },
       {
-        "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "replacements": "0x6b616c79",
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2560,8 +2924,8 @@
         "register": "EDX"
       },
       {
-        "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "replacements": "0x00000065",
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2575,7 +2939,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2589,7 +2953,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2603,7 +2967,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2617,7 +2981,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2631,7 +2995,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2645,7 +3009,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2659,7 +3023,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
@@ -2673,7 +3037,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0xffffffff"
+        "mask": "0x00000000"
       }
     ],
     [
