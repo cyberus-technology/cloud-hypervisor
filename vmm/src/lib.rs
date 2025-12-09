@@ -35,7 +35,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{io, mem, result, thread};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 #[cfg(feature = "dbus_api")]
 use api::dbus::{DBusApiOptions, DBusApiShutdownChannels};
 use api::http::HttpApiHandle;
@@ -2353,6 +2353,16 @@ impl Vmm {
         // mostly about feature compatibility.
         let dest_cpuid = &{
             let vm_config = &src_vm_config.lock().unwrap();
+
+            if vm_config.cpus.features.amx {
+                // Need to enable AMX tile state components before generating common cpuid
+                // as this affects what Hypervisor::get_supported_cpuid returns.
+                hypervisor::arch::x86::XsaveState::enable_amx_state_components(
+                    self.hypervisor.as_ref(),
+                )
+                .context("Unable to enable AMX before generating common CPUID")
+                .map_err(MigratableError::MigrateReceive)?;
+            }
 
             let phys_bits = vm::physical_bits(&self.hypervisor, vm_config.cpus.max_phys_bits);
             arch::generate_common_cpuid(
