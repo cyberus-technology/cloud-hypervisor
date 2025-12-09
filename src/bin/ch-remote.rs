@@ -518,7 +518,7 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                 matches
                     .subcommand_matches("send-migration")
                     .unwrap()
-                    .get_one::<PathBuf>("tls_dir")
+                    .get_one::<PathBuf>("tls-dir")
                     .cloned(),
             );
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
@@ -533,9 +533,9 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .unwrap()
                     .to_owned(),
                 matches
-                    .subcommand_matches("receive_migration")
+                    .subcommand_matches("receive-migration")
                     .unwrap()
-                    .get_one::<PathBuf>("tls_dir")
+                    .get_one::<PathBuf>("tls-dir")
                     .cloned(),
             );
             simple_api_command(
