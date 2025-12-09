@@ -62,8 +62,8 @@ pub enum ProfilePolicy {
     Passthrough,
     /// Set the following hardcoded value in the CPU profile.
     ///
-    /// This variant is typically used for features/values that don't work well with live migration (even when using the exact same physical CPU model)
-    Overwrite(u32),
+    /// This variant is typically used for features/values that don't work well with live migration (even when using the exact same physical CPU model).
+    Static(u32),
 }
 
 /// Describes how values within a CPUID output on two different hosts must relate to another in order for live-migration to be considered acceptable.

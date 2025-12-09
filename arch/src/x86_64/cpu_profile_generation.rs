@@ -117,7 +117,7 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
                         let (first_bit_pos, last_bit_pos) = value.bits_range;
                         mask |= bit_range_mask(first_bit_pos, last_bit_pos);
                     }
-                    ProfilePolicy::Overwrite(overwrite_value) => {
+                    ProfilePolicy::Static(overwrite_value) => {
                         replacements |= overwrite_value << value.bits_range.0;
                     }
                     ProfilePolicy::Inherit => {
