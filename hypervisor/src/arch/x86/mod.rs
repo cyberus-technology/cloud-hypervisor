@@ -17,11 +17,7 @@ use std::sync::OnceLock;
 
 use thiserror::Error;
 
-use crate::{CpuVendor, Hypervisor};
-
-use thiserror::Error;
-
-use crate::CpuVendor;
+use crate::{CpuVendor, CpuVendor, Hypervisor};
 
 #[cfg(all(feature = "mshv_emulator", target_arch = "x86_64"))]
 pub mod emulator;
