@@ -26,3 +26,7 @@ fo = "fo"
 fpr = "fpr"
 # Public Linux API
 msg_controllen = "msg_controllen"
+tme = "tme"
+l3c_qm_conver_factor = "l3c_qm_conver_factor"
+IA32_PMC_GPn_CFG_C = "IA32_PMC_GPn_CFG_C"
+IA32_PMC_FXm_CFG_C = "IA32_PMC_FXm_CFG_C"
