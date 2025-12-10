@@ -5,6 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::x86_64::CpuidReg;
 
+pub mod intel;
+
 pub(in crate::x86_64) fn serialize_as_hex<S: Serializer>(
     input: &u32,
     serializer: S,
