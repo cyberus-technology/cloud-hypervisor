@@ -2194,6 +2194,7 @@ impl Vmm {
     /// This function performs necessary after-migration cleanup only in the
     /// good case. Callers are responsible for properly handling failed
     /// migrations.
+    #[allow(unused_assignments)] // because of `s.total_time =`
     fn send_migration(
         vm: &mut Vm,
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
