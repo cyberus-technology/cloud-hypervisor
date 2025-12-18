@@ -35,6 +35,9 @@ pub enum TlsError {
 
     #[error("Error during TLS handshake: {0}")]
     HandshakeError(String),
+
+    #[error("Error handling PEM file")]
+    RustlsPemError(#[from] rustls::pki_types::pem::Error),
 }
 
 // This TlsStream will be later encapsulated in a SocketStream. Thus it has to
@@ -186,19 +189,19 @@ pub struct TlsConnectionWrapper {
 }
 
 impl TlsConnectionWrapper {
-    pub fn new(cert_dir: &Path) -> Self {
+    pub fn new(cert_dir: &Path) -> Result<Self, MigratableError> {
         let certs = CertificateDer::pem_file_iter(cert_dir.join("server-cert.pem"))
-            .unwrap()
-            .map(|cert| cert.unwrap())
-            .collect();
-        let key = PrivateKeyDer::from_pem_file(cert_dir.join("server-key.pem")).unwrap();
+            .map_err(TlsError::RustlsPemError)?
+            .map(|cert| cert.map_err(TlsError::RustlsPemError))
+            .collect::<Result<Vec<CertificateDer<'_>>, TlsError>>()?;
+        let key = PrivateKeyDer::from_pem_file(cert_dir.join("server-key.pem"))
+            .map_err(TlsError::RustlsPemError)?;
         let config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
-            .map_err(TlsError::RustlsError)
-            .unwrap();
+            .map_err(TlsError::RustlsError)?;
         let config = Arc::new(config);
-        Self { config }
+        Ok(Self { config })
     }
 
     pub fn wrap(
@@ -232,8 +235,9 @@ pub fn client_stream(
     let mut root_store = RootCertStore::empty();
     root_store.add_parsable_certificates(
         CertificateDer::pem_file_iter(cert_dir.join("ca-cert.pem"))
-            .expect("Cannot open CA file")
-            .map(|result| result.unwrap()),
+            .map_err(TlsError::RustlsPemError)?
+            .map(|cert| cert.map_err(TlsError::RustlsPemError))
+            .collect::<Result<Vec<CertificateDer<'_>>, TlsError>>()?,
     );
     let config = ClientConfig::builder()
         .with_root_certificates(root_store)

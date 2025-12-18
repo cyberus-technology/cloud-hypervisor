@@ -1500,7 +1500,7 @@ fn receive_migration_listener(
         if let Some(tls_dir) = &receiver_data_migration.tls_dir {
             Ok(ReceiveListener::Tls(
                 listener,
-                TlsConnectionWrapper::new(tls_dir),
+                TlsConnectionWrapper::new(tls_dir)?,
             ))
         } else {
             Ok(ReceiveListener::Tcp(listener))
