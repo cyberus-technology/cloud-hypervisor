@@ -1484,7 +1484,7 @@ fn receive_migration_listener(
         } else {
             Ok(ReceiveListener::Tls(
                 listener,
-                TlsConnectionWrapper::new(receiver_data_migration.tls_dir.as_ref().unwrap()),
+                TlsConnectionWrapper::new(receiver_data_migration.tls_dir.as_ref().unwrap())?,
             ))
         }
     } else if let Some(path) = receiver_data_migration.receiver_url.strip_prefix("unix:") {
