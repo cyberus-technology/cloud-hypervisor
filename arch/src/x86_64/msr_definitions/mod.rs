@@ -4,6 +4,7 @@
 //
 
 use serde::{Deserialize, Serialize};
+pub mod intel;
 
 use crate::{deserialize_u32_hex, serialize_u32_hex};
 /// The register address of an MSR
