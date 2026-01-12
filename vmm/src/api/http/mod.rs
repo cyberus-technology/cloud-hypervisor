@@ -421,8 +421,9 @@ impl HttpWorkerThreads {
                                     // Notify the HTTP server thread.
                                     response_event.write(1).ok();
                                 }
-                                Err(e) => {
-                                    error!("HTTP worker thread {id}: error receiving request {e}");
+                                Err(_) => {
+                                    // We assume that the other side of the channel
+                                    // closed because the VMM received a shutdown request.
                                     break;
                                 }
                             }
