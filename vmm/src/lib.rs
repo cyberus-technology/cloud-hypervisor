@@ -47,6 +47,7 @@ use thiserror::Error;
 use tracer::trace_scoped;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::bitmap::AtomicBitmap;
+use vm_migration::progress::MigrationProgress;
 use vm_migration::protocol::*;
 use vm_migration::{
     MemoryMigrationContext, Migratable, MigratableError, OngoingMigrationContext, Pausable,
@@ -3065,6 +3066,10 @@ impl RequestHandler for Vmm {
                 Err(MigratableError::MigrateSend(e.spawn_error.into()))
             }
         }
+    }
+
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
+        None
     }
 }
 
