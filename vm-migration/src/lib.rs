@@ -20,6 +20,7 @@ mod bitpos_iterator;
 mod context;
 // TODO(keepalive): remove this module when gardenlinux-release-26-09-18 compatibility ends.
 pub mod keep_alive_stream;
+pub mod progress;
 pub mod protocol;
 pub mod tls;
 

@@ -26,7 +26,7 @@ use vm_migration::MigratableError;
 use vmm_sys_util::eventfd::EventFd;
 
 use self::http_endpoint::{
-    VmActionHandler, VmBalloonStats, VmCreate, VmInfo, VmmPing, VmmShutdown,
+    VmActionHandler, VmBalloonStats, VmCreate, VmInfo, VmMigrationProgress, VmmPing, VmmShutdown,
 };
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::api::VmCoredump;
@@ -391,6 +391,10 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
     r.routes.insert(
         endpoint!("/vm.shutdown"),
         Box::new(VmActionHandler::new(&VmShutdown)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.migration-progress"),
+        Box::new(VmMigrationProgress {}),
     );
     r.routes.insert(
         endpoint!("/vm.snapshot"),
