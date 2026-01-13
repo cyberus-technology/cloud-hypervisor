@@ -11,6 +11,7 @@ use std::thread;
 
 use libfuzzer_sys::{fuzz_target, Corpus};
 use micro_http::Request;
+use vm_migration::progress::MigrationProgress;
 use vm_migration::MigratableError;
 use vmm::api::http::*;
 use vmm::api::{
@@ -307,6 +308,10 @@ impl RequestHandler for StubApiRequestHandler {
 
     fn vm_post_migration_announce(&mut self) -> Result<(), VmError> {
         Ok(())
+    }
+
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
+        None
     }
 }
 
