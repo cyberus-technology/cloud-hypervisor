@@ -47,6 +47,7 @@ use signal_hook::iterator::{Handle, Signals};
 use thiserror::Error;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::bitmap::AtomicBitmap;
+use vm_migration::progress::MigrationProgress;
 use vm_migration::protocol::*;
 use vm_migration::{
     MemoryMigrationContext, Migratable, MigratableError, OngoingMigrationContext, Pausable,
@@ -3031,6 +3032,10 @@ impl RequestHandler for Vmm {
                 .unwrap(),
         );
         Ok(())
+    }
+
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
+        None
     }
 }
 
