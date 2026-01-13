@@ -56,6 +56,7 @@ use vm_memory::{
     GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, ReadVolatile,
     VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
+use vm_migration::progress::MigrationProgress;
 use vm_migration::protocol::*;
 use vm_migration::tls::{TlsConnectionWrapper, TlsStream, TlsStreamWrapper};
 use vm_migration::{
@@ -3720,6 +3721,10 @@ impl RequestHandler for Vmm {
         );
 
         Ok(())
+    }
+
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
+        None
     }
 }
 
