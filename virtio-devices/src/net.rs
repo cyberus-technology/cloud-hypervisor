@@ -20,8 +20,9 @@ use log::{debug, error, info, trace, warn};
 #[cfg(not(fuzzing))]
 use net_util::virtio_features_to_tap_offload;
 use net_util::{
-    CtrlQueue, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio, Tap, TapError, TxVirtio,
-    VirtioNetConfig, build_net_config_space, build_net_config_space_with_mq, open_tap,
+    CtrlQueue, MAC_ADDR_LEN, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio, Tap,
+    TapError, TxVirtio, VirtioNetConfig, build_net_config_space, build_net_config_space_with_mq,
+    open_tap, vnet_hdr_len,
 };
 use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,7 @@ use super::{
     EpollHelperHandler, Error as DeviceError, RateLimiterConfig, VirtioCommon, VirtioDevice,
     VirtioDeviceType, VirtioInterruptType,
 };
+use crate::device::PostMigrationAnnouncer;
 use crate::seccomp_filters::Thread;
 use crate::thread_helper::spawn_virtio_thread;
 use crate::{GuestMemoryMmap, VirtioInterrupt};
@@ -416,6 +418,11 @@ pub struct NetState {
     pub queue_size: Vec<u16>,
 }
 
+// Minimum length of an ethernet frame. This size omits the FCS/CRC (frame check
+// sequence), which will be added by the hardware. This size can also be found
+// in the Linux kernel's UAPI headers.
+const ETH_FRAME_LEN: usize = 60;
+
 impl Net {
     /// Create a new virtio network device with the given TAP interface.
     #[allow(clippy::too_many_arguments)]
@@ -646,6 +653,39 @@ impl Net {
     pub fn wait_for_epoll_threads(&mut self) {
         self.common.wait_for_epoll_threads();
     }
+
+    // Builds a reverse ARP packet with this device's MAC address.
+    fn build_rarp_announce(&self) -> [u8; ETH_FRAME_LEN] {
+        const ETH_P_RARP: u16 = 0x8035; // Ethertype RARP
+        const ARP_HTYPE_ETH: u16 = 0x1; // Hardware type Ethernet
+        const ARP_PTYPE_IP: u16 = 0x0800; // Protocol type IPv4
+        const ARP_OP_REQUEST_REV: u16 = 0x0003; // RARP Request opcode
+
+        const IPV4_ADDR_LENGTH: usize = 4; // Size of an IPv4 address
+
+        let mut buf = [0u8; ETH_FRAME_LEN];
+
+        // Ethernet header
+        buf[0..6].copy_from_slice(&[0xff; MAC_ADDR_LEN]); // This is a broadcast
+        buf[6..12].copy_from_slice(&self.config.mac); // Src is this NIC
+        buf[12..14].copy_from_slice(&ETH_P_RARP.to_be_bytes()); // This is a RARP packet
+
+        // ARP Header
+        buf[14..16].copy_from_slice(&ARP_HTYPE_ETH.to_be_bytes());
+        buf[16..18].copy_from_slice(&ARP_PTYPE_IP.to_be_bytes());
+        buf[18] = MAC_ADDR_LEN as u8; // Hardware address length (ethernet)
+        buf[19] = IPV4_ADDR_LENGTH as u8; // Protocol address length (IPv4)
+        // This is a "fake RARP" packet, we don't want to perform a real RARP lookup.
+        // Thus the content of the next fields is largely irrelevant. Setting source
+        // hardware address = target hardware address is fine according to RFC 903.
+        buf[20..22].copy_from_slice(&ARP_OP_REQUEST_REV.to_be_bytes());
+        buf[22..28].copy_from_slice(&self.config.mac); // Source hardware address
+        buf[28..32].copy_from_slice(&[0x00; IPV4_ADDR_LENGTH]); // Source protocol address
+        buf[32..38].copy_from_slice(&self.config.mac); // Target hardware address
+        buf[38..42].copy_from_slice(&[0x00; IPV4_ADDR_LENGTH]); // Target protocol address
+
+        buf
+    }
 }
 
 impl Drop for Net {
@@ -873,6 +913,13 @@ impl VirtioDevice for Net {
     fn access_platform(&self) -> Option<Arc<dyn AccessPlatform>> {
         self.common.access_platform()
     }
+
+    fn post_migration_announcer(&self) -> Option<Box<dyn PostMigrationAnnouncer>> {
+        Some(Box::new(TapRarpAnnouncer::new(
+            self.build_rarp_announce(),
+            self.taps.clone(),
+        )))
+    }
 }
 
 impl Pausable for Net {
@@ -901,3 +948,37 @@ impl Snapshottable for Net {
 }
 impl Transportable for Net {}
 impl Migratable for Net {}
+
+/// Sends RARP packets on a virtio-net device, to update the MAC to port
+/// mappings of switches in the network. This reduces the time until network
+/// packets reliably arrive at the network device.
+pub struct TapRarpAnnouncer {
+    announce: [u8; ETH_FRAME_LEN], // Buffer for the raw RARP packet.
+    taps: Vec<Tap>,                // The TAP devices to the the packets on.
+}
+
+impl TapRarpAnnouncer {
+    pub fn new(announce: [u8; 60], taps: Vec<Tap>) -> Self {
+        Self { announce, taps }
+    }
+}
+
+impl PostMigrationAnnouncer for TapRarpAnnouncer {
+    fn announce(&mut self) {
+        // We have to add a virtio-net header to the announce.
+        let mut buf = vec![0u8; vnet_hdr_len() + self.announce.len()];
+        buf[vnet_hdr_len()..].copy_from_slice(&self.announce);
+
+        for tap in &self.taps {
+            // SAFETY: `buf.as_ptr()` is valid for `buf.len()` bytes and remains
+            // valid until the syscall returns. `tap.as_raw_fd()` is a valid TAP fd.
+            let _ = unsafe {
+                libc::write(
+                    tap.as_raw_fd(),
+                    buf.as_ptr() as *const libc::c_void,
+                    buf.len(),
+                )
+            };
+        }
+    }
+}
