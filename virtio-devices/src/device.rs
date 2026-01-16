@@ -191,6 +191,12 @@ pub trait VirtioDevice: Send {
     fn access_platform(&self) -> Option<Arc<dyn AccessPlatform>> {
         None
     }
+
+    /// Some devices can announce their location after a live migration to
+    /// speed up normal execution.
+    fn post_migration_announcer(&self) -> Option<Box<dyn PostMigrationAnnouncer>> {
+        None
+    }
 }
 
 /// Trait to define address translation for devices managed by virtio-iommu
@@ -431,4 +437,15 @@ impl Pausable for VirtioCommon {
 
         Ok(())
     }
+}
+
+/// A PostMigrationAnnouncer provides a callback that informs other components
+/// in the system. For example, network devices send out RARP packets to update
+/// the MAC to port mappings of switches.
+pub trait PostMigrationAnnouncer: Send {
+    /// Announces that a migration _might_ have occurred.
+    /// Implementers need to assume that the announcement can be
+    /// scheduled to run some time after a migration has occurred and
+    /// that it might even be executed when no migration has happened.
+    fn announce(&mut self);
 }

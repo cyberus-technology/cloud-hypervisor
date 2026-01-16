@@ -3051,6 +3051,10 @@ impl Vm {
             .try_lock_disks()
             .map_err(Error::LockingError)?;
 
+        // TODO for upstreaming probably relevant
+        // Advertise new VM location to network switches.
+        // self.post_migration_announce();
+
         // Now we can start all vCPUs from here.
         self.cpu_manager
             .lock()
@@ -3287,6 +3291,14 @@ impl Vm {
             .unwrap()
             .nmi()
             .map_err(Error::ErrorNmi);
+    }
+
+    /// Calls [`DeviceManager::post_migration_announce`].
+    pub fn post_migration_announce(&self) {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .post_migration_announce();
     }
 }
 
