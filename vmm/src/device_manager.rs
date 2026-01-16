@@ -16,10 +16,11 @@ use std::num::Wrapping;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
-use std::result;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
+use std::{result, thread};
 
 use acpi_tables::sdt::GenericAddress;
 use acpi_tables::{Aml, aml};
@@ -90,8 +91,8 @@ use vfio_ioctls::{VfioContainer, VfioDevice, VfioDeviceFd};
 use virtio_devices::transport::{VirtioPciDevice, VirtioPciDeviceActivator, VirtioTransport};
 use virtio_devices::vhost_user::VhostUserConfig;
 use virtio_devices::{
-    AccessPlatformMapping, ActivateError, Block, Endpoint, IommuMapping, VdpaDmaMapping,
-    VirtioMemMappingSource,
+    AccessPlatformMapping, ActivateError, Block, Endpoint, IommuMapping, PostMigrationAnnouncer,
+    VdpaDmaMapping, VirtioMemMappingSource,
 };
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::dma_mapping::ExternalDmaMapping;
@@ -5063,6 +5064,60 @@ impl DeviceManager {
             self.vfio_container = None;
         }
     }
+
+    // Calls the `[PostMigrationAnnouncer]`s of each device that has one, and
+    // schedules periodic announcements.
+    pub fn post_migration_announce(&self) {
+        let mut announcers: Vec<Box<dyn PostMigrationAnnouncer>> = self
+            .virtio_devices
+            .iter()
+            .filter_map(|dev| dev.virtio_device.lock().unwrap().post_migration_announcer())
+            .collect();
+
+        // We do the first announcement synchronously, because we want the announcements
+        // as soon as possible.
+        announcers.iter_mut().for_each(|a| a.announce());
+        // For good measure we repeat the announcements. This increases the chance that
+        // the announcements have the expected effect.
+        const ROUNDS: u32 = 4;
+        const INITIAL_DELAY: Duration = Duration::from_millis(50);
+        const STEP_DELAY: Duration = Duration::from_millis(100);
+        const MAX_DELAY: Duration = Duration::from_millis(450);
+        schedule_post_migration_announcements(
+            announcers,
+            ROUNDS,
+            INITIAL_DELAY,
+            STEP_DELAY,
+            MAX_DELAY,
+        );
+    }
+}
+
+/// Starts a thread that periodically performs the post migration announcements.
+fn schedule_post_migration_announcements(
+    mut announcers: Vec<Box<dyn PostMigrationAnnouncer>>,
+    rounds: u32,
+    initial_delay: Duration,
+    step_delay: Duration,
+    max_delay: Duration,
+) {
+    if announcers.is_empty() || rounds == 0 {
+        return;
+    }
+
+    let _ = thread::Builder::new()
+        .name("post-migration-announcers".to_string())
+        .spawn(move || {
+            for round in 0..rounds {
+                // The first announce is done synchronously, thus we sleep at the
+                // start of the loop.
+
+                let delay = (initial_delay + step_delay.saturating_mul(round)).min(max_delay);
+                thread::sleep(delay);
+
+                announcers.iter_mut().for_each(|a| a.announce());
+            }
+        });
 }
 
 #[cfg(feature = "ivshmem")]
@@ -5406,6 +5461,11 @@ impl Pausable for DeviceManager {
     }
 
     fn resume(&mut self) -> result::Result<(), MigratableError> {
+        // Before resuming the devices, we execute the post migration announcers of those that have one.
+        // NOTE: By contract announcements may be executed even if no migration took place hence we
+        // call this function regardless of the reason for resuming the VM.
+        self.post_migration_announce();
+
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 migratable.lock().unwrap().resume()?;
