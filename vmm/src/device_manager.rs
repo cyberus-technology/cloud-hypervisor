@@ -18,10 +18,11 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 #[cfg(not(target_arch = "riscv64"))]
 use std::path::Path;
 use std::path::PathBuf;
-use std::result;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
+use std::{result, thread};
 
 use acpi_tables::sdt::GenericAddress;
 use acpi_tables::{Aml, aml};
@@ -88,8 +89,8 @@ use vfio_ioctls::{VfioContainer, VfioDevice, VfioDeviceFd, VfioOps};
 use virtio_devices::transport::{VirtioPciDevice, VirtioPciDeviceActivator, VirtioTransport};
 use virtio_devices::vhost_user::VhostUserConfig;
 use virtio_devices::{
-    AccessPlatformMapping, ActivateError, Block, Endpoint, IommuMapping, VdpaDmaMapping,
-    VirtioMemMappingSource,
+    AccessPlatformMapping, ActivateError, Block, Endpoint, IommuMapping, PostMigrationAnnouncer,
+    VdpaDmaMapping, VirtioMemMappingSource,
 };
 use vm_allocator::{AddressAllocator, InterruptAllocError, SystemAllocator};
 use vm_device::dma_mapping::ExternalDmaMapping;
@@ -5318,6 +5319,75 @@ impl DeviceManager {
             self.vfio_ops = None;
         }
     }
+
+    /// Helps the environment converge quickly after a live migration by
+    /// prompting devices to advertise the VM from its new host.
+    ///
+    /// This is mainly useful for networking: switches and peers can refresh
+    /// their view of where the guest now lives instead of waiting for normal
+    /// traffic to update MAC-to-port mappings on its own.
+    ///
+    /// The method gathers the [`PostMigrationAnnouncer`] implementations
+    /// exposed by virtio devices, runs one announcement synchronously for
+    /// minimum delay, and then schedules a few retries from a background
+    /// thread.
+    pub fn post_migration_announce(&self) {
+        let mut announcers: Vec<Box<dyn PostMigrationAnnouncer>> = self
+            .virtio_devices
+            .iter()
+            .filter_map(|dev| dev.virtio_device.lock().unwrap().post_migration_announcer())
+            .collect();
+
+        if announcers.is_empty() {
+            info!("No announcers");
+            return;
+        }
+
+        // We do the first announcement synchronously, because we want the announcements
+        // as soon as possible.
+        announcers.iter_mut().for_each(|a| a.announce());
+        info!("Post migration announce (sync)");
+
+        // For good measure we repeat the announcements. This increases the chance that
+        // the announcements have the expected effect.
+        const ROUNDS: u32 = 4;
+        const INITIAL_DELAY: Duration = Duration::from_millis(50);
+        const STEP_DELAY: Duration = Duration::from_millis(100);
+        const MAX_DELAY: Duration = Duration::from_millis(450);
+        schedule_post_migration_announcements(
+            announcers,
+            ROUNDS,
+            INITIAL_DELAY,
+            STEP_DELAY,
+            MAX_DELAY,
+        );
+    }
+}
+
+/// Starts a thread that periodically performs the post-migration announcements.
+fn schedule_post_migration_announcements(
+    mut announcers: Vec<Box<dyn PostMigrationAnnouncer>>,
+    rounds: u32,
+    initial_delay: Duration,
+    step_delay: Duration,
+    max_delay: Duration,
+) {
+    let _ = thread::Builder::new()
+        .name("post-migration-announcers".to_string())
+        .spawn(move || {
+            for round in 0..rounds {
+                info!("Post migration announce (async): {}/{}", round + 1, rounds);
+
+                // The first announcement already was done synchronously, thus
+                // we sleep at the start of the loop.
+
+                let delay = (initial_delay + step_delay.saturating_mul(round)).min(max_delay);
+                debug!("Sleeping {}ms", delay.as_millis());
+                thread::sleep(delay);
+
+                announcers.iter_mut().for_each(|a| a.announce());
+            }
+        });
 }
 
 #[cfg(feature = "ivshmem")]
