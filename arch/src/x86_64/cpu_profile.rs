@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use hypervisor::arch::x86::CpuIdEntry;
+use hypervisor::arch::x86::{CpuIdEntry, MsrEntry};
 use hypervisor::{CpuVendor, HypervisorType};
 use log::error;
 use serde::ser::SerializeStruct;
@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::deserialize_u32_hex;
 use crate::x86_64::CpuidReg;
 use crate::x86_64::cpuid_definitions::Parameters;
+use crate::x86_64::msr_definitions::RegisterAddress;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -90,6 +91,21 @@ impl CpuProfile {
         }
         // This will need to be addressed before upstreaming.
         // We will probably need one profile per hypervisor.
+        unreachable!()
+    }
+
+    /// Loads pre-generated MSR data associated with a CPU profile.
+    #[cfg(feature = "kvm")]
+    pub(in crate::x86_64) fn msr_data(&self) -> Option<MsrProfileData> {
+        todo!()
+    }
+
+    #[cfg(not(feature = "kvm"))]
+    pub(in crate::x86_64) fn msr_data(&self) -> Option<MsrProfileData> {
+        if matches!(*self, Self::Host) {
+            return None;
+        }
+        // CPU profiles are currently only available when using KVM as the hypervisor.
         unreachable!()
     }
 }
@@ -263,9 +279,129 @@ impl CpuidOutputRegisterAdjustments {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(in crate::x86_64) struct FeatureMsrAdjustment {
+    pub(in crate::x86_64) mask: u64,
+    pub(in crate::x86_64) replacements: u64,
+}
+
+impl Serialize for FeatureMsrAdjustment {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("FeatureMsrAdjustment", 2)?;
+        let mut serialize_field = |key, value| {
+            // two bytes for "0x" prefix and 16 for the hex encoded number
+            let mut buffer = [0_u8; 18];
+            let _ = write!(&mut buffer[..], "{value:#018x}");
+            let str = core::str::from_utf8(&buffer[..])
+                .expect("the buffer should be filled with valid UTF-8 bytes");
+            s.serialize_field(key, str)
+        };
+        serialize_field("mask", self.mask)?;
+        serialize_field("replacements", self.replacements)?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FeatureMsrAdjustment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ProvisionalFeatureMsrAdjustment<'a> {
+            #[serde(borrow)]
+            mask: &'a str,
+            #[serde(borrow)]
+            replacements: &'a str,
+        }
+
+        let ProvisionalFeatureMsrAdjustment { mask, replacements } =
+            ProvisionalFeatureMsrAdjustment::deserialize(deserializer)?;
+        let parse_u64 = |hex: &str, field_name: &str| {
+            u64::from_str_radix(hex.strip_prefix("0x").unwrap_or(""), 16).map_err(|_| {
+                    <D::Error as serde::de::Error>::custom(format!("Unable to deserialize FeatureMsrAdjustment: could not deserialize {field_name} the value {hex} is not a hex encoded 64 bit integer"))
+                })
+        };
+        let mask = parse_u64(mask, "mask")?;
+        let replacements = parse_u64(replacements, "replacements")?;
+        Ok(FeatureMsrAdjustment { mask, replacements })
+    }
+}
+
+impl FeatureMsrAdjustment {
+    /// Returns a struct describing the Feature MSRs that should be set
+    /// and the ones that should be denied based on `adjustments` and the given
+    /// `feature_msrs`.
+    ///
+    /// # Errors
+    ///
+    /// The only way for this to error is if there exists one or more entries in
+    /// `adjustments` that do not have a corresponding entry in `feature_msrs`.
+    /// In this case the missing MSR will be logged and the unit type is returned
+    /// as the error variant.
+    pub(in crate::x86_64) fn adjust_to(
+        adjustments: &[(RegisterAddress, FeatureMsrAdjustment)],
+        feature_msrs: &[MsrEntry],
+    ) -> Result<Vec<MsrEntry>, ()> {
+        let mut output_feature_msrs = Vec::with_capacity(feature_msrs.len());
+        for (reg_address, adjustment) in adjustments {
+            let Some(entry) = feature_msrs
+                .iter()
+                .find(|entry| entry.index == reg_address.0)
+            else {
+                error!(
+                    "Did not find feature based MSR entry for MSR:={:#x}",
+                    reg_address.0
+                );
+                return Err(());
+            };
+            // Adjust the entry and push it to outputs
+            {
+                let mut entry = *entry;
+                let data = entry.data;
+                entry.data = (adjustment.mask & data) | adjustment.replacements;
+                // TODO: Perhaps trace! would be a better log level?
+                log::debug!(
+                    "adjusted MSR-based feature: register address:={:#x} value:={:#x}",
+                    entry.index,
+                    entry.data
+                );
+                output_feature_msrs.push(entry);
+            }
+        }
+        Ok(output_feature_msrs)
+    }
+}
+
+pub struct RequiredMsrUpdates {
+    pub msr_based_features: Vec<MsrEntry>,
+    pub denied_msrs: Vec<RegisterAddress>,
+}
+
+/// Every [`CpuProfile`] different from `Host` has associated [`MsrProfileData`].
+///
+/// New constructors of this struct may only be generated through the CHV CLI (when built from source with
+/// the `cpu-profile-generation` feature) which other hosts may then attempt to load in order to
+/// increase the likelihood of successful live migrations among all hosts that opted in to the given
+/// CPU profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(in crate::x86_64) struct MsrProfileData {
+    pub(in crate::x86_64) cpu_vendor: CpuVendor,
+    pub(in crate::x86_64) hypervisor_type: HypervisorType,
+    pub(in crate::x86_64) adjustments: Vec<(RegisterAddress, FeatureMsrAdjustment)>,
+    pub(in crate::x86_64) permitted_msrs: Vec<RegisterAddress>,
+}
+
 #[derive(Debug, Error)]
 #[error("Required CPUID entries not found")]
 pub struct MissingCpuidEntriesError;
+
+#[derive(Debug, Error)]
+#[error("Required MSR entries not found")]
+pub struct MissingMsrEntriesError;
 
 #[cfg(test)]
 mod tests {
