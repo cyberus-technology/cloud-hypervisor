@@ -702,7 +702,7 @@ impl VmmVersionInfo {
 ///
 /// Is supposed to be updated on the fly.
 #[derive(Debug, Clone)]
-struct MigrationState {
+struct MigrationStateInternal {
     /* ---------------------------------------------- */
     /* Properties that are updated before the first iteration */
     /// The instant where the actual downtime of the VM began.
@@ -748,7 +748,7 @@ struct MigrationState {
     migration_duration: Duration,
 }
 
-impl MigrationState {
+impl MigrationStateInternal {
     pub fn new() -> Self {
         Self {
             // Field will be overwritten later.
@@ -2165,7 +2165,7 @@ impl Vmm {
         Ok(())
     }
 
-    fn can_increase_autoconverge_step(s: &MigrationState) -> bool {
+    fn can_increase_autoconverge_step(s: &MigrationStateInternal) -> bool {
         if s.iteration < AUTO_CONVERGE_ITERATION_DELAY {
             false
         } else {
@@ -2182,13 +2182,13 @@ impl Vmm {
         vm: &mut Vm,
         mem_send: &SendAdditionalConnections,
         socket: &mut SocketStream,
-        s: &mut MigrationState,
+        s: &mut MigrationStateInternal,
         migration_timeout: Duration,
         migrate_downtime_limit: Duration,
     ) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut iteration_table;
 
-        let log_migration_progress = |s: &MigrationState, vm: &Vm| {
+        let log_migration_progress = |s: &MigrationStateInternal, vm: &Vm| {
             info!(
                 "iter={},dur={}ms,overhead={}ms,throttle={}%,size={}MiB,dirtyrate={}pps,bandwidth={:.2}MiBs,downtime(expected)={}ms",
                 s.iteration,
@@ -2306,7 +2306,7 @@ impl Vmm {
     fn do_memory_migration(
         vm: &mut Vm,
         socket: &mut SocketStream,
-        s: &mut MigrationState,
+        s: &mut MigrationStateInternal,
         send_data_migration: &VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
         let mem_send = SendAdditionalConnections::new(send_data_migration, &vm.guest_memory())?;
@@ -2395,7 +2395,7 @@ impl Vmm {
         hypervisor: &dyn hypervisor::Hypervisor,
         send_data_migration: &VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
-        let mut s = MigrationState::new();
+        let mut s = MigrationStateInternal::new();
 
         // Set up the socket connection
         let mut socket = send_migration_socket(send_data_migration)?;
