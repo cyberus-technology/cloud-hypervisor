@@ -1444,19 +1444,19 @@ fn send_migration_socket(
             MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
         })?;
 
-        if send_data_migration.tls_dir.is_none() {
-            Ok(SocketStream::Tcp(socket))
-        } else {
+        if let Some(tls_dir) = send_data_migration.tls_dir.as_ref() {
             info!("Live Migration will be encrypted using TLS.");
             // The address may still contain a port. I think we should build something more robust to also handle IPv6.
             let tls_stream = tls::client_stream(
                 socket,
-                send_data_migration.tls_dir.as_ref().unwrap(),
+                tls_dir,
                 address.split_once(':').map_or(address, |(host, _)| host),
             )?;
             Ok(SocketStream::Tls(Box::new(TlsStreamWrapper::new(
                 TlsStream::Client(tls_stream),
             ))))
+        } else {
+            Ok(SocketStream::Tcp(socket))
         }
     } else if let Some(path) = &send_data_migration.destination_url.strip_prefix("unix:") {
         info!("Connecting to UNIX socket at {path:?}");
@@ -1483,13 +1483,13 @@ fn receive_migration_listener(
             MigratableError::MigrateReceive(anyhow!("Error binding to TCP socket: {e}"))
         })?;
 
-        if receiver_data_migration.tls_dir.is_none() {
-            Ok(ReceiveListener::Tcp(listener))
-        } else {
+        if let Some(tls_dir) = receiver_data_migration.tls_dir.as_ref() {
             Ok(ReceiveListener::Tls(
                 listener,
-                TlsConnectionWrapper::new(receiver_data_migration.tls_dir.as_ref().unwrap())?,
+                TlsConnectionWrapper::new(tls_dir)?,
             ))
+        } else {
+            Ok(ReceiveListener::Tcp(listener))
         }
     } else if let Some(path) = receiver_data_migration.receiver_url.strip_prefix("unix:") {
         UnixListener::bind(path)
