@@ -479,8 +479,8 @@ impl PutHandler for VmReceiveMigration {
     ) -> std::result::Result<Option<Body>, HttpError> {
         if let Some(body) = body {
             let mut net_cfg: VmReceiveMigrationData = serde_json::from_slice(body.raw())?;
-            if let Some(cfgs) = &mut net_cfg.net_fds {
-                let mut cfgs = cfgs.iter_mut().collect::<Vec<&mut _>>();
+            if !net_cfg.net_fds.is_empty() {
+                let mut cfgs = net_cfg.net_fds.iter_mut().collect::<Vec<&mut _>>();
                 let cfgs = cfgs.as_mut_slice();
                 attach_fds_to_cfgs(files, cfgs)?;
             }

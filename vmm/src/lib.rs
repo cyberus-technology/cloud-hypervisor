@@ -1757,23 +1757,15 @@ impl Vmm {
                 memory_files,
                 receive_data_migration.tcp_serial_url.clone(),
             )?;
-
-            if let Some(ref restored_net_configs) = receive_data_migration.net_fds {
-                // TODO do some validation
-                //restored_net_config.validate();
-                // Update VM's net configurations with new fds received for restore operation
-
+            // Apply external FDs to virtio-net devices.
+            if !receive_data_migration.net_fds.is_empty() {
                 let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
-
-                for net in restored_net_configs {
-                    for net_config in vm_config.net.iter_mut().flatten() {
+                for restore_net_cfg in &receive_data_migration.net_fds {
+                    for net_cfg in vm_config.net.iter_mut().flatten() {
                         // update only if the net dev is backed by FDs
-                        if net_config.id.as_ref() == Some(&net.id) && net_config.fds.is_some() {
-                            debug!(
-                                "overwriting net fds: id={}, old={:?}, new={:?}",
-                                net.id, &net_config.fds, &net.fds
-                            );
-                            net_config.fds.clone_from(&net.fds);
+                        if net_cfg.id.as_ref() == Some(&restore_net_cfg.id) && net_cfg.fds.is_some()
+                        {
+                            net_cfg.fds.clone_from(&restore_net_cfg.fds);
                         }
                     }
                 }
