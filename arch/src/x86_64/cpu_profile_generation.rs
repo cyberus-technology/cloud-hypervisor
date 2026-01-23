@@ -48,7 +48,7 @@ pub fn generate_profile_data(
     generate_cpu_profile_data_with(
         hypervisor_type,
         cpu_vendor,
-        supported_cpuid_sorted,
+        &supported_cpuid_sorted,
         &INTEL_CPUID_DEFINITIONS,
         &KVM_CPUID_DEFINITIONS,
         &mut writer,
@@ -87,7 +87,7 @@ fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::
 fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
     hypervisor_type: HypervisorType,
     cpu_vendor: CpuVendor,
-    supported_cpuid_sorted: Vec<CpuIdEntry>,
+    supported_cpuid_sorted: &[CpuIdEntry],
     processor_cpuid_definitions: &CpuidDefinitions<N>,
     hypervisor_cpuid_definitions: &CpuidDefinitions<M>,
     mut writer: &mut impl Write,
@@ -100,7 +100,7 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
         .chain(hypervisor_cpuid_definitions.as_slice().iter())
     {
         for (sub_leaf_range, maybe_matching_register_output_value) in
-            extract_parameter_matches(parameter, &supported_cpuid_sorted)
+            extract_parameter_matches(parameter, supported_cpuid_sorted)
         {
             // If the compatibility target (current host) has multiple sub-leaves matching the parameter's range
             // then we want to specialize:
@@ -166,13 +166,14 @@ fn supported_cpuid(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry
     // ignore any AMX not supported error to achieve this.
     match hypervisor.enable_amx_state_components() {
         Ok(()) => {}
-        Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => match amx_err {
-            // TODO: Explain
-            err @ hypervisor::arch::x86::AmxGuestSupportError::AmxGuestTileRequest { .. } => {
-                return Err(err).context("Unable to enable AMX state tiles for guests");
+        Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => {
+            if matches!(
+                amx_err,
+                hypervisor::arch::x86::AmxGuestSupportError::AmxGuestTileRequest { .. }
+            ) {
+                return Err(amx_err).context("Unable to enable AMX state tiles for guests");
             }
-            _ => {}
-        },
+        }
         Err(_) => unreachable!("Unexpected error when checking AMX support"),
     }
 
