@@ -949,7 +949,7 @@ fn receive_migration_data(url: String, tls_dir: Option<PathBuf>) -> String {
         // Only FDs transmitted via an SCM_RIGHTS UNIX Domain Socket message
         // are valid. Transmitting specific FD nums via the HTTP API is
         // almost always invalid.
-        net_fds: None,
+        net_fds: vec![],
         tls_dir,
     };
 

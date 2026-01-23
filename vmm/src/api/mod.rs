@@ -266,7 +266,7 @@ pub struct VmReceiveMigrationData {
     /// migration. Example: "192.168.1.1:2222".
     pub tcp_serial_url: Option<String>,
     /// Map with new network FDs on the new host.
-    pub net_fds: Option<Vec<RestoredNetConfig>>,
+    pub net_fds: Vec<RestoredNetConfig>,
     /// Directory containing the TLS server certificate (server-cert.pem) and TLS server key (server-key.pem).
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
