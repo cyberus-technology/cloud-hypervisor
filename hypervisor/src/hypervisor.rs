@@ -62,6 +62,10 @@ pub enum HypervisorError {
     #[error("Failed to get the list of supported MSRs")]
     GetMsrList(#[source] anyhow::Error),
     ///
+    /// Failed to get MSRs from the hypervisor.
+    #[error("Failed to get MSRs")]
+    GetMsr(#[source] anyhow::Error),
+    ///
     /// API version is not compatible
     ///
     #[error("Incompatible API version")]
@@ -125,9 +129,14 @@ pub trait Hypervisor: Send + Sync {
     /// Get the supported CpuID
     ///
     fn get_supported_cpuid(&self) -> Result<Vec<CpuIdEntry>>;
-    /// Get the supported MSRs.
     #[cfg(target_arch = "x86_64")]
+    /// Get the supported MSRs.
     fn get_supported_msrs(&self) -> Result<Vec<MsrEntry>>;
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Get the MSR-based features supported by the hardware and hypervisor
+    ///
+    fn get_msr_based_features(&self) -> Result<Vec<MsrEntry>>;
     ///
     /// Check particular extensions if any
     ///
