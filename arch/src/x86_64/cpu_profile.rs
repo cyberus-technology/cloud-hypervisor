@@ -30,7 +30,7 @@ pub enum CpuProfile {
 }
 
 impl CpuProfile {
-    /// Loads pre-generated data associated with a CPU profile.
+    /// Loads pre-generated CPUID data associated with a CPU profile.
     ///
     /// If the `amx` flag is false then the AMX tile state components will be
     /// zeroed out from the associated profile data. This is necessary because
@@ -39,8 +39,8 @@ impl CpuProfile {
     //
     // We can only generate CPU profiles for the KVM hypervisor for the time being.
     #[cfg(feature = "kvm")]
-    pub(in crate::x86_64) fn data(&self, amx: bool) -> Option<CpuProfileData> {
-        let mut data: CpuProfileData = match self {
+    pub(in crate::x86_64) fn cpuid_data(&self, amx: bool) -> Option<CpuIdProfileData> {
+        let mut data: CpuIdProfileData = match self {
             Self::Host => None,
             Self::Skylake => Some(
                 serde_json::from_slice(include_bytes!("cpu_profiles/skylake.json"))
@@ -84,7 +84,7 @@ impl CpuProfile {
     }
 
     #[cfg(not(feature = "kvm"))]
-    pub(in crate::x86_64) fn data(&self, _amx: bool) -> Option<CpuProfileData> {
+    pub(in crate::x86_64) fn cpuid_data(&self, _amx: bool) -> Option<CpuIdProfileData> {
         if matches!(*self, Self::Host) {
             return None;
         }
@@ -94,7 +94,7 @@ impl CpuProfile {
     }
 }
 
-/// Every [`CpuProfile`] different from `Host` has associated [`CpuProfileData`].
+/// Every [`CpuProfile`] different from `Host` has associated [`CpuIdProfileData`].
 ///
 /// New constructors of this struct may only be generated through the CHV CLI (when built from source with
 /// the `cpu-profile-generation` feature) which other hosts may then attempt to load in order to
@@ -102,7 +102,7 @@ impl CpuProfile {
 /// CPU profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
-pub struct CpuProfileData {
+pub struct CpuIdProfileData {
     /// The hypervisor used when generating this CPU profile.
     pub(in crate::x86_64) hypervisor: HypervisorType,
     /// The vendor of the CPU belonging to the host that generated this CPU profile.
@@ -110,19 +110,6 @@ pub struct CpuProfileData {
     /// Adjustments necessary to become compatible with the desired target.
     pub(in crate::x86_64) adjustments: Vec<(Parameters, CpuidOutputRegisterAdjustments)>,
 }
-
-/* TODO: The [`CpuProfile`] struct will likely need a few more iterations. The following
-section should explain why:
-
-# MSR restrictions
-
-CPU profiles also need to restrict which MSRs may be manipulated by the guest as various physical CPUs
-can have differing supported MSRs.
-
-The CPU profile will thus necessarily need to contain some data related to MSR restrictions. That will
-be taken care of in a follow up MR.
-
-*/
 
 /// Used for adjusting an entire cpuid output register (EAX, EBX, ECX or EDX)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
