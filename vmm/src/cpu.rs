@@ -142,6 +142,12 @@ pub enum Error {
     #[error("Error generating common CPUID")]
     CommonCpuId(#[source] arch::Error),
 
+    #[error("Error computing required MSR updates")]
+    RequiredMsrUpdates(#[source] arch::Error),
+
+    #[error("Error applying MSR filter")]
+    MsrFilter(#[source] arch::Error),
+
     #[error("Error configuring vCPU")]
     VcpuConfiguration(#[source] arch::Error),
 
@@ -471,6 +477,7 @@ impl Vcpu {
         #[cfg(target_arch = "aarch64")] vm: &dyn hypervisor::Vm,
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(target_arch = "x86_64")] cpuid: Vec<CpuIdEntry>,
+        #[cfg(target_arch = "x86_64")] feature_msr_updates: &[MsrEntry],
         #[cfg(target_arch = "x86_64")] kvm_hyperv: bool,
         #[cfg(target_arch = "x86_64")] topology: (u16, u16, u16, u16),
         #[cfg(target_arch = "x86_64")] nested: bool,
@@ -491,6 +498,7 @@ impl Vcpu {
             self.id,
             boot_setup,
             cpuid,
+            feature_msr_updates,
             kvm_hyperv,
             self.vendor,
             topology,
@@ -610,6 +618,8 @@ pub struct CpuManager {
     #[cfg(target_arch = "x86_64")]
     /// A buffer for MSRs supported by the hardware and hypervisor
     msr_buffer: Vec<MsrEntry>,
+    #[cfg(target_arch = "x86_64")]
+    profile_msr_based_features: Vec<MsrEntry>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     vm: Arc<dyn hypervisor::Vm>,
     vcpus_kill_signalled: Arc<AtomicBool>,
@@ -857,6 +867,8 @@ impl CpuManager {
             cpuid: Vec::new(),
             #[cfg(target_arch = "x86_64")]
             msr_buffer: Self::construct_msr_buffer(hypervisor.as_ref())?,
+            #[cfg(target_arch = "x86_64")]
+            profile_msr_based_features: Vec::new(),
             vm,
             vcpus_kill_signalled: Arc::new(AtomicBool::new(false)),
             vcpus_pause_signalled: Arc::new(AtomicBool::new(false)),
@@ -916,6 +928,63 @@ impl CpuManager {
             .map_err(Error::CommonCpuId)?
         };
 
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    /// Prepares common MSR-based feature value updates that will be set when vCPUs are configured.
+    ///
+    /// This is only relevant when (non-host) CPU profiles are present, otherwise it is infallible
+    /// and we set an empty vector.
+    pub fn apply_msr_updates(&mut self) -> Result<()> {
+        let profile_msr_based_features = {
+            if let Some(arch::x86_64::cpu_profile::RequiredMsrUpdates {
+                msr_based_features,
+                denied_msrs,
+            }) = arch::x86_64::compute_required_msr_updates(
+                self.hypervisor.as_ref(),
+                self.config.profile,
+                self.config.kvm_hyperv,
+            )
+            .map_err(Error::RequiredMsrUpdates)?
+            {
+                // Remove denied MSRS from the MSR buffer
+                self.msr_buffer.retain(|entry| {
+                    !denied_msrs
+                        .contains(&arch::x86_64::msr_definitions::RegisterAddress(entry.index))
+                });
+
+                // Assert that all required msr_based_features to be set are part of the MSR buffer.
+                // It is a bug if this is not the case
+                for msr in &msr_based_features {
+                    if !self
+                        .msr_buffer
+                        .iter()
+                        .any(|msr_container| msr_container.index == msr.index)
+                    {
+                        error!(
+                            "BUG: feature based MSR:={:#x} is not contained in the set MSR buffer for the CPU manager",
+                            msr.index
+                        );
+                        panic!(
+                            "Broken invariant: The CPU Manager's MSR buffer does not have an entry for the computed MSR-based feature update"
+                        );
+                    }
+                }
+
+                // Create and apply a filter to prevent guests from accessing the denied MSRs
+                // TODO: Better error!
+                arch::x86_64::filter_denied_msrs(
+                    denied_msrs.into_iter().map(|reg| reg.0).collect(),
+                    self.vm.as_ref(),
+                )
+                .map_err(Error::MsrFilter)?;
+                msr_based_features
+            } else {
+                Vec::new()
+            }
+        };
+        self.profile_msr_based_features = profile_msr_based_features;
         Ok(())
     }
 
@@ -1011,6 +1080,7 @@ impl CpuManager {
         vcpu.configure(
             boot_setup,
             self.cpuid.clone(),
+            &self.profile_msr_based_features,
             self.config.kvm_hyperv,
             topology,
             self.config.nested,
@@ -3164,8 +3234,9 @@ mod unit_tests {
         let vm = hv
             .create_vm(HypervisorVmConfig::default())
             .expect("new VM fd creation failed");
+        // TODO: Use a proper MSR buffer here
         let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
-        setup_msrs(vcpu.as_ref()).unwrap();
+        setup_msrs(vcpu.as_ref(), &[]).unwrap();
 
         // This test will check against the last MSR entry configured (the tenth one).
         // See create_msr_entries for details.
