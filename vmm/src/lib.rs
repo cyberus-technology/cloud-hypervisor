@@ -2035,6 +2035,10 @@ impl Vmm {
         }
     }
 
+    /// Performs memory copy iterations in pre-copy fashion.
+    ///
+    /// This transmits the initial VM memory as well as all VM memory delta transmissions while the
+    /// VM keeps running.
     fn memory_copy_iterations(
         vm: &mut Vm,
         mem_send: &SendAdditionalConnections,
@@ -2046,7 +2050,19 @@ impl Vmm {
         let mut bandwidth = 0.0;
         let mut iteration_table;
 
+        // We loop until we converge (target downtime is achievable).
         loop {
+            // Check if migration has timed out
+            // migration_timeout > 0 means enabling the timeout check, 0 means disabling the timeout check
+            if !migration_timeout.is_zero() && s.start_time.elapsed() > migration_timeout {
+                warn!("Migration timed out after {migration_timeout:?}");
+                Request::abandon().write_to(socket)?;
+                Response::read_from(socket)?.ok_or_abandon(
+                    socket,
+                    MigratableError::MigrateSend(anyhow!("Migration timed out")),
+                )?;
+            }
+
             // todo: check if auto-converge is enabled at all?
             if Self::can_increase_autoconverge_step(s) && vm.throttle_percent() < AUTO_CONVERGE_MAX
             {
@@ -2062,22 +2078,13 @@ impl Vmm {
             // Update the start time of the iteration
             s.iteration_start_time = Instant::now();
 
-            // Increment iteration counter
-            s.iteration += 1;
-
-            // Check if migration has timed out
-            // migration_timeout > 0 means enabling the timeout check, 0 means disabling the timeout check
-            if !migration_timeout.is_zero() && s.start_time.elapsed() > migration_timeout {
-                warn!("Migration timed out after {migration_timeout:?}");
-                Request::abandon().write_to(socket)?;
-                Response::read_from(socket)?.ok_or_abandon(
-                    socket,
-                    MigratableError::MigrateSend(anyhow!("Migration timed out")),
-                )?;
-            }
-
-            // Get the dirty page table
-            iteration_table = vm.dirty_log()?;
+            // In the first iteration (`0`), we transmit the whole memory. Starting with the
+            // second iteration (`1`), we start the delta transmission.
+            iteration_table = if s.iteration == 0 {
+                vm.memory_range_table()?
+            } else {
+                vm.dirty_log()?
+            };
 
             // Update the pending size (amount of data to transfer)
             s.pending_size = iteration_table
@@ -2091,8 +2098,8 @@ impl Vmm {
                 s.threshold_size = bandwidth as u64 * migrate_downtime_limit.as_millis() as u64;
             }
 
-            // Enter the final stage of migration when the suspension conditions are met
-            if s.iteration > 1 && s.pending_size <= s.threshold_size {
+            // Enter the final stage of migration when the handover conditions are met
+            if s.iteration > 0 && s.pending_size <= s.threshold_size {
                 break;
             }
 
@@ -2120,11 +2127,15 @@ impl Vmm {
                     s.current_dirty_pages * 1000 / s.iteration_cost_time.as_millis() as u64;
             }
             debug!(
-                "iteration {}: cost={}ms, throttle={}%",
+                "iteration {}: cost={}ms, throttle={}%, transmitted={}MiB",
                 s.iteration,
                 s.iteration_cost_time.as_millis(),
-                vm.throttle_percent()
+                vm.throttle_percent(),
+                s.current_dirty_pages * 4096 / 1024 / 1024
             );
+
+            // Increment iteration counter
+            s.iteration += 1;
         }
 
         Ok(iteration_table)
@@ -2137,11 +2148,6 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
         let mem_send = SendAdditionalConnections::new(send_data_migration, &vm.guest_memory())?;
-
-        // Start logging dirty pages
-        vm.start_dirty_log()?;
-
-        mem_send.send_memory(&vm.memory_range_table()?, socket)?;
 
         // Define the maximum allowed downtime 2000 seconds(2000000 milliseconds)
         const MAX_MIGRATE_DOWNTIME: u64 = 2000000;
@@ -2166,6 +2172,8 @@ impl Vmm {
             )));
         }
 
+        // Start logging dirty pages
+        vm.start_dirty_log()?;
         let iteration_table = Self::memory_copy_iterations(
             vm,
             &mem_send,
