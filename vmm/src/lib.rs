@@ -688,41 +688,81 @@ impl VmmVersionInfo {
     }
 }
 
+/// Holds internal metrics about the ongoing migration.
+///
+/// Is supposed to be updated on the fly.
 #[derive(Debug, Clone)]
 struct MigrationState {
-    current_dirty_pages: u64,
-    downtime: Duration,
-    downtime_start: Instant,
+    /* ---------------------------------------------- */
+    /* Properties that are updated before the first iteration */
+    /// The instant where the actual downtime of the VM began.
+    downtime_start_time: Instant,
+    /// The instant where the migration began.
+    migration_start_time: Instant,
+
+    /* ---------------------------------------------- */
+    /* Properties that are updated in every iteration */
+    /// The iteration number. It is strictly monotonically increasing.
     iteration: u64,
-    iteration_cost_time: Duration,
+    /// The instant where the current iteration began.
     iteration_start_time: Instant,
-    mb_per_sec: f64,
-    pages_per_second: u64,
-    pending_size: u64,
-    start_time: Instant,
-    threshold_size: u64,
-    total_time: Duration,
+    /// The duration of the previous iteration.
+    iteration_duration: Duration,
+    /// The number of bytes that are to be transmitted in the current iteration.
+    bytes_to_transmit: u64,
+    /// `bytes_to_transmit` but as 4K pages.
+    pages_to_transmit: u64,
+    /// The instant where the transmission began.
+    /// This is after `iteration_start_time` and always shorter than
+    /// `iteration_duration`.
+    transmit_start_time: Instant,
+    /// The duration of the transmission began.
+    transmit_duration: Duration,
+    /// The measured throughput in bytes per sec.
+    bytes_per_sec: f64,
+    /// The calculated downtime with respect to `bytes_to_transmit` and
+    /// `bytes_per_sec`.
+    calculated_downtime_duration: Option<Duration>,
+    /// Total amount of transferred bytes across all iterations.
     total_transferred_bytes: u64,
-    total_transferred_dirty_pages: u64,
+    /// `total_transferred_bytes` but as 4K pages.
+    total_transferred_pages: u64,
+    /// The dirty rate in pages per second (pps).
+    dirty_rate_pps: u64,
+
+    /* ---------------------------------------------- */
+    /* Properties that are updated after the last iteration */
+    /// The actual measured downtime from the sender VMM perspective.
+    downtime_duration: Duration,
+    /// Total duration of the migration.
+    migration_duration: Duration,
 }
 
 impl MigrationState {
     pub fn new() -> Self {
         Self {
-            current_dirty_pages: 0,
-            downtime: Duration::default(),
-            downtime_start: Instant::now(),
+            // Field will be overwritten later.
+            downtime_start_time: Instant::now(),
+            // Field will be overwritten later.
+            migration_start_time: Instant::now(),
             iteration: 0,
-            iteration_cost_time: Duration::default(),
+            // Field will be overwritten later.
             iteration_start_time: Instant::now(),
-            mb_per_sec: 0.0,
-            pages_per_second: 0,
-            pending_size: 0,
-            start_time: Instant::now(),
-            threshold_size: 0,
-            total_time: Duration::default(),
+            iteration_duration: Duration::default(),
+            bytes_to_transmit: 0,
+            pages_to_transmit: 0,
+            // Field will be overwritten later.
+            transmit_start_time: Instant::now(),
+            transmit_duration: Duration::default(),
+            bytes_per_sec: 0.0,
+            calculated_downtime_duration: None,
             total_transferred_bytes: 0,
-            total_transferred_dirty_pages: 0,
+            total_transferred_pages: 0,
+            // Field will be overwritten later.
+            dirty_rate_pps: 0,
+            downtime_duration: Duration::default(),
+            // Field will be overwritten later.
+            migration_duration: Duration::default(),
         }
     }
 }
@@ -2031,14 +2071,17 @@ impl Vmm {
         migration_timeout: Duration,
         migrate_downtime_limit: Duration,
     ) -> result::Result<MemoryRangeTable, MigratableError> {
-        let mut bandwidth = 0.0;
         let mut iteration_table;
 
         // We loop until we converge (target downtime is achievable).
         loop {
+            // Update the start time of the iteration
+            s.iteration_start_time = Instant::now();
+
             // Check if migration has timed out
             // migration_timeout > 0 means enabling the timeout check, 0 means disabling the timeout check
-            if !migration_timeout.is_zero() && s.start_time.elapsed() > migration_timeout {
+            if !migration_timeout.is_zero() && s.migration_start_time.elapsed() > migration_timeout
+            {
                 warn!("Migration timed out after {migration_timeout:?}");
                 Request::abandon().write_to(socket)?;
                 Response::read_from(socket)?.ok_or_abandon(
@@ -2047,20 +2090,17 @@ impl Vmm {
                 )?;
             }
 
-            // todo: check if auto-converge is enabled at all?
+            // We always autoconverge.
             if Self::can_increase_autoconverge_step(s) && vm.throttle_percent() < AUTO_CONVERGE_MAX
             {
                 let current_throttle = vm.throttle_percent();
                 let new_throttle = current_throttle + AUTO_CONVERGE_STEP_SIZE;
                 let new_throttle = std::cmp::min(new_throttle, AUTO_CONVERGE_MAX);
-                log::info!("Increasing auto-converge: {new_throttle}%");
+                info!("Increasing auto-converge: {new_throttle}%");
                 if new_throttle != current_throttle {
                     vm.set_throttle_percent(new_throttle);
                 }
             }
-
-            // Update the start time of the iteration
-            s.iteration_start_time = Instant::now();
 
             // In the first iteration (`0`), we transmit the whole memory. Starting with the
             // second iteration (`1`), we start the delta transmission.
@@ -2071,51 +2111,82 @@ impl Vmm {
             };
 
             // Update the pending size (amount of data to transfer)
-            s.pending_size = iteration_table
+            s.bytes_to_transmit = iteration_table
                 .regions()
                 .iter()
                 .map(|range| range.length)
                 .sum();
+            s.pages_to_transmit = s.bytes_to_transmit.div_ceil(PAGE_SIZE as u64);
 
-            // Update thresholds
-            if bandwidth > 0.0 {
-                s.threshold_size = bandwidth as u64 * migrate_downtime_limit.as_millis() as u64;
-            }
-
-            // Enter the final stage of migration when the handover conditions are met
-            if s.iteration > 0 && s.pending_size <= s.threshold_size {
+            // Unlikely happy-path.
+            if s.bytes_to_transmit == 0 {
                 break;
             }
 
-            // Update the number of dirty pages
-            s.total_transferred_bytes += s.pending_size;
-            s.current_dirty_pages = s.pending_size.div_ceil(PAGE_SIZE as u64);
-            s.total_transferred_dirty_pages += s.current_dirty_pages;
+            // Update metrics and exit loop, if conditions are met.
+            if s.iteration > 0 {
+                // Refresh dirty rate: How many pages have been dirtied since the last time we
+                // fetched the dirty log.
+                if s.iteration_duration > Duration::ZERO {
+                    let dirty_rate_pps_f64 =
+                        s.pages_to_transmit as f64 / (s.iteration_duration.as_secs_f64());
+                    s.dirty_rate_pps = dirty_rate_pps_f64.ceil() as u64;
+                } else {
+                    s.dirty_rate_pps = 0;
+                }
+
+                // Update expected downtime:
+                // Strictly speaking, this is the time to transmit the last
+                // memory chunk, not the actual downtime, which will be higher.
+                let transmission_time_s = if s.bytes_per_sec > 0.0 {
+                    s.bytes_to_transmit as f64 / s.bytes_per_sec
+                } else {
+                    0.0
+                };
+                s.calculated_downtime_duration = Some(Duration::from_secs_f64(transmission_time_s));
+
+                // Exit the loop, when the handover conditions are met
+                if let Some(downtime) = s.calculated_downtime_duration
+                    && downtime <= migrate_downtime_limit
+                {
+                    info!("Memory delta transmission stopping - cutoff condition reached!");
+                    info!(
+                        "iteration:{},remaining:{}MiB,downtime(calc):{}ms,mebibyte/s:{:.2},throttle:{}%,dirty_rate:{}pps",
+                        s.iteration,
+                        s.bytes_to_transmit / 1024 / 1024,
+                        s.calculated_downtime_duration
+                            .expect("should have calculated downtime by now")
+                            .as_millis(),
+                        s.bytes_per_sec / 1024.0 / 1024.0,
+                        vm.throttle_percent(),
+                        s.dirty_rate_pps
+                    );
+                    break;
+                }
+            }
 
             // Send the current dirty pages
-            let transfer_start = Instant::now();
+            s.transmit_start_time = Instant::now();
             mem_send.send_memory(&iteration_table, socket)?;
-            let transfer_time = transfer_start.elapsed().as_millis() as f64;
+            s.transmit_duration = s.transmit_start_time.elapsed();
+
+            s.total_transferred_bytes += s.bytes_to_transmit;
+            s.total_transferred_pages += s.pages_to_transmit;
 
             // Update bandwidth
-            if transfer_time > 0.0 && s.pending_size > 0 {
-                bandwidth = s.pending_size as f64 / transfer_time;
-                // Convert bandwidth to MB/s
-                s.mb_per_sec = (bandwidth * 1000.0) / (1024.0 * 1024.0);
+            if s.transmit_duration > Duration::ZERO && s.bytes_to_transmit > 0 {
+                s.bytes_per_sec = s.bytes_to_transmit as f64 / s.transmit_duration.as_secs_f64();
             }
 
-            // Update iteration cost time
-            s.iteration_cost_time = s.iteration_start_time.elapsed();
-            if s.iteration_cost_time.as_millis() > 0 {
-                s.pages_per_second =
-                    s.current_dirty_pages * 1000 / s.iteration_cost_time.as_millis() as u64;
-            }
-            debug!(
-                "iteration {}: cost={}ms, throttle={}%, transmitted={}MiB",
+            s.iteration_duration = s.iteration_start_time.elapsed();
+            info!(
+                "iteration:{},cost={}ms,throttle={}%,transmitted={}MiB,dirty_rate={}pps,Mebibyte/s={:.2}",
                 s.iteration,
-                s.iteration_cost_time.as_millis(),
+                s.iteration_duration.as_millis(),
                 vm.throttle_percent(),
-                s.current_dirty_pages * 4096 / 1024 / 1024
+                s.bytes_to_transmit / 1024 / 1024,
+                s.dirty_rate_pps,
+                s.bytes_per_sec / 1024.0 / 1024.0
             );
 
             // Increment iteration counter
@@ -2168,11 +2239,11 @@ impl Vmm {
         )?;
 
         info!("Entering downtime phase");
-        s.downtime_start = Instant::now();
+        s.downtime_start_time = Instant::now();
         // End throttle thread
-        info!("stopping vcpu thread");
+        info!("stopping vcpu throttling thread");
         vm.stop_vcpu_throttling();
-        info!("stopped vcpu thread");
+        info!("stopped vcpu throttling thread");
         info!("pausing VM");
         vm.pause()?;
         info!("paused VM");
@@ -2181,11 +2252,17 @@ impl Vmm {
         let mut final_table = vm.dirty_log()?;
         final_table.extend(iteration_table.clone());
         mem_send.send_memory(&final_table, socket)?;
+
         // Update statistics
-        s.pending_size = final_table.regions().iter().map(|range| range.length).sum();
-        s.total_transferred_bytes += s.pending_size;
-        s.current_dirty_pages = s.pending_size.div_ceil(PAGE_SIZE as u64);
-        s.total_transferred_dirty_pages += s.current_dirty_pages;
+        s.bytes_to_transmit = final_table.regions().iter().map(|range| range.length).sum();
+        s.pages_to_transmit = s.bytes_to_transmit.div_ceil(PAGE_SIZE as u64);
+        s.total_transferred_bytes += s.bytes_to_transmit;
+        s.total_transferred_pages += s.pages_to_transmit;
+
+        info!(
+            "Memory Migration finished: transmitted {} bytes in total",
+            s.total_transferred_bytes
+        );
 
         // Stop logging dirty pages
         vm.stop_dirty_log()?;
@@ -2334,7 +2411,7 @@ impl Vmm {
         )?;
 
         // Record downtime
-        s.downtime = s.downtime_start.elapsed();
+        s.downtime_duration = s.downtime_start_time.elapsed();
 
         // Stop logging dirty pages
         if !send_data_migration.local {
@@ -2342,9 +2419,14 @@ impl Vmm {
         }
 
         // Record total migration time
-        s.total_time = s.start_time.elapsed();
+        s.migration_duration = s.migration_start_time.elapsed();
 
-        info!("Migration complete");
+        info!(
+            "Migration complete: downtime: {:.3}s, total: {:1}s, iterations: {}",
+            s.downtime_duration.as_secs_f64(),
+            s.migration_duration.as_secs_f64(),
+            s.iteration,
+        );
 
         // Let every Migratable object know about the migration being complete
         vm.complete_migration()
