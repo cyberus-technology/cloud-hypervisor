@@ -44,6 +44,7 @@
           inputsFrom = builtins.attrValues self.packages;
           packages = with pkgs; [
             gitlint
+            rustup
           ];
         };
         packages =
