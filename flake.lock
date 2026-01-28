@@ -1,0 +1,81 @@
+{
+  "nodes": {
+    "crane": {
+      "locked": {
+        "lastModified": 1769287525,
+        "narHash": "sha256-gABuYA6BzoRMLuPaeO5p7SLrpd4qExgkwEmYaYQY4bM=",
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "0314e365877a85c9e5758f9ea77a9972afbb4c21",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ipetkov",
+        "ref": "master",
+        "repo": "crane",
+        "type": "github"
+      }
+    },
+    "dried-nix-flakes": {
+      "locked": {
+        "lastModified": 1756139350,
+        "narHash": "sha256-pObQv94NclXVXjJV8sTiKwFes4fGEWpkNzDsXw5DqnY=",
+        "owner": "cyberus-technology",
+        "repo": "dried-nix-flakes",
+        "rev": "1b2ba62710c6c1d9eba0e8e3adc029cc2e9291a4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cyberus-technology",
+        "repo": "dried-nix-flakes",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1769318308,
+        "narHash": "sha256-Mjx6p96Pkefks3+aA+72lu1xVehb6mv2yTUUqmSet6Q=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "1cd347bf3355fce6c64ab37d3967b4a2cb4b878c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-25.11",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "crane": "crane",
+        "dried-nix-flakes": "dried-nix-flakes",
+        "nixpkgs": "nixpkgs",
+        "rust-overlay": "rust-overlay"
+      }
+    },
+    "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1769568593,
+        "narHash": "sha256-vf3cZf8imUlPzFtICa1uyReDzoPV0XhHOIRM3tqI5VY=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "6fe5039018d05cee5d01dda7df1c0846fb7943a4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
