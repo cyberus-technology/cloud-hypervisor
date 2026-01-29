@@ -12,7 +12,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00000016",
+        "replacements": "0x00000020",
         "mask": "0x00000000"
       }
     ],
@@ -68,7 +68,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00050654",
+        "replacements": "0x000806f8",
         "mask": "0x00000000"
       }
     ],
@@ -97,7 +97,7 @@
       },
       {
         "replacements": "0x76fa3223",
-        "mask": "0x88000000"
+        "mask": "0x89000000"
       }
     ],
     [
@@ -110,7 +110,7 @@
         "register": "EDX"
       },
       {
-        "replacements": "0x078bfbff",
+        "replacements": "0x078bbb7f",
         "mask": "0x08000000"
       }
     ],
@@ -628,7 +628,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00000002",
         "mask": "0x00000000"
       }
     ],
@@ -642,7 +642,7 @@
         "register": "EBX"
       },
       {
-        "replacements": "0xd19f07ab",
+        "replacements": "0xf1bf07ab",
         "mask": "0x00002040"
       }
     ],
@@ -656,7 +656,7 @@
         "register": "ECX"
       },
       {
-        "replacements": "0x0000000c",
+        "replacements": "0x1b415f4e",
         "mask": "0x00000010"
       }
     ],
@@ -670,7 +670,7 @@
         "register": "EDX"
       },
       {
-        "replacements": "0xa4000000",
+        "replacements": "0xa7c04010",
         "mask": "0x18000400"
       }
     ],
@@ -684,7 +684,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00001c30",
         "mask": "0x00000000"
       }
     ],
@@ -740,7 +740,7 @@
         "register": "EDX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00000017",
         "mask": "0x00000000"
       }
     ],
@@ -936,7 +936,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x000002e7",
+        "replacements": "0x000602e7",
         "mask": "0x00000000"
       }
     ],
@@ -992,7 +992,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x0000000f",
+        "replacements": "0x0000001f",
         "mask": "0x00000000"
       }
     ],
@@ -1085,20 +1085,6 @@
         "leaf": "0xd",
         "sub_leaf": {
           "start": "0x3",
-          "end": "0x3"
-        },
-        "register": "EAX"
-      },
-      {
-        "replacements": "0x00000000",
-        "mask": "0x00000000"
-      }
-    ],
-    [
-      {
-        "leaf": "0xd",
-        "sub_leaf": {
-          "start": "0x4",
           "end": "0x4"
         },
         "register": "EAX"
@@ -1113,20 +1099,6 @@
         "leaf": "0xd",
         "sub_leaf": {
           "start": "0x3",
-          "end": "0x3"
-        },
-        "register": "EBX"
-      },
-      {
-        "replacements": "0x00000000",
-        "mask": "0x00000000"
-      }
-    ],
-    [
-      {
-        "leaf": "0xd",
-        "sub_leaf": {
-          "start": "0x4",
           "end": "0x4"
         },
         "register": "EBX"
@@ -1141,20 +1113,6 @@
         "leaf": "0xd",
         "sub_leaf": {
           "start": "0x3",
-          "end": "0x3"
-        },
-        "register": "ECX"
-      },
-      {
-        "replacements": "0x00000000",
-        "mask": "0x00000000"
-      }
-    ],
-    [
-      {
-        "leaf": "0xd",
-        "sub_leaf": {
-          "start": "0x4",
           "end": "0x4"
         },
         "register": "ECX"
@@ -1169,20 +1127,6 @@
         "leaf": "0xd",
         "sub_leaf": {
           "start": "0x3",
-          "end": "0x3"
-        },
-        "register": "EDX"
-      },
-      {
-        "replacements": "0x00000000",
-        "mask": "0x00000000"
-      }
-    ],
-    [
-      {
-        "leaf": "0xd",
-        "sub_leaf": {
-          "start": "0x4",
           "end": "0x4"
         },
         "register": "EDX"
@@ -1267,7 +1211,7 @@
         "leaf": "0xd",
         "sub_leaf": {
           "start": "0xa",
-          "end": "0x3f"
+          "end": "0xa"
         },
         "register": "EAX"
       },
@@ -1351,7 +1295,7 @@
         "leaf": "0xd",
         "sub_leaf": {
           "start": "0xa",
-          "end": "0x3f"
+          "end": "0xa"
         },
         "register": "EBX"
       },
@@ -1435,6 +1379,328 @@
         "leaf": "0xd",
         "sub_leaf": {
           "start": "0xa",
+          "end": "0xa"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xb",
+          "end": "0xc"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xb",
+          "end": "0xc"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xb",
+          "end": "0xc"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xb",
+          "end": "0xc"
+        },
+        "register": "EDX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xd",
+          "end": "0xd"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xd",
+          "end": "0xd"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xd",
+          "end": "0xd"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xe",
+          "end": "0xe"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xe",
+          "end": "0xe"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xe",
+          "end": "0xe"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xe",
+          "end": "0xe"
+        },
+        "register": "EDX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xf",
+          "end": "0x10"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x11",
+          "end": "0x11"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000040",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x12",
+          "end": "0x12"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00002000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x13",
+          "end": "0x3f"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xf",
+          "end": "0x10"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x11",
+          "end": "0x11"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000ac0",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x12",
+          "end": "0x12"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000b00",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x13",
+          "end": "0x3f"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0xf",
+          "end": "0x10"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x11",
+          "end": "0x11"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000002",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x12",
+          "end": "0x12"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000006",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
+          "start": "0x13",
           "end": "0x3f"
         },
         "register": "ECX"
@@ -1925,6 +2191,20 @@
         "leaf": "0x18",
         "sub_leaf": {
           "start": "0x0",
+          "end": "0x0"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0xffff070f"
+      }
+    ],
+    [
+      {
+        "leaf": "0x18",
+        "sub_leaf": {
+          "start": "0x1",
           "end": "0xffffffff"
         },
         "register": "EBX"
@@ -1939,6 +2219,20 @@
         "leaf": "0x18",
         "sub_leaf": {
           "start": "0x0",
+          "end": "0x0"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0xffffffff"
+      }
+    ],
+    [
+      {
+        "leaf": "0x18",
+        "sub_leaf": {
+          "start": "0x1",
           "end": "0xffffffff"
         },
         "register": "ECX"
@@ -1953,6 +2247,20 @@
         "leaf": "0x18",
         "sub_leaf": {
           "start": "0x0",
+          "end": "0x0"
+        },
+        "register": "EDX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x03ffc1ff"
+      }
+    ],
+    [
+      {
+        "leaf": "0x18",
+        "sub_leaf": {
+          "start": "0x1",
           "end": "0xffffffff"
         },
         "register": "EDX"
@@ -2014,7 +2322,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00000001",
         "mask": "0x00000000"
       }
     ],
@@ -2028,7 +2336,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x04002000",
         "mask": "0x00000000"
       }
     ],
@@ -2042,7 +2350,7 @@
         "register": "EBX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00080040",
         "mask": "0x00000000"
       }
     ],
@@ -2056,7 +2364,7 @@
         "register": "ECX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00000010",
         "mask": "0x00000000"
       }
     ],
@@ -2084,7 +2392,7 @@
         "register": "EBX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00004010",
         "mask": "0x00000000"
       }
     ],
@@ -2107,6 +2415,20 @@
         "leaf": "0x1f",
         "sub_leaf": {
           "start": "0x0",
+          "end": "0x0"
+        },
+        "register": "EAX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x0000001f"
+      }
+    ],
+    [
+      {
+        "leaf": "0x1f",
+        "sub_leaf": {
+          "start": "0x1",
           "end": "0xffffffff"
         },
         "register": "EAX"
@@ -2121,6 +2443,20 @@
         "leaf": "0x1f",
         "sub_leaf": {
           "start": "0x0",
+          "end": "0x0"
+        },
+        "register": "EBX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x0000ffff"
+      }
+    ],
+    [
+      {
+        "leaf": "0x1f",
+        "sub_leaf": {
+          "start": "0x1",
           "end": "0xffffffff"
         },
         "register": "EBX"
@@ -2135,6 +2471,20 @@
         "leaf": "0x1f",
         "sub_leaf": {
           "start": "0x0",
+          "end": "0x0"
+        },
+        "register": "ECX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x0000ffff"
+      }
+    ],
+    [
+      {
+        "leaf": "0x1f",
+        "sub_leaf": {
+          "start": "0x1",
           "end": "0xffffffff"
         },
         "register": "ECX"
@@ -2149,6 +2499,20 @@
         "leaf": "0x1f",
         "sub_leaf": {
           "start": "0x0",
+          "end": "0x0"
+        },
+        "register": "EDX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0xffffffff"
+      }
+    ],
+    [
+      {
+        "leaf": "0x1f",
+        "sub_leaf": {
+          "start": "0x1",
           "end": "0xffffffff"
         },
         "register": "EDX"
@@ -2546,7 +2910,7 @@
         "register": "EBX"
       },
       {
-        "replacements": "0x6b53206c",
+        "replacements": "0x6153206c",
         "mask": "0x00000000"
       }
     ],
@@ -2560,7 +2924,7 @@
         "register": "ECX"
       },
       {
-        "replacements": "0x6b616c79",
+        "replacements": "0x69687070",
         "mask": "0x00000000"
       }
     ],
@@ -2574,7 +2938,7 @@
         "register": "EDX"
       },
       {
-        "replacements": "0x00000065",
+        "replacements": "0x52206572",
         "mask": "0x00000000"
       }
     ],
@@ -2588,7 +2952,7 @@
         "register": "EAX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x64697061",
         "mask": "0x00000000"
       }
     ],
@@ -2602,7 +2966,7 @@
         "register": "EBX"
       },
       {
-        "replacements": "0x00000000",
+        "replacements": "0x00000073",
         "mask": "0x00000000"
       }
     ],
@@ -2813,7 +3177,7 @@
       },
       {
         "replacements": "0x00000000",
-        "mask": "0x0103feff"
+        "mask": "0x0103fefe"
       }
     ],
     [
