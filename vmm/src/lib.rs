@@ -2187,6 +2187,21 @@ impl Vmm {
     ) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut iteration_table;
 
+        let log_migration_progress = |s: &MigrationState, vm: &Vm| {
+            info!(
+                "iter={},dur={}ms,overhead={}ms,throttle={}%,size={}MiB,dirtyrate={}pps,bandwidth={:.2}MiBs,downtime(expected)={}ms",
+                s.iteration,
+                s.iteration_duration.as_millis(),
+                (s.iteration_duration - s.transmit_duration).as_millis(),
+                vm.throttle_percent(),
+                s.bytes_to_transmit.div_ceil(1024).div_ceil(1024),
+                s.dirty_rate_pps,
+                s.bytes_per_sec / 1024.0 / 1024.0,
+                s.calculated_downtime_duration
+                    .map_or(migrate_downtime_limit.as_millis(), |d| d.as_millis()),
+            );
+        };
+
         // We loop until we converge (target downtime is achievable).
         loop {
             // Update the start time of the iteration
@@ -2232,11 +2247,6 @@ impl Vmm {
                 .sum();
             s.pages_to_transmit = s.bytes_to_transmit.div_ceil(PAGE_SIZE as u64);
 
-            // Unlikely happy-path.
-            if s.bytes_to_transmit == 0 {
-                break;
-            }
-
             // Update metrics and exit loop, if conditions are met.
             if s.iteration > 0 {
                 // Refresh dirty rate: How many pages have been dirtied since the last time we
@@ -2264,17 +2274,7 @@ impl Vmm {
                     && downtime <= migrate_downtime_limit
                 {
                     info!("Memory delta transmission stopping - cutoff condition reached!");
-                    info!(
-                        "iteration:{},remaining:{}MiB,downtime(calc):{}ms,mebibyte/s:{:.2},throttle:{}%,dirty_rate:{}pps",
-                        s.iteration,
-                        s.bytes_to_transmit / 1024 / 1024,
-                        s.calculated_downtime_duration
-                            .expect("should have calculated downtime by now")
-                            .as_millis(),
-                        s.bytes_per_sec / 1024.0 / 1024.0,
-                        vm.throttle_percent(),
-                        s.dirty_rate_pps
-                    );
+                    log_migration_progress(s, vm);
                     break;
                 }
             }
@@ -2293,15 +2293,7 @@ impl Vmm {
             }
 
             s.iteration_duration = s.iteration_start_time.elapsed();
-            info!(
-                "iteration:{},cost={}ms,throttle={}%,transmitted={}MiB,dirty_rate={}pps,Mebibyte/s={:.2}",
-                s.iteration,
-                s.iteration_duration.as_millis(),
-                vm.throttle_percent(),
-                s.bytes_to_transmit / 1024 / 1024,
-                s.dirty_rate_pps,
-                s.bytes_per_sec / 1024.0 / 1024.0
-            );
+            log_migration_progress(s, vm);
 
             // Increment iteration counter
             s.iteration += 1;
@@ -2374,8 +2366,14 @@ impl Vmm {
         s.total_transferred_pages += s.pages_to_transmit;
 
         info!(
-            "Memory Migration finished: transmitted {} bytes in total",
-            s.total_transferred_bytes
+            "Memory Migration finished: iter={},throttle={}%,size={}MiB,dirtyrate={}pps,bandwidth={:.2}MiBs,downtime(expected)={}ms",
+            (s.iteration_duration - s.transmit_duration).as_millis(),
+            vm.throttle_percent(),
+            s.bytes_to_transmit.div_ceil(1024).div_ceil(1024),
+            s.dirty_rate_pps,
+            s.bytes_per_sec / 1024.0 / 1024.0,
+            s.calculated_downtime_duration
+                .map_or(migrate_downtime_limit.as_millis(), |d| d.as_millis()),
         );
 
         // Stop logging dirty pages
@@ -2536,8 +2534,8 @@ impl Vmm {
         s.migration_duration = s.migration_start_time.elapsed();
 
         info!(
-            "Migration complete: downtime: {:.3}s, total: {:1}s, iterations: {}",
-            s.downtime_duration.as_secs_f64(),
+            "Migration complete: downtime:{:}ms,total:{:1}s,iterations:{}",
+            s.downtime_duration.as_millis(),
             s.migration_duration.as_secs_f64(),
             s.iteration,
         );
