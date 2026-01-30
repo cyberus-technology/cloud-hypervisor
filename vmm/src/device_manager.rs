@@ -94,7 +94,7 @@ use virtio_devices::{
     AccessPlatformMapping, ActivateError, Block, Endpoint, IommuMapping, PostMigrationAnnouncer,
     VdpaDmaMapping, VirtioMemMappingSource,
 };
-use vm_allocator::{AddressAllocator, SystemAllocator};
+use vm_allocator::{AddressAllocator, InterruptAllocError, SystemAllocator};
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_device::interrupt::{
     InterruptIndex, InterruptManager, LegacyIrqGroupConfig, MsiIrqGroupConfig,
@@ -274,7 +274,7 @@ pub enum DeviceManagerError {
 
     /// Cannot allocate IRQ.
     #[error("Cannot allocate IRQ")]
-    AllocateIrq,
+    AllocateIrq(#[from] InterruptAllocError),
 
     /// Cannot configure the IRQ.
     #[error("Cannot configure the IRQ")]
