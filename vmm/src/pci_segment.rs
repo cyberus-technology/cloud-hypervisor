@@ -198,7 +198,7 @@ impl PciSegment {
                     .lock()
                     .unwrap()
                     .allocate_irq()
-                    .ok_or(DeviceManagerError::AllocateIrq)? as u8,
+                    .map_err(DeviceManagerError::AllocateIrq)? as u8,
             );
         }
 
