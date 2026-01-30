@@ -31,7 +31,7 @@ impl InterruptRoute {
         let irq_fd = EventFd::new(libc::EFD_NONBLOCK)?;
         let gsi = allocator
             .allocate_gsi()
-            .ok_or_else(|| io::Error::other("Failed allocating new GSI"))?;
+            .map_err(|e| io::Error::other(format!("Failed allocating new GSI: {e}")))?;
 
         Ok(InterruptRoute {
             gsi,
