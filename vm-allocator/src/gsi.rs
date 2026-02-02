@@ -190,6 +190,11 @@ impl GsiAllocator {
         self.gsis.alloc()
     }
 
+    /// Frees a GSI
+    pub fn free_gsi(&mut self, vector: u32) -> Result<(), InterruptAllocError> {
+        self.gsis.free(vector)
+    }
+
     #[cfg(target_arch = "x86_64")]
     /// Allocate an IRQ
     pub fn allocate_irq(&mut self) -> Result<u32, InterruptAllocError> {
