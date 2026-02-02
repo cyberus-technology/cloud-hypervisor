@@ -24,12 +24,15 @@ struct InterruptRoute {
     gsi: u32,
     irq_fd: EventFd,
     registered: AtomicBool,
+    allocator: Arc<Mutex<SystemAllocator>>,
 }
 
 impl InterruptRoute {
-    pub fn new(allocator: &mut SystemAllocator) -> Result<Self> {
+    pub fn new(allocator: Arc<Mutex<SystemAllocator>>) -> Result<Self> {
         let irq_fd = EventFd::new(libc::EFD_NONBLOCK)?;
         let gsi = allocator
+            .lock()
+            .unwrap()
             .allocate_gsi()
             .map_err(|e| io::Error::other(format!("Failed allocating new GSI: {e}")))?;
 
@@ -37,6 +40,7 @@ impl InterruptRoute {
             gsi,
             irq_fd,
             registered: AtomicBool::new(false),
+            allocator,
         })
     }
 
@@ -74,6 +78,12 @@ impl InterruptRoute {
                 .try_clone()
                 .expect("Failed cloning interrupt's EventFd"),
         )
+    }
+}
+
+impl Drop for InterruptRoute {
+    fn drop(&mut self) {
+        self.allocator.lock().unwrap().free_gsi(self.gsi).unwrap();
     }
 }
 
@@ -292,11 +302,10 @@ impl InterruptManager for MsiInterruptManager {
     type GroupConfig = MsiIrqGroupConfig;
 
     fn create_group(&self, config: Self::GroupConfig) -> Result<Arc<dyn InterruptSourceGroup>> {
-        let mut allocator = self.allocator.lock().unwrap();
         let mut irq_routes: HashMap<InterruptIndex, InterruptRoute> =
             HashMap::with_capacity(config.count as usize);
         for i in config.base..config.base + config.count {
-            irq_routes.insert(i, InterruptRoute::new(&mut allocator)?);
+            irq_routes.insert(i, InterruptRoute::new(self.allocator.clone())?);
         }
 
         Ok(Arc::new(MsiInterruptGroup::new(
