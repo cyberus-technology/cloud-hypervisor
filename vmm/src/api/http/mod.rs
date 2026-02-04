@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::File;
-use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::os::unix::io::{IntoRawFd, RawFd};
 use std::os::unix::net::UnixListener;
@@ -550,12 +549,7 @@ fn start_http_thread(
                 server.start_server().unwrap();
 
                 loop {
-                    let n = match outer_epoll.wait(-1, &mut events) {
-                        Ok(n) => n,
-                        // Can for example happen when connecting a debugger.
-                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => panic!("failed to wait for events: {e}"),
-                    };
+                    let n = outer_epoll.wait(-1, &mut events).unwrap();
                     for ev in events.iter().take(n) {
                         match ev.data() {
                             HTTP_EPOLL_TOKEN => {
