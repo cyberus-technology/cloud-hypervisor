@@ -17,7 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 
 use hypervisor::HypervisorType;
-use log::{debug, error};
+use log::{debug, error, info};
 use micro_http::{
     Body, HttpServer, MediaType, Method, Request, Response, ServerError, ServerRequest,
     ServerResponse, StatusCode, Version,
@@ -411,6 +411,7 @@ impl HttpWorkerThreads {
 
                                     // Send the response to the HTTP server thread together with this
                                     // threads id.
+                                    info!("http-worker {n}: Trying to send response");
                                     if let Err(e) = response_tx.send(response) {
                                         error!(
                                             "HTTP worker thread {id}: error sending response {e}"
@@ -418,8 +419,10 @@ impl HttpWorkerThreads {
                                         break;
                                     }
 
+                                    info!("http-worker {n}: Response sent");
                                     // Notify the HTTP server thread.
                                     response_event.write(1).ok();
+                                    info!("wrote to response_event");
                                 }
                                 Err(_) => {
                                     // We assume that the other side of the channel
@@ -578,10 +581,13 @@ fn start_http_thread(
                                 }
                             }
                             WORKER_EPOLL_TOKEN => {
+                                info!("Handling WORKER_EPOLL_TOKEN");
                                 // One of the worker threads has a response.
                                 // We clear the eventfd first.
                                 let _ = worker_threads.response_event.read().unwrap();
+                                info!("Waiting for response_rx.recv");
                                 let response = worker_threads.response_rx.recv().unwrap();
+                                info!("Got response");
                                 if let Err(e) = server.respond(response){
                                     error!("HTTP server error on response: {e}");
                                 }
