@@ -350,7 +350,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
                     short: "osxsave",
                     description: "XSAVE (and related instructions) are enabled by OS",
                     bits_range: (27, 27),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Passthrough,
                 },
                 ValueDefinition {
                     short: "avx",
@@ -1428,7 +1428,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
                     short: "ospke",
                     description: "OS protection keys enable",
                     bits_range: (4, 4),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Passthrough,
                 },
                 ValueDefinition {
                     short: "waitpkg",
