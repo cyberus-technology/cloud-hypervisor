@@ -1440,11 +1440,8 @@ impl Vm {
             .unwrap()
             .platform
             .as_ref()
-            .and_then(|p| p.oem_strings.clone());
-
-        let oem_strings = oem_strings
-            .as_deref()
-            .map(|strings| strings.iter().map(|s| s.as_ref()).collect::<Vec<&str>>());
+            .map(|p| p.oem_strings.clone())
+            .unwrap_or_default();
 
         let topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
 
@@ -1458,7 +1455,7 @@ impl Vm {
             rsdp_addr,
             serial_number.as_deref(),
             uuid.as_deref(),
-            oem_strings.as_deref(),
+            oem_strings,
             topology,
         )
         .map_err(Error::ConfigureSystem)?;

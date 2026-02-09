@@ -1103,7 +1103,7 @@ pub fn configure_system(
     rsdp_addr: Option<GuestAddress>,
     serial_number: Option<&str>,
     uuid: Option<&str>,
-    oem_strings: Option<&[&str]>,
+    oem_strings: Vec<String>,
     topology: Option<(u16, u16, u16, u16)>,
 ) -> super::Result<()> {
     // Write EBDA address to location where ACPICA expects to find it
@@ -1657,7 +1657,7 @@ mod unit_tests {
             Some(layout::RSDP_POINTER),
             None,
             None,
-            None,
+            Vec::new(),
             None,
         );
         config_err.unwrap_err();
@@ -1681,7 +1681,7 @@ mod unit_tests {
             None,
             None,
             None,
-            None,
+            Vec::new(),
             None,
         )
         .unwrap();
@@ -1710,7 +1710,7 @@ mod unit_tests {
             None,
             None,
             None,
-            None,
+            Vec::new(),
             None,
         )
         .unwrap();
@@ -1725,7 +1725,7 @@ mod unit_tests {
             None,
             None,
             None,
-            None,
+            Vec::new(),
             None,
         )
         .unwrap();
