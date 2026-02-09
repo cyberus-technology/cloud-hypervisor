@@ -36,6 +36,7 @@ use linux_loader::loader::elf::start_info::{
 use log::{debug, error, info, trace};
 pub use msr_filter::{MAX_BITMAP_SIZE, filter_denied_msrs};
 use serde::{Deserialize, Serialize};
+pub use smbios::SmbiosConfig;
 use thiserror::Error;
 use vm_memory::{
     Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
@@ -1259,9 +1260,7 @@ pub fn configure_system(
     _num_cpus: u32,
     setup_header: Option<setup_header>,
     rsdp_addr: Option<GuestAddress>,
-    serial_number: Option<&str>,
-    uuid: Option<&str>,
-    oem_strings: Option<&[String]>,
+    smbios: Option<&SmbiosConfig>,
     topology: Option<(u16, u16, u16, u16)>,
 ) -> super::Result<()> {
     // Write EBDA address to location where ACPICA expects to find it
@@ -1269,13 +1268,7 @@ pub fn configure_system(
         .write_obj((layout::EBDA_START.0 >> 4) as u16, layout::EBDA_POINTER)
         .map_err(Error::EbdaSetup)?;
 
-    let size = smbios::setup_smbios(
-        guest_mem,
-        serial_number,
-        uuid,
-        oem_strings.unwrap_or_default(),
-    )
-    .map_err(Error::SmbiosSetup)?;
+    let size = smbios::setup_smbios(guest_mem, smbios).map_err(Error::SmbiosSetup)?;
 
     // Place the MP table after the SMIOS table aligned to 16 bytes
     let offset = GuestAddress(layout::SMBIOS_START).unchecked_add(size);
@@ -1820,8 +1813,6 @@ mod unit_tests {
             Some(layout::RSDP_POINTER),
             None,
             None,
-            None,
-            None,
         );
         config_err.unwrap_err();
 
@@ -1840,8 +1831,6 @@ mod unit_tests {
             0,
             &None,
             no_vcpus,
-            None,
-            None,
             None,
             None,
             None,
@@ -1873,8 +1862,6 @@ mod unit_tests {
             None,
             None,
             None,
-            None,
-            None,
         )
         .unwrap();
 
@@ -1884,8 +1871,6 @@ mod unit_tests {
             0,
             &None,
             no_vcpus,
-            None,
-            None,
             None,
             None,
             None,
