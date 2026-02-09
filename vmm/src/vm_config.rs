@@ -143,6 +143,24 @@ pub struct PlatformConfig {
     pub vfio_p2p_dma: bool,
 }
 
+#[cfg(target_arch = "x86_64")]
+impl PlatformConfig {
+    pub fn smbios_config(&self) -> Option<arch::x86_64::SmbiosConfig> {
+        let smbios = arch::x86_64::SmbiosConfig {
+            serial_number: self.serial_number.clone(),
+            uuid: self.uuid.clone(),
+            oem_strings: self.oem_strings.clone(),
+        };
+
+        if smbios.serial_number.is_none() && smbios.uuid.is_none() && smbios.oem_strings.is_empty()
+        {
+            None
+        } else {
+            Some(smbios)
+        }
+    }
+}
+
 pub const DEFAULT_PCI_SEGMENT_APERTURE_WEIGHT: u32 = 1;
 
 fn default_pci_segment_aperture_weight() -> u32 {
