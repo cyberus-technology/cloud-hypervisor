@@ -791,7 +791,8 @@ impl PlatformConfig {
         let oem_strings = parser
             .convert::<StringList>("oem_strings")
             .map_err(Error::ParsePlatform)?
-            .map(|v| v.0);
+            .map(|v| v.0)
+            .unwrap_or_default();
         #[cfg(feature = "tdx")]
         let tdx = parser
             .convert::<Toggle>("tdx")
@@ -4519,7 +4520,7 @@ mod unit_tests {
             iommu_address_width_bits: MAX_IOMMU_ADDRESS_WIDTH_BITS,
             serial_number: None,
             uuid: None,
-            oem_strings: None,
+            oem_strings: Vec::new(),
             #[cfg(feature = "tdx")]
             tdx: false,
             #[cfg(feature = "sev_snp")]
