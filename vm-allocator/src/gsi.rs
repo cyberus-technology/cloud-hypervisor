@@ -223,3 +223,104 @@ impl Default for GsiAllocator {
         GsiAllocator::new()
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::{InterruptAllocError, InterruptAllocator};
+
+    #[test]
+    // Checks that the allocator can only allocate as many vectors as configured.
+    fn test_allocator_respects_size() {
+        for size in [1, 8, 16, 17, 32, 64, 65, 128] {
+            let mut allocator = InterruptAllocator::new(size, 0);
+            let mut num_vectors = 0u32;
+
+            loop {
+                let vec = allocator.alloc();
+                match vec {
+                    Ok(_) => {
+                        num_vectors += 1;
+                        continue;
+                    }
+                    Err(e) => match e {
+                        InterruptAllocError::ExhaustedError(_) => {
+                            assert_eq!(size, num_vectors);
+                            break;
+                        }
+                        _ => panic!(),
+                    },
+                }
+            }
+            assert_eq!(size, num_vectors);
+        }
+    }
+
+    #[test]
+    // Checks that the allocator starts allocating vectors at the given offset.
+    fn test_allocator_respects_offset() {
+        for offset in [1, 8, 16, 17, 32, 64, 65, 128] {
+            let mut allocator = InterruptAllocator::new(1, offset);
+            let vec = allocator.alloc().unwrap();
+
+            assert_eq!(offset, vec);
+            allocator.free(vec).unwrap();
+        }
+    }
+
+    #[test]
+    // Checks that the calculations in alloc and free are correct.
+    fn test_allocator_alloc_and_free_all_vectors() {
+        for size in [1, 8, 16, 17, 32, 64, 65, 128, 4096] {
+            let mut allocator = InterruptAllocator::new(size, 0);
+            let mut num_vectors = 0u32;
+
+            while allocator.alloc().is_ok() {
+                num_vectors += 1;
+            }
+
+            assert_eq!(size, num_vectors);
+            num_vectors -= 1;
+
+            loop {
+                if let Err(e) = allocator.free(num_vectors) {
+                    println!("Could not free {num_vectors}: {e}");
+                    break;
+                }
+                if let Some(v) = num_vectors.checked_sub(1) {
+                    num_vectors = v;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    // Checks that freeing a vector that isn't allocated results in an error.
+    fn test_can_only_free_allocated_vectors() {
+        let mut allocator = InterruptAllocator::new(1, 0);
+
+        let vec = allocator.alloc().unwrap();
+        allocator.free(vec).unwrap();
+
+        let e = allocator.free(vec);
+        assert_eq!(e, Err(InterruptAllocError::AlreadyFree(vec)));
+    }
+
+    #[test]
+    // Checks that freeing a vector that is not in range of the allocator results
+    // in an error.
+    fn test_can_only_free_vectors_in_range() {
+        let size = 1u32;
+        let offset = 0u32;
+        let mut allocator = InterruptAllocator::new(size, 0);
+
+        // The allocator has vectors from `0 .. size - 1`, this `size` should be
+        // out of range.
+        let e = allocator.free(size);
+        assert_eq!(
+            e,
+            Err(InterruptAllocError::OutOfRange(size, offset, offset + size))
+        );
+    }
+}
