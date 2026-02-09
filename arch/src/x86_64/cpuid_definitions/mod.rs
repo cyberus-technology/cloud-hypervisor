@@ -3,49 +3,68 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::io::Write;
 use std::ops::RangeInclusive;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::x86_64::CpuidReg;
+use crate::{deserialize_u32_hex, serialize_u32_hex};
 
 pub mod intel;
 #[cfg(feature = "kvm")]
 pub mod kvm;
 
-pub(in crate::x86_64) fn serialize_as_hex<S: Serializer>(
-    input: &u32,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    // two bytes for "0x" prefix and eight for the hex encoded number
-    let mut buffer = [0_u8; 10];
-    let _ = write!(&mut buffer[..], "{input:#010x}");
-    let str = core::str::from_utf8(&buffer[..])
-        .expect("the buffer should be filled with valid UTF-8 bytes");
-    serializer.serialize_str(str)
-}
-
-pub(in crate::x86_64) fn deserialize_from_hex<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<u32, D::Error> {
-    let hex = <&'de str as Deserialize>::deserialize(deserializer)?;
-    u32::from_str_radix(hex.strip_prefix("0x").unwrap_or(""), 16).map_err(|_| {
-        <D::Error as serde::de::Error>::custom(format!("{hex} is not a hex encoded 32 bit integer"))
-    })
-}
-
 /// Parameters for inspecting CPUID definitions.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Parameters {
     // The leaf (EAX) parameter used with the CPUID instruction
-    #[serde(serialize_with = "serialize_as_hex")]
-    #[serde(deserialize_with = "deserialize_from_hex")]
+    #[serde(
+        serialize_with = "serialize_u32_hex",
+        deserialize_with = "deserialize_u32_hex"
+    )]
     pub leaf: u32,
     // The sub-leaf (ECX) parameter used with the CPUID instruction
+    #[serde(
+        serialize_with = "serialize_range_hex",
+        deserialize_with = "deserialize_range_hex"
+    )]
     pub sub_leaf: RangeInclusive<u32>,
     // The register we are interested in inspecting which gets filled by the CPUID instruction
     pub register: CpuidReg,
+}
+
+// Only used for (de-)serialization
+#[derive(Debug, Serialize, Deserialize)]
+struct ProvisionalRangeInclusive {
+    #[serde(
+        serialize_with = "serialize_u32_hex",
+        deserialize_with = "deserialize_u32_hex"
+    )]
+    start: u32,
+    #[serde(
+        serialize_with = "serialize_u32_hex",
+        deserialize_with = "deserialize_u32_hex"
+    )]
+    end: u32,
+}
+
+fn serialize_range_hex<S: serde::Serializer>(
+    input: &RangeInclusive<u32>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let provisional = ProvisionalRangeInclusive {
+        start: *input.start(),
+        end: *input.end(),
+    };
+    provisional.serialize(serializer)
+}
+
+fn deserialize_range_hex<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RangeInclusive<u32>, D::Error> {
+    let ProvisionalRangeInclusive { start, end } =
+        ProvisionalRangeInclusive::deserialize(deserializer)?;
+    Ok(start..=end)
 }
 
 /// Describes a policy for how the corresponding CPUID data should be considered when building
@@ -125,59 +144,17 @@ impl<const NUM_PARAMETERS: usize> CpuidDefinitions<NUM_PARAMETERS> {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use serde::Deserialize;
 
-    use super::{Parameters, deserialize_from_hex, serialize_as_hex};
+    use super::Parameters;
     use crate::x86_64::CpuidReg;
-
-    /*
-    Check that the leaves get the string representation we expect.
-    This does not really matter from a functionality point of view, but we want
-    to read it in the expected format when manually viewing the generated CPU
-    profile files.
-
-    Also assert that deserialization gives the original value back
-     */
-    #[test]
-    fn hex_serialization() {
-        for (leaf, expected) in [
-            0x0_u32, 0x7, 0xd, 0x1e, 0x40000000, 0x4fffffff, 0x80000000, 0x8fffffff,
-        ]
-        .into_iter()
-        .zip([
-            "0x00000000",
-            "0x00000007",
-            "0x0000000d",
-            "0x0000001e",
-            "0x40000000",
-            "0x4fffffff",
-            "0x80000000",
-            "0x8fffffff",
-        ]) {
-            let mut v = Vec::new();
-            let mut serializer = serde_json::Serializer::new(&mut v);
-            serialize_as_hex(&leaf, &mut serializer).unwrap();
-            let serialized = str::from_utf8(&v[..]).unwrap();
-            // JSON Strings have surrounding "" hence we trim that
-            let serialized_trimmed = serialized
-                .strip_prefix('"')
-                .unwrap()
-                .strip_suffix('"')
-                .unwrap();
-            dbg!(serialized_trimmed);
-            assert_eq!(serialized_trimmed, expected);
-            // Also check that we can deserialize this back to the original value
-            let mut deserializer = serde_json::Deserializer::from_str(serialized);
-            let deserialized = deserialize_from_hex(&mut deserializer).unwrap();
-            assert_eq!(deserialized, leaf);
-        }
-    }
 
     // Check that serializing and then deserializing a value of type `Parameter` results in the
     // same value we started with.
+    //
+    // Also check that the serialized numeric values are hex strings
     proptest! {
         #[test]
-        fn parameter_serialization_roundtrip_works(leaf in 0u32..u32::MAX, x1 in 0u32..100, x2 in 0u32..100, reg in 0..4) {
+        fn parameter_serialization_roundtrip_works(leaf in any::<u32>(), x1 in 0u32..100, x2 in 0u32..100, reg in 0..4) {
             let sub_leaf_range_start = std::cmp::min(x1, x2);
             let sub_leaf_range_end = std::cmp::max(x1,x2);
             let sub_leaf = sub_leaf_range_start..=sub_leaf_range_end;
@@ -196,19 +173,13 @@ mod tests {
             let serialized = serde_json::to_string(&cpuid_parameters).unwrap();
             let deserialized: Parameters = serde_json::from_str(&serialized).unwrap();
             prop_assert_eq!(&deserialized, &cpuid_parameters);
-        }
-    }
 
-    // Check that `deserialize_from_hex` does not succeed if the stringified u32 does not start with 0x
-    proptest! {
-        #[test]
-        fn hex_deserialization_requires_prefix(leaf in any::<u32>().prop_map(|leaf| std::iter::once('"').chain(leaf.to_string().chars()).chain(std::iter::once('"')).collect::<String>())) {
-            let mut deserializer = serde_json::Deserializer::from_str(leaf.as_str());
-            // Check that standard deserialization works
-            let result = <String as Deserialize>::deserialize(&mut deserializer);
-            prop_assert!(result.is_ok());
-            let mut deserializer = serde_json::Deserializer::from_str(leaf.as_str());
-            prop_assert!(deserialize_from_hex(&mut deserializer).is_err());
+            // Check that all numeric values are hex strings when serialized to json
+            let params_json = serde_json::to_value(cpuid_parameters).unwrap();
+            prop_assert!(params_json.get("leaf").unwrap().as_str().unwrap().starts_with("0x"));
+            let sub_leaf_map = params_json.get("sub_leaf").unwrap().as_object().unwrap();
+            prop_assert!(sub_leaf_map.get("start").unwrap().as_str().unwrap().starts_with("0x"));
+            prop_assert!(sub_leaf_map.get("end").unwrap().as_str().unwrap().starts_with("0x"));
         }
     }
 }
