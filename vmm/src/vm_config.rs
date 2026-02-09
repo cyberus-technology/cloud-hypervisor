@@ -130,7 +130,7 @@ pub struct PlatformConfig {
     #[serde(default)]
     pub uuid: Option<String>,
     #[serde(default)]
-    pub oem_strings: Option<Vec<String>>,
+    pub oem_strings: Vec<String>,
     #[cfg(feature = "tdx")]
     #[serde(default)]
     pub tdx: bool,
