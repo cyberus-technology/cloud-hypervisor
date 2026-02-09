@@ -50,6 +50,13 @@ const IS_VIRTUAL_MACHINE: u8 = 1 << 4;
 pub const DEFAULT_SYSTEM_MANUFACTURER: &str = "Cloud Hypervisor";
 pub const DEFAULT_SYSTEM_PRODUCT_NAME: &str = "cloud-hypervisor";
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SmbiosConfig {
+    pub serial_number: Option<String>,
+    pub uuid: Option<String>,
+    pub oem_strings: Vec<String>,
+}
+
 fn compute_checksum<T: Copy>(v: &T) -> u8 {
     // SAFETY: we are only reading the bytes within the size of the `T` reference `v`.
     let v_slice = unsafe { slice::from_raw_parts(v as *const T as *const u8, mem::size_of::<T>()) };
@@ -221,12 +228,10 @@ fn write_type1_system(
     Ok(())
 }
 
-pub fn setup_smbios(
-    mem: &GuestMemoryMmap,
-    serial_number: Option<&str>,
-    uuid: Option<&str>,
-    oem_strings: Vec<String>,
-) -> Result<u64> {
+pub fn setup_smbios(mem: &GuestMemoryMmap, smbios: Option<&SmbiosConfig>) -> Result<u64> {
+    let serial_number = smbios.and_then(|cfg| cfg.serial_number.as_deref());
+    let uuid = smbios.and_then(|cfg| cfg.uuid.as_deref());
+    let oem_strings: &[String] = smbios.map_or(&[] as &[String], |cfg| cfg.oem_strings.as_slice());
     let physptr = GuestAddress(SMBIOS_START)
         .checked_add(mem::size_of::<Smbios30Entrypoint>() as u64)
         .ok_or(Error::NotEnoughMemory)?;
@@ -266,7 +271,7 @@ pub fn setup_smbios(
         curptr = write_and_incr(mem, smbios_oemstrings, curptr)?;
 
         for s in oem_strings {
-            curptr = write_string(mem, &s, curptr)?;
+            curptr = write_string(mem, s, curptr)?;
         }
 
         curptr = write_string_terminator(mem, curptr, true)?;
@@ -332,7 +337,7 @@ mod unit_tests {
     fn entrypoint_checksum() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 4096)]).unwrap();
 
-        setup_smbios(&mem, None, None, Vec::new()).unwrap();
+        setup_smbios(&mem, None).unwrap();
 
         let smbios_ep: Smbios30Entrypoint = mem.read_obj(GuestAddress(SMBIOS_START)).unwrap();
 
