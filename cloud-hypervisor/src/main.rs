@@ -375,7 +375,7 @@ fn get_cli_options_sorted(
         Arg::new("platform")
             .long("platform")
             .help(
-                "num_pci_segments=<num_pci_segments>,iommu_segments=<list_of_segments>,iommu_address_width=<bits>,serial_number=<dmi_device_serial_number>,uuid=<dmi_device_uuid>,oem_strings=<list_of_strings>"
+                "num_pci_segments=<num_pci_segments>,iommu_segments=<list_of_segments>,iommu_address_width=<bits>,system_manufacturer=<dmi_system_manufacturer>,system_product_name=<dmi_system_product_name>,system_version=<dmi_system_version>,system_serial_number=<dmi_system_serial_number>,system_uuid=<dmi_system_uuid>,system_sku_number=<dmi_system_sku_number>,system_family=<dmi_system_family>,oem_strings=<list_of_strings>,chassis_asset_tag=<dmi_chassis_asset_tag>",
             )
             .num_args(1)
             .group("vm-config"),
