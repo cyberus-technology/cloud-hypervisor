@@ -9,12 +9,13 @@
 //! Supported platforms: x86_64, aarch64, riscv64.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, result};
 
 use serde::de::IntoDeserializer;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 #[cfg(target_arch = "x86_64")]
@@ -81,6 +82,43 @@ impl FromStr for CpuProfile {
             .unwrap_or(s);
         Self::deserialize(normalized.into_deserializer())
     }
+}
+
+//  We introduce some utilities for serializing u32 values as hex.
+//  These are only necessary for (de-)serializing CPU profile data.
+
+/// Serializes the given `input` as a hex string (starting with "0x")
+fn serialize_u32_hex<S: Serializer>(
+    input: &u32,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    eval_u32_hex(*input, |hex| serializer.serialize_str(hex))
+}
+
+/// Converts `input` into a hex string representation (starting with "0x", but the length may vary) and
+/// applies the given `callback` to it.
+fn eval_u32_hex<F, T>(input: u32, callback: F) -> T
+where
+    F: FnOnce(&str) -> T,
+{
+    // two bytes for "0x" prefix and at most eight for the hex encoded number
+    let mut buffer = [0_u8; 10];
+    let mut write_slice = &mut buffer[..];
+    write!(write_slice, "{input:#x}").expect("This write should be infallible");
+    let len = 10 - write_slice.len();
+    let str = core::str::from_utf8(&buffer[..len])
+        .expect("the buffer should be filled with valid UTF-8 bytes");
+    callback(str)
+}
+
+/// Deserializes a u32 from a hex string representation
+fn deserialize_u32_hex<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error> {
+    let hex = <&'de str as Deserialize>::deserialize(deserializer)?;
+    u32::from_str_radix(hex.strip_prefix("0x").unwrap_or(""), 16).map_err(|_| {
+        <D::Error as serde::de::Error>::custom(format!("{hex} is not a hex encoded 32 bit integer"))
+    })
 }
 
 /// Type for memory region types.
