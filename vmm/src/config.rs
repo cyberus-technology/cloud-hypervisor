@@ -758,14 +758,57 @@ impl PciSegmentConfig {
 
 impl PlatformConfig {
     pub fn parse(platform: &str) -> Result<Self> {
+        struct StringField {
+            key: &'static str,
+            apply: fn(&mut PlatformConfig, String),
+        }
+
+        const SMBIOS_STRING_FIELDS: &[StringField] = &[
+            StringField {
+                key: "system_manufacturer",
+                apply: |config, value| config.system_manufacturer = Some(value),
+            },
+            StringField {
+                key: "system_product_name",
+                apply: |config, value| config.system_product_name = Some(value),
+            },
+            StringField {
+                key: "system_version",
+                apply: |config, value| config.system_version = Some(value),
+            },
+            StringField {
+                key: "system_serial_number",
+                apply: |config, value| config.system_serial_number = Some(value),
+            },
+            StringField {
+                key: "system_uuid",
+                apply: |config, value| config.system_uuid = Some(value),
+            },
+            StringField {
+                key: "system_sku_number",
+                apply: |config, value| config.system_sku_number = Some(value),
+            },
+            StringField {
+                key: "system_family",
+                apply: |config, value| config.system_family = Some(value),
+            },
+            StringField {
+                key: "chassis_asset_tag",
+                apply: |config, value| config.chassis_asset_tag = Some(value),
+            },
+        ];
+
         let mut parser = OptionParser::new();
         parser
             .add("num_pci_segments")
             .add("iommu_segments")
             .add("iommu_address_width")
+            .add("oem_strings")
             .add("serial_number")
-            .add("uuid")
-            .add("oem_strings");
+            .add("uuid");
+        for field in SMBIOS_STRING_FIELDS {
+            parser.add(field.key);
+        }
         #[cfg(feature = "tdx")]
         parser.add("tdx");
         #[cfg(feature = "sev_snp")]
@@ -784,15 +827,51 @@ impl PlatformConfig {
             .convert("iommu_address_width")
             .map_err(Error::ParsePlatform)?
             .unwrap_or(MAX_IOMMU_ADDRESS_WIDTH_BITS);
-        let serial_number = parser
-            .convert("serial_number")
-            .map_err(Error::ParsePlatform)?;
-        let uuid = parser.convert("uuid").map_err(Error::ParsePlatform)?;
         let oem_strings = parser
             .convert::<StringList>("oem_strings")
             .map_err(Error::ParsePlatform)?
             .map(|v| v.0)
             .unwrap_or_default();
+
+        let mut platform_config = PlatformConfig {
+            num_pci_segments,
+            iommu_segments,
+            iommu_address_width_bits,
+            system_serial_number: None,
+            system_uuid: None,
+            oem_strings,
+            system_manufacturer: None,
+            system_product_name: None,
+            system_version: None,
+            system_family: None,
+            system_sku_number: None,
+            chassis_asset_tag: None,
+            #[cfg(feature = "tdx")]
+            tdx: false,
+            #[cfg(feature = "sev_snp")]
+            sev_snp: false,
+        };
+
+        for field in SMBIOS_STRING_FIELDS {
+            if let Some(value) = parser
+                .convert::<String>(field.key)
+                .map_err(Error::ParsePlatform)?
+            {
+                (field.apply)(&mut platform_config, value);
+            }
+        }
+
+        let legacy_serial_number = parser
+            .convert::<String>("serial_number")
+            .map_err(Error::ParsePlatform)?;
+        platform_config.system_serial_number = platform_config
+            .system_serial_number
+            .or(legacy_serial_number);
+
+        let legacy_uuid = parser
+            .convert::<String>("uuid")
+            .map_err(Error::ParsePlatform)?;
+        platform_config.system_uuid = platform_config.system_uuid.or(legacy_uuid);
         #[cfg(feature = "tdx")]
         let tdx = parser
             .convert::<Toggle>("tdx")
@@ -805,18 +884,17 @@ impl PlatformConfig {
             .map_err(Error::ParsePlatform)?
             .unwrap_or(Toggle(false))
             .0;
-        Ok(PlatformConfig {
-            num_pci_segments,
-            iommu_segments,
-            iommu_address_width_bits,
-            serial_number,
-            uuid,
-            oem_strings,
-            #[cfg(feature = "tdx")]
-            tdx,
-            #[cfg(feature = "sev_snp")]
-            sev_snp,
-        })
+
+        #[cfg(feature = "tdx")]
+        {
+            platform_config.tdx = tdx;
+        }
+        #[cfg(feature = "sev_snp")]
+        {
+            platform_config.sev_snp = sev_snp;
+        }
+
+        Ok(platform_config)
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
@@ -4518,9 +4596,15 @@ mod unit_tests {
             num_pci_segments: MAX_NUM_PCI_SEGMENTS,
             iommu_segments: None,
             iommu_address_width_bits: MAX_IOMMU_ADDRESS_WIDTH_BITS,
-            serial_number: None,
-            uuid: None,
+            system_serial_number: None,
+            system_uuid: None,
             oem_strings: Vec::new(),
+            system_manufacturer: None,
+            system_product_name: None,
+            system_version: None,
+            system_family: None,
+            system_sku_number: None,
+            chassis_asset_tag: None,
             #[cfg(feature = "tdx")]
             tdx: false,
             #[cfg(feature = "sev_snp")]

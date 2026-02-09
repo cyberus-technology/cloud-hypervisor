@@ -5032,7 +5032,7 @@ mod common_parallel {
             .args(["--memory", "size=512M"])
             .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-            .args(["--platform", "serial_number=a=b;c=d"])
+            .args(["--platform", "system_serial_number=a=b;c=d"])
             .default_disks()
             .default_net()
             .capture_output()
@@ -5068,7 +5068,10 @@ mod common_parallel {
             .args(["--memory", "size=512M"])
             .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-            .args(["--platform", "uuid=1e8aa28a-435d-4027-87f4-40dceff1fa0a"])
+            .args([
+                "--platform",
+                "system_uuid=1e8aa28a-435d-4027-87f4-40dceff1fa0a",
+            ])
             .default_disks()
             .default_net()
             .capture_output()
