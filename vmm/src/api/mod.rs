@@ -53,8 +53,8 @@ use crate::config::{RestoreConfig, RestoredNetConfig};
 use crate::device_tree::DeviceTree;
 use crate::vm::{Error as VmError, VmState};
 use crate::vm_config::{
-    DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig, VdpaConfig,
-    VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, MemoryZoneConfig, NetConfig, PmemConfig, UserDeviceConfig,
+    VdpaConfig, VmConfig, VsockConfig,
 };
 
 /// API errors are sent back from the VMM API server through the ApiResponse.
@@ -270,6 +270,8 @@ pub struct VmReceiveMigrationData {
     /// Directory containing the TLS server certificate (server-cert.pem) and TLS server key (server-key.pem).
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
+    /// Optional memory zone reconfiguration data
+    pub zones: Vec<MemoryZoneConfig>,
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
