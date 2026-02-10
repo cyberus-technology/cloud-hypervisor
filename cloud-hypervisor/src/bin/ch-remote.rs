@@ -951,6 +951,7 @@ fn receive_migration_data(url: String, tls_dir: Option<PathBuf>) -> String {
         // almost always invalid.
         net_fds: vec![],
         tls_dir,
+        zones: vec![],
     };
 
     serde_json::to_string(&receive_migration_data).unwrap()
