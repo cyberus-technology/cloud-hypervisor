@@ -76,8 +76,8 @@ use crate::migration_transport::{
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::vm::{Error as VmError, Vm, VmState};
 use crate::vm_config::{
-    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, NetConfig, PmemConfig,
-    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, MemoryZoneConfig, NetConfig,
+    PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
 };
 
 mod acpi;
@@ -926,6 +926,7 @@ impl Vmm {
                     socket,
                     memory_files,
                     receive_data_migration.tcp_serial_url.clone(),
+                    receive_data_migration.zones.clone(),
                 )?;
 
                 if !receive_data_migration.net_fds.is_empty() {
@@ -1070,6 +1071,7 @@ impl Vmm {
         socket: &mut T,
         existing_memory_files: HashMap<u32, File>,
         tcp_serial_url: Option<String>,
+        zones: Vec<MemoryZoneConfig>,
     ) -> std::result::Result<Arc<Mutex<MemoryManager>>, MigratableError>
     where
         T: Read,
@@ -1098,6 +1100,42 @@ impl Vmm {
         if let Some(tcp_serial_url) = tcp_serial_url {
             let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
             vm_config.serial.common.url = Some(tcp_serial_url);
+        }
+
+        // Adopt host nodes.
+        if !zones.is_empty() {
+            let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
+            if let Some(config_zones) = &mut vm_config.memory.zones {
+                for zone in zones {
+                    // We currently only support to move MemoryZones to different host nodes. We therefore ensure that
+                    // there exists a memory zone in the new config that matches the same size and ID for each memory
+                    // zone of the old config.
+                    if let Some(matched_zone) = config_zones.iter_mut().find(|z| z.id == zone.id) {
+                        if matched_zone.size != zone.size {
+                            return Err(MigratableError::MigrateReceive(anyhow!(
+                                "Size update of memory zone with ID {} not allowed. Tried to resize from {:018x?} to {:018x?}",
+                                zone.id,
+                                zone.size,
+                                matched_zone.size
+                            )));
+                        }
+                        // Override the host numa node
+                        matched_zone.host_numa_node = zone.host_numa_node;
+                    } else {
+                        // We did not find a match for a memory zone that was defined in the old config, so we cannot
+                        // update it.
+                        return Err(MigratableError::MigrateReceive(anyhow!(
+                            "Failed to associate new memory zone information with ID {} to an existing zone",
+                            zone.id
+                        )));
+                    }
+                }
+            } else {
+                // MemoryZoneConfigs were provided but the initial config didn't contain any
+                return Err(MigratableError::MigrateReceive(anyhow!(
+                    "Updating memory zone data is forbidden as VM was instantiated without any zones"
+                )));
+            }
         }
 
         self.console_info = Some(pre_create_console_devices(self).map_err(|e| {
@@ -2602,11 +2640,12 @@ impl RequestHandler for Vmm {
             .map_err(MigratableError::MigrateReceive)?;
 
         info!(
-            "Receiving migration: receiver_url={},tls={},net_fds={:?}, tcp_url={:?}",
+            "Receiving migration: receiver_url={},tls={},net_fds={:?}, tcp_url={:?}, zones={:?}",
             receive_data_migration.receiver_url,
             receive_data_migration.tls_dir.is_some(),
             &receive_data_migration.net_fds,
             &receive_data_migration.tcp_serial_url,
+            &receive_data_migration.zones,
         );
 
         let mut listener = migration_transport::receive_migration_listener(

@@ -1571,7 +1571,6 @@ impl MemoryManager {
                 .filter(|r| r.2 == RegionType::Ram)
                 .map(|r| (r.0, r.1))
                 .collect();
-
             let arch_mem_regions: Vec<ArchMemRegion> = arch_mem_regions
                 .iter()
                 .map(|(a, b, c)| ArchMemRegion {
@@ -1967,6 +1966,10 @@ impl MemoryManager {
             // MPOL_BIND is the selected mode as it specifies a strict policy
             // that restricts memory allocation to the nodes specified in the
             // nodemask.
+            info!(
+                "Creating raw memory region: host-addr={:018x}, len={len}, mode={mode}, host-node={node}",
+                addr as u64
+            );
             Self::mbind(addr, len, mode, &nodemask, maxnode, flags)
                 .map_err(Error::ApplyNumaPolicy)?;
         }
