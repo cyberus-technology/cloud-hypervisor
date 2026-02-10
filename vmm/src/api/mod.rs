@@ -57,8 +57,8 @@ use crate::device_tree::DeviceTree;
 use crate::migration_transport::MAX_MIGRATION_CONNECTIONS;
 use crate::vm::{Error as VmError, VmState};
 use crate::vm_config::{
-    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, NetConfig, PmemConfig,
-    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, MemoryZoneConfig, NetConfig,
+    PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
 };
 
 /// API errors are sent back from the VMM API server through the ApiResponse.
@@ -281,6 +281,9 @@ pub struct VmReceiveMigrationData {
     /// migration. Example: "192.168.1.1:2222".
     #[serde(default)]
     pub tcp_serial_url: Option<String>,
+    /// Optional memory zone reconfiguration data.
+    #[serde(default)]
+    pub zones: Vec<MemoryZoneConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -343,6 +346,7 @@ impl VmReceiveMigrationData {
                 tls_dir: None,
                 net_fds: vec![],
                 tcp_serial_url: None,
+                zones: vec![],
             };
 
             data.validate()?;
@@ -377,6 +381,7 @@ impl VmReceiveMigrationData {
             tls_dir,
             net_fds: vec![],
             tcp_serial_url,
+            zones: vec![],
         };
 
         data.validate()?;
@@ -1997,6 +2002,7 @@ mod unit_tests {
                 tls_dir: None,
                 net_fds: vec![],
                 tcp_serial_url: None,
+                zones: vec![],
             }
         );
 
@@ -2022,6 +2028,7 @@ mod unit_tests {
                 tls_dir: Some(tls_dir),
                 net_fds: vec![],
                 tcp_serial_url: Some("1.2.3.4:6789".to_string()),
+                zones: vec![],
             }
         );
 
