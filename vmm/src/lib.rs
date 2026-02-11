@@ -3721,6 +3721,9 @@ impl RequestHandler for Vmm {
         if let ReceiveMigrationState::Aborted = state {
             self.vm = MaybeVmOwnership::None;
             self.vm_config = None;
+            return Err(MigratableError::CompleteMigration(anyhow!(
+                "Migration was aborted"
+            )));
         }
 
         Ok(())
