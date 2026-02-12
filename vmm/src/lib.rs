@@ -2630,11 +2630,11 @@ impl Vmm {
             .join()
             .expect("should have joined");
 
-        // Give VMM back control.
-        self.vm = MaybeVmOwnership::Vmm(vm);
-
         match migration_res {
             Ok(()) => {
+                self.vm = MaybeVmOwnership::None;
+                drop(vm);
+
                 {
                     info!("Sending Receiver in HTTP thread that migration succeeded");
                     let (sender, _) = &*ONGOING_LIVEMIGRATION;
@@ -2649,13 +2649,17 @@ impl Vmm {
             }
             Err(e) => {
                 error!("Migration failed: {e}");
+                // we don't fail the VMM here, it just continues running its VM
+
+                // Give VMM back control.
+                self.vm = MaybeVmOwnership::Vmm(vm);
+
                 {
                     info!("Sending Receiver in HTTP thread that migration failed");
                     let (sender, _) = &*ONGOING_LIVEMIGRATION;
                     // unblock API call; propagate migration result
                     sender.send(Err(e)).unwrap();
                 }
-                // we don't fail the VMM here, it just continues running its VM
             }
         }
     }
