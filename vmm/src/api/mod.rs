@@ -494,6 +494,8 @@ pub struct VmSendMigrationData {
     /// Path to the directory containing the TLS root CA certificate (ca-cert.pem), the TLS client certificate (client-cert.pem), and TLS client key (client-key.pem).
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
+    /// Keep the VMM alive.
+    pub keep_alive: bool,
 }
 
 impl VmSendMigrationData {
@@ -530,7 +532,8 @@ impl VmSendMigrationData {
             .add("timeout_s")
             .add("timeout_strategy")
             .add("connections")
-            .add("tls_dir");
+            .add("tls_dir")
+            .add("keep_alive");
         parser
             .parse(migration)
             .map_err(VmSendMigrationConfigError::ParseError)?;
@@ -586,6 +589,11 @@ impl VmSendMigrationData {
             .convert::<String>("tls_dir")
             .map_err(VmSendMigrationConfigError::ParseError)?
             .map(|path| PathBuf::from(&path));
+        let keep_alive = parser
+            .convert::<Toggle>("keep_alive")
+            .map_err(VmSendMigrationConfigError::ParseError)?
+            .unwrap_or(Toggle(false))
+            .0;
 
         let data = Self {
             destination_url,
@@ -595,6 +603,7 @@ impl VmSendMigrationData {
             timeout_strategy,
             connections,
             tls_dir,
+            keep_alive,
         };
 
         data.validate()?;
@@ -2180,13 +2189,14 @@ mod unit_tests {
                 timeout_strategy: Default::default(),
                 connections: VmSendMigrationData::default_connections(),
                 tls_dir: None,
+                keep_alive: false,
             }
         );
 
         // Happy path, fully specified
         let tls_dir = std::env::temp_dir();
         let data =
-            VmSendMigrationData::parse(&format!("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4,tls_dir={}", tls_dir.display()))
+            VmSendMigrationData::parse(&format!("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4,tls_dir={},keep_alive=true", tls_dir.display()))
                 .unwrap();
         assert_eq!(
             data,
@@ -2198,6 +2208,7 @@ mod unit_tests {
                 timeout_strategy: TimeoutStrategy::Ignore,
                 connections: NonZeroU32::new(4).unwrap(),
                 tls_dir: Some(tls_dir),
+                keep_alive: true
             }
         );
     }
