@@ -814,7 +814,7 @@ impl MigrationWorker {
     }
 
     /// Perform the migration and communicate with the [`Vmm`] thread.
-    fn run(mut self) -> (Vm, result::Result<(), MigratableError>) {
+    fn run(mut self) -> MigrationThreadOut {
         debug!("migration thread is starting");
 
         let res = self.migrate().inspect_err(|e| error!("migrate error: {e}"));
@@ -823,7 +823,10 @@ impl MigrationWorker {
         self.check_migration_evt.write(1).unwrap();
 
         debug!("migration thread is finished");
-        (self.vm, res)
+        MigrationThreadOut {
+            vm: self.vm,
+            migration_res: res,
+        }
     }
 }
 
@@ -869,6 +872,12 @@ impl MaybeVmOwnership {
     }
 }
 
+/// Output value of [`MigrationWorker`].
+struct MigrationThreadOut {
+    vm: Vm,
+    migration_res: result::Result<(), MigratableError>,
+}
+
 pub struct Vmm {
     epoll: EpollContext,
     exit_evt: EventFd,
@@ -893,7 +902,7 @@ pub struct Vmm {
     /// Handle to the [`MigrationWorker`] thread.
     ///
     /// The handle will return the [`Vm`] back in any case. Further, the underlying error (if any) is returned.
-    migration_thread_handle: Option<JoinHandle<(Vm, result::Result<(), MigratableError>)>>,
+    migration_thread_handle: Option<JoinHandle<MigrationThreadOut>>,
 }
 
 /// Wait for a file descriptor to become readable. In this case, we return
@@ -2623,7 +2632,10 @@ impl Vmm {
     fn check_migration_result(&mut self) {
         // At this point, the thread must be finished.
         // If we fail here, we have lost anyway. Just panic.
-        let (mut vm, migration_res) = self
+        let MigrationThreadOut {
+            mut vm,
+            migration_res,
+        } = self
             .migration_thread_handle
             .take()
             .expect("should have thread")
