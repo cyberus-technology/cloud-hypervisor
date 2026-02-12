@@ -25,6 +25,7 @@ use vm_memory::{
     Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, ReadVolatile, VolatileMemoryError,
     VolatileSlice, WriteVolatile,
 };
+use vm_migration::keep_alive_stream::KeepAliveStream;
 use vm_migration::protocol::{Command, MemoryRangeTable, Request, Response};
 use vm_migration::tls::{TlsServerConfig, TlsStream};
 use vm_migration::{MigratableError, Snapshot};
@@ -148,6 +149,7 @@ pub(crate) enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
     Tls(Box<TlsStream>),
+    KeepAlive(KeepAliveStream),
 }
 
 impl Read for SocketStream {
@@ -156,6 +158,7 @@ impl Read for SocketStream {
             SocketStream::Unix(stream) => stream.read(buf),
             SocketStream::Tcp(stream) => stream.read(buf),
             SocketStream::Tls(stream) => stream.read(buf),
+            SocketStream::KeepAlive(stream) => stream.read(buf),
         }
     }
 }
@@ -166,6 +169,7 @@ impl Write for SocketStream {
             SocketStream::Unix(stream) => stream.write(buf),
             SocketStream::Tcp(stream) => stream.write(buf),
             SocketStream::Tls(stream) => stream.write(buf),
+            SocketStream::KeepAlive(stream) => stream.write(buf),
         }
     }
 
@@ -174,6 +178,7 @@ impl Write for SocketStream {
             SocketStream::Unix(stream) => stream.flush(),
             SocketStream::Tcp(stream) => stream.flush(),
             SocketStream::Tls(stream) => stream.flush(),
+            SocketStream::KeepAlive(stream) => stream.flush(),
         }
     }
 }
@@ -184,6 +189,9 @@ impl AsFd for SocketStream {
             SocketStream::Unix(s) => s.as_fd(),
             SocketStream::Tcp(s) => s.as_fd(),
             SocketStream::Tls(s) => s.as_fd(),
+            SocketStream::KeepAlive(_) => {
+                unreachable!("KeepAliveStream is only used by the migration sender")
+            }
         }
     }
 }
@@ -197,6 +205,7 @@ impl ReadVolatile for SocketStream {
             SocketStream::Unix(s) => s.read_volatile(buf),
             SocketStream::Tcp(s) => s.read_volatile(buf),
             SocketStream::Tls(s) => s.read_volatile(buf),
+            SocketStream::KeepAlive(s) => s.read_volatile(buf),
         }
     }
 }
@@ -210,6 +219,7 @@ impl WriteVolatile for SocketStream {
             SocketStream::Unix(s) => s.write_volatile(buf),
             SocketStream::Tcp(s) => s.write_volatile(buf),
             SocketStream::Tls(s) => s.write_volatile(buf),
+            SocketStream::KeepAlive(s) => s.write_volatile(buf),
         }
     }
 }
@@ -868,6 +878,23 @@ pub(crate) fn send_migration_socket(
         })?;
 
         Ok(SocketStream::Unix(socket))
+    }
+}
+
+/// Connect to the main migration endpoint and keep the connection active while
+/// memory is transferred over additional streams.
+pub(crate) fn send_migration_socket_with_keep_alive(
+    destination_url: &str,
+    tls_dir: Option<&Path>,
+) -> Result<SocketStream, MigratableError> {
+    match send_migration_socket(destination_url, tls_dir)? {
+        socket @ (SocketStream::Tcp(_) | SocketStream::Tls(_)) => {
+            KeepAliveStream::new(socket, SEND_MIGRATION_SOCKET_TIMEOUT)
+                .map(SocketStream::KeepAlive)
+                .context("Error creating keep-alive migration stream")
+                .map_err(MigratableError::MigrateSend)
+        }
+        socket => Ok(socket),
     }
 }
 

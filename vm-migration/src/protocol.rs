@@ -123,7 +123,12 @@ pub enum Command {
     MemoryFd = 7,
     /// Finalizes the migration without resuming the VM on the destination.
     /// Sent when the source VM was paused at migration time.
-    CompletePaused = 8,
+    CompletePaused = 9,
+    // We introduced this with discriminant eight but in the meantime,
+    // upstream introduced a new command with discriminant 8. For
+    // migration-compatibility we stick to this temporarily, until we have
+    // a solution for the discriminant collision.
+    KeepAlive = 8,
 }
 
 #[repr(C)]
@@ -178,6 +183,10 @@ impl Request {
 
     pub fn abandon() -> Self {
         Self::new(Command::Abandon, 0)
+    }
+
+    pub fn keep_alive() -> Self {
+        Self::new(Command::KeepAlive, 0)
     }
 
     pub fn command(&self) -> Command {
