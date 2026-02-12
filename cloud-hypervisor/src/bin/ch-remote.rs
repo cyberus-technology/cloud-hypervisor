@@ -13,15 +13,18 @@ use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process;
+use std::thread::sleep;
+use std::time::Duration;
 
 use api_client::{
-    Error as ApiClientError, simple_api_command, simple_api_command_with_fds,
-    simple_api_full_command,
+    Error as ApiClientError, StatusCode, simple_api_command, simple_api_command_with_fds,
+    simple_api_full_command, simple_api_full_command_and_response,
 };
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use log::error;
+use log::{error, info};
 use option_parser::{ByteSized, ByteSizedParseError};
 use thiserror::Error;
+use vm_migration::progress::{MigrationProgress, MigrationState};
 use vmm::config::RestoreConfig;
 use vmm::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig, VdpaConfig,
@@ -491,6 +494,14 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                 .map_err(Error::HttpApiClient)
         }
         Some("send-migration") => {
+            let just_dispatch = matches
+                .subcommand_matches("send-migration")
+                .unwrap()
+                .get_one::<bool>("dispatch")
+                .cloned()
+                .unwrap_or(false);
+            let wait_for_migration = !just_dispatch;
+
             let send_migration_data = send_migration_data(
                 matches
                     .subcommand_matches("send-migration")
@@ -524,9 +535,69 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .unwrap()
                     .get_one::<PathBuf>("tls-dir")
                     .cloned(),
+                wait_for_migration,
             );
+
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
-                .map_err(Error::HttpApiClient)
+                .map_err(Error::HttpApiClient)?;
+
+            if !wait_for_migration {
+                return Ok(());
+            }
+            loop {
+                let response = simple_api_full_command_and_response(
+                    socket,
+                    "GET",
+                    "vm.migration-progress",
+                    None,
+                )
+                .map_err(Error::HttpApiClient)?
+                // should have response
+                .ok_or(Error::HttpApiClient(ApiClientError::ServerResponse(
+                    StatusCode::Ok,
+                    None,
+                )))?;
+
+                // This is guaranteed by the SendMigration call
+                assert_ne!(
+                    response, "null",
+                    "migration progress should be there immediately when the migration was dispatched"
+                );
+
+                let progress = serde_json::from_slice::<MigrationProgress>(response.as_bytes())
+                    .map_err(|e| {
+                        error!("failed to parse response as MigrationProgress: {e}");
+                        Error::HttpApiClient(ApiClientError::ServerResponse(
+                            StatusCode::Ok,
+                            Some(response),
+                        ))
+                    })?;
+
+                match progress.state {
+                    MigrationState::Cancelled { .. } => {
+                        info!("Migration was cancelled");
+                        break;
+                    }
+                    MigrationState::Failed {
+                        error_msg,
+                        error_msg_debug,
+                    } => {
+                        error!("Migration failed! {error_msg}\n{error_msg_debug}");
+                        break;
+                    }
+                    MigrationState::Finished { .. } => {
+                        info!("Migration finished successfully. Shutting down Cloud Hypervisor");
+                        simple_api_full_command(socket, "PUT", "vmm.shutdown", None)
+                            .map_err(Error::HttpApiClient)?;
+                        break;
+                    }
+                    MigrationState::Ongoing { .. } => {
+                        sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                }
+            }
+            Ok(())
         }
         Some("receive-migration") => {
             let receive_migration_data = receive_migration_data(
@@ -966,6 +1037,7 @@ fn send_migration_data(
     migration_timeout: u64,
     connections: NonZeroU32,
     tls_dir: Option<PathBuf>,
+    keep_alive: bool,
 ) -> String {
     let send_migration_data = vmm::api::VmSendMigrationData {
         destination_url: url,
@@ -974,8 +1046,7 @@ fn send_migration_data(
         migration_timeout,
         connections,
         tls_dir,
-        // In next commit, we fix this properly.
-        keep_alive: false,
+        keep_alive,
     };
 
     serde_json::to_string(&send_migration_data).unwrap()
@@ -1165,6 +1236,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
                     .num_args(1)
                     .value_parser(clap::value_parser!(u32))
                     .default_value("1"),
+            )
+            .arg(
+                Arg::new("dispatch")
+                    .long("dispatch")
+                    .help("just dispatch the migration without waiting for it to finish")
+                    .num_args(0),
             )
             .arg(
                 Arg::new("downtime-ms")
