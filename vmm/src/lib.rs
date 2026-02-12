@@ -2994,6 +2994,14 @@ impl RequestHandler for Vmm {
             )));
         }
 
+        // Cloud Hypervisor only supports the migration of running VMs.
+        let current_state = self.vm.vm_mut().as_ref().unwrap().get_state();
+        if current_state != VmState::Running {
+            return Err(MigratableError::MigrateSend(anyhow!(format!(
+                "Only running VMs can be migrated! state={current_state:?}"
+            ))));
+        }
+
         // Take VM ownership. This also means that API events can no longer
         // change the VM (e.g. net device hotplug).
         let vm = self.vm.take_vm_for_migration();
