@@ -1925,7 +1925,10 @@ impl Vmm {
     fn check_migration_result(&mut self) {
         // At this point, the thread must be finished.
         // If we fail here, we have lost anyway. Just panic.
-        let MigrationThreadOut { vm, migration_res } = self
+        let MigrationThreadOut {
+            mut vm,
+            migration_res,
+        } = self
             .migration_thread_handle
             .take()
             .expect("should have thread")
@@ -1951,6 +1954,28 @@ impl Vmm {
             }
             Err(e) => {
                 error!("Migration failed: {e}");
+
+                // If the failure happened very late in the migration path, the VM might already be
+                // stopped. We resume it to ensure proper operation.
+                //
+                // Cloud Hypervisor only supports migration of running VMs, therefore it cannot
+                // happen that we resume a previously paused VM.
+                if vm.get_state() == VmState::Paused {
+                    match vm.resume() {
+                        Ok(_) => {
+                            info!("Resumed VM successfully after failed migration");
+
+                            // Ensure full VM performance. The operation is idempotent.
+                            let _ = vm.stop_dirty_log().inspect_err(|e| {
+                                warn!("Failed stopping dirty log after resuming VM: {e} - VM performance might be slower than usual");
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed resuming VM after failed migration: {e}");
+                            self.exit_evt.write(1).unwrap();
+                        }
+                    }
+                }
 
                 // Give VMM back control.
                 self.vm = MaybeVmOwnership::Vmm(vm);
