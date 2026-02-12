@@ -35,22 +35,11 @@
 //! [special HTTP library]: https://github.com/firecracker-microvm/micro-http
 
 use std::fs::File;
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
-use std::sync::{LazyLock, Mutex};
+use std::sync::mpsc::Sender;
 
 use log::info;
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
 use vmm_sys_util::eventfd::EventFd;
-
-/// Helper to make the VmSendMigration call blocking as long as a migration is ongoing.
-#[allow(clippy::type_complexity)]
-pub static ONGOING_LIVEMIGRATION: LazyLock<(
-    SyncSender<Result<(), vm_migration::MigratableError>>,
-    Mutex<Receiver<Result<(), vm_migration::MigratableError>>>,
-)> = LazyLock::new(|| {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(0);
-    (sender, Mutex::new(receiver))
-});
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::api::VmCoredump;
@@ -508,26 +497,15 @@ impl PutHandler for VmSendMigration {
         _files: Vec<File>,
     ) -> std::result::Result<Option<Body>, HttpError> {
         if let Some(body) = body {
-            let res = self
-                .send(
-                    api_notifier,
-                    api_sender,
-                    serde_json::from_slice(body.raw())?,
-                )
-                .map_err(HttpError::ApiError)?;
-
-            info!("live migration started");
-
-            let (_, receiver) = &*ONGOING_LIVEMIGRATION;
-
-            info!("waiting for live migration result");
-            let mig_res = receiver.lock().unwrap().recv().unwrap();
-            info!("received live migration result");
-
-            // We forward the migration error here to the guest
-            mig_res
-                .map(|_| res)
-                .map_err(|e| HttpError::ApiError(ApiError::VmSendMigration(e)))
+            self.send(
+                api_notifier,
+                api_sender,
+                serde_json::from_slice(body.raw())?,
+            )
+            .inspect(|_| {
+                info!("live migration started (in background)");
+            })
+            .map_err(HttpError::ApiError)
         } else {
             Err(HttpError::BadRequest)
         }

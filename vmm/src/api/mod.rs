@@ -304,6 +304,8 @@ pub struct VmSendMigrationData {
     /// Directory containing the TLS root CA certificate (ca-cert.pem)
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
+    /// Keep the VMM alive.
+    pub keep_alive: bool,
 }
 
 // Default value for downtime the same as qemu.
