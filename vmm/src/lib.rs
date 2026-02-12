@@ -977,11 +977,14 @@ impl AsFd for ReceiveListener {
 
 impl ReceiveListener {
     /// Block until a connection is accepted.
+    const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
     fn accept(&mut self) -> std::result::Result<SocketStream, std::io::Error> {
         match self {
-            ReceiveListener::Tcp(listener) => listener
-                .accept()
-                .map(|(socket, _)| SocketStream::Tcp(socket)),
+            ReceiveListener::Tcp(listener) => listener.accept().map(|(socket, _)| {
+                socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
+                socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
+                Ok(SocketStream::Tcp(socket))
+            })?,
             ReceiveListener::Unix(listener, opt_path) => {
                 let socket = listener
                     .accept()
@@ -999,6 +1002,8 @@ impl ReceiveListener {
                 Ok(socket)
             }
             ReceiveListener::Tls(listener, conn) => listener.accept().map(|(socket, _)| {
+                socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
+                socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
                 conn.wrap(socket)
                     .map(Box::new)
                     .map(SocketStream::Tls)
@@ -1559,13 +1564,19 @@ impl Drop for SendAdditionalConnections {
 fn send_migration_socket(
     send_data_migration: &VmSendMigrationData,
 ) -> std::result::Result<SocketStream, MigratableError> {
+    const SEND_TIMEOUT: Duration = Duration::from_secs(5);
     if let Some(address) = send_data_migration.destination_url.strip_prefix("tcp:") {
         info!("Connecting to TCP socket at {address}");
 
         let socket = TcpStream::connect(address).map_err(|e| {
             MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
         })?;
-
+        socket.set_read_timeout(Some(SEND_TIMEOUT)).map_err(|e| {
+            MigratableError::MigrateSend(anyhow!("Error setting read timeout on TCP socket: {e}"))
+        })?;
+        socket.set_write_timeout(Some(SEND_TIMEOUT)).map_err(|e| {
+            MigratableError::MigrateSend(anyhow!("Error setting write timeout on TCP socket: {e}"))
+        })?;
         if let Some(tls_dir) = &send_data_migration.tls_dir {
             info!("Live Migration will be encrypted using TLS.");
             // The address may still contain a port. I think we should build something more robust to also handle IPv6.
