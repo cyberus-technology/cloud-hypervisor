@@ -118,6 +118,7 @@ pub enum Command {
     Complete,
     Abandon,
     MemoryFd,
+    KeepAlive,
 }
 
 #[repr(C)]
@@ -166,6 +167,10 @@ impl Request {
 
     pub fn abandon() -> Self {
         Self::new(Command::Abandon, 0)
+    }
+
+    pub fn keep_alive() -> Self {
+        Self::new(Command::KeepAlive, 0)
     }
 
     pub fn command(&self) -> Command {
