@@ -332,7 +332,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     short: "tsc_deadline_timer",
                     description: "APIC timer one-shot operation",
                     bits_range: (24, 24),
-                    policy: ProfilePolicy::Static(0),
+                    policy: ProfilePolicy::Passthrough,
                 },
                 ValueDefinition {
                     short: "aes",
@@ -1711,6 +1711,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     policy: ProfilePolicy::Inherit,
                 },
                 // MSR related
+                //
+                // TODO: Is passthrough correct?
+                // If this bit is set then MSR IA32_FLUSH_CMD
+                // becomes available, otherwise it is not.
                 ValueDefinition {
                     short: "flush_l1d",
                     description: "FLUSH L1D cache: IA32_FLUSH_CMD MSR",
