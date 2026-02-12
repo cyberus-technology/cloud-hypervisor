@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::protocol::MemoryRangeTable;
 
 mod bitpos_iterator;
+pub mod keep_alive_stream;
 pub mod protocol;
 pub mod tls;
 

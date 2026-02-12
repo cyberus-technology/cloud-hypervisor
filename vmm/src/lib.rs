@@ -56,6 +56,7 @@ use vm_memory::{
     GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, ReadVolatile,
     VolatileMemoryError, VolatileSlice, WriteVolatile,
 };
+use vm_migration::keep_alive_stream::KeepAliveStream;
 use vm_migration::protocol::*;
 use vm_migration::tls::{TlsConnectionWrapper, TlsStream, TlsStreamWrapper};
 use vm_migration::{
@@ -280,11 +281,11 @@ impl From<u64> for EpollDispatch {
         }
     }
 }
-
 enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
     Tls(Box<TlsStreamWrapper>),
+    KeepAlive(KeepAliveStream),
 }
 
 impl Read for SocketStream {
@@ -293,6 +294,7 @@ impl Read for SocketStream {
             SocketStream::Unix(stream) => stream.read(buf),
             SocketStream::Tcp(stream) => stream.read(buf),
             SocketStream::Tls(stream) => stream.read(buf),
+            SocketStream::KeepAlive(stream) => stream.read(buf),
         }
     }
 }
@@ -303,6 +305,7 @@ impl Write for SocketStream {
             SocketStream::Unix(stream) => stream.write(buf),
             SocketStream::Tcp(stream) => stream.write(buf),
             SocketStream::Tls(stream) => stream.write(buf),
+            SocketStream::KeepAlive(stream) => stream.write(buf),
         }
     }
 
@@ -311,6 +314,7 @@ impl Write for SocketStream {
             SocketStream::Unix(stream) => stream.flush(),
             SocketStream::Tcp(stream) => stream.flush(),
             SocketStream::Tls(stream) => stream.flush(),
+            SocketStream::KeepAlive(stream) => stream.flush(),
         }
     }
 }
@@ -321,6 +325,7 @@ impl AsFd for SocketStream {
             SocketStream::Unix(s) => s.as_fd(),
             SocketStream::Tcp(s) => s.as_fd(),
             SocketStream::Tls(s) => s.as_fd(),
+            SocketStream::KeepAlive(s) => s.as_fd(),
         }
     }
 }
@@ -334,6 +339,7 @@ impl ReadVolatile for SocketStream {
             SocketStream::Unix(s) => s.read_volatile(buf),
             SocketStream::Tcp(s) => s.read_volatile(buf),
             SocketStream::Tls(s) => s.read_volatile(buf),
+            SocketStream::KeepAlive(s) => s.read_volatile(buf),
         }
     }
 
@@ -345,6 +351,7 @@ impl ReadVolatile for SocketStream {
             SocketStream::Unix(s) => s.read_exact_volatile(buf),
             SocketStream::Tcp(s) => s.read_exact_volatile(buf),
             SocketStream::Tls(s) => s.read_exact_volatile(buf),
+            SocketStream::KeepAlive(s) => s.read_exact_volatile(buf),
         }
     }
 }
@@ -358,6 +365,7 @@ impl WriteVolatile for SocketStream {
             SocketStream::Unix(s) => s.write_volatile(buf),
             SocketStream::Tcp(s) => s.write_volatile(buf),
             SocketStream::Tls(s) => s.write_volatile(buf),
+            SocketStream::KeepAlive(s) => s.write_volatile(buf),
         }
     }
 
@@ -369,6 +377,7 @@ impl WriteVolatile for SocketStream {
             SocketStream::Unix(s) => s.write_all_volatile(buf),
             SocketStream::Tcp(s) => s.write_all_volatile(buf),
             SocketStream::Tls(s) => s.write_all_volatile(buf),
+            SocketStream::KeepAlive(s) => s.write_all_volatile(buf),
         }
     }
 }
@@ -1351,7 +1360,7 @@ impl SendAdditionalConnections {
         // memory chunks to the workers, but does not send memory anymore. Thus in this
         // case we create one thread for each connection.
         for n in 0..(configured_connections) {
-            let socket = (match send_migration_socket(send_data_migration) {
+            let socket = (match send_migration_socket(send_data_migration, false) {
                 Err(e) if n == 0 => {
                     // If we encounter a problem on the first additional
                     // connection, we just assume the other side doesn't support
@@ -1550,34 +1559,51 @@ impl Drop for SendAdditionalConnections {
 /// Establishes a connection to a migration destination socket (TCP or UNIX).
 fn send_migration_socket(
     send_data_migration: &VmSendMigrationData,
+    main_connection: bool,
 ) -> std::result::Result<SocketStream, MigratableError> {
     const SEND_TIMEOUT: Duration = Duration::from_secs(5);
     if let Some(address) = send_data_migration.destination_url.strip_prefix("tcp:") {
-        info!("Connecting to TCP socket at {address}");
+        let socket = {
+            info!("Connecting to TCP socket at {address}");
 
-        let socket = TcpStream::connect(address).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
-        })?;
-        socket.set_read_timeout(Some(SEND_TIMEOUT)).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error setting read timeout on TCP socket: {e}"))
-        })?;
-        socket.set_write_timeout(Some(SEND_TIMEOUT)).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error setting write timeout on TCP socket: {e}"))
-        })?;
-        if let Some(tls_dir) = send_data_migration.tls_dir.as_ref() {
-            info!("Live Migration will be encrypted using TLS.");
-            // The address may still contain a port. I think we should build something more robust to also handle IPv6.
-            let tls_stream = tls::client_stream(
-                socket,
-                tls_dir,
-                address.split_once(':').map_or(address, |(host, _)| host),
-            )?;
-            Ok(SocketStream::Tls(Box::new(TlsStreamWrapper::new(
-                TlsStream::Client(tls_stream),
-            ))))
-        } else {
-            Ok(SocketStream::Tcp(socket))
+            let socket = TcpStream::connect(address).map_err(|e| {
+                MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
+            })?;
+            socket.set_read_timeout(Some(SEND_TIMEOUT)).map_err(|e| {
+                MigratableError::MigrateSend(anyhow!(
+                    "Error setting read timeout on TCP socket: {e}"
+                ))
+            })?;
+            socket.set_write_timeout(Some(SEND_TIMEOUT)).map_err(|e| {
+                MigratableError::MigrateSend(anyhow!(
+                    "Error setting write timeout on TCP socket: {e}"
+                ))
+            })?;
+            if let Some(tls_dir) = send_data_migration.tls_dir.as_ref() {
+                info!("Live Migration will be encrypted using TLS.");
+                // The address may still contain a port. I think we should build something more robust to also handle IPv6.
+                let tls_stream = tls::client_stream(
+                    socket,
+                    tls_dir,
+                    address.split_once(':').map_or(address, |(host, _)| host),
+                )?;
+                SocketStream::Tls(Box::new(TlsStreamWrapper::new(TlsStream::Client(
+                    tls_stream,
+                ))))
+            } else {
+                SocketStream::Tcp(socket)
+            }
+        };
+        // If we use multiple TCP connections, we have to send periodic keep alive messages. Thus, we create a KeepAliveStream.
+        if send_data_migration.connections.get() > 1 && main_connection {
+            return Ok(SocketStream::KeepAlive(
+                KeepAliveStream::new(socket, Duration::from_secs(5)).map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!("Error creating keep alive sender: {e}"))
+                })?,
+            ));
         }
+        // Otherwise we return the socket.
+        Ok(socket)
     } else if let Some(path) = &send_data_migration.destination_url.strip_prefix("unix:") {
         info!("Connecting to UNIX socket at {path:?}");
 
@@ -2403,7 +2429,7 @@ impl Vmm {
         let mut s = MigrationState::new();
 
         // Set up the socket connection
-        let mut socket = send_migration_socket(send_data_migration)?;
+        let mut socket = send_migration_socket(send_data_migration, true)?;
 
         // Start the migration
         Request::start().write_to(&mut socket)?;
@@ -2457,12 +2483,7 @@ impl Vmm {
                     // Proceed with sending memory file descriptors over UNIX socket
                     vm.send_memory_fds(unix_socket)?;
                 }
-                SocketStream::Tcp(_tcp_socket) => {
-                    return Err(MigratableError::MigrateSend(anyhow!(
-                        "--local option is not supported with TCP sockets",
-                    )));
-                }
-                SocketStream::Tls(_tls_socket) => {
+                _ => {
                     return Err(MigratableError::MigrateSend(anyhow!(
                         "--local option is not supported with TCP sockets",
                     )));
@@ -3629,6 +3650,10 @@ impl RequestHandler for Vmm {
         while !state.finished() {
             let req = Request::read_from(&mut socket)?;
             trace!("Command {:?} received", req.command());
+
+            if req.command() == Command::KeepAlive {
+                continue;
+            }
 
             let (response, new_state) = match self.vm_receive_migration_step(
                 &listener,
