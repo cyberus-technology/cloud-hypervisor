@@ -317,6 +317,8 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
         Some("shutdown") => {
             simple_api_command(socket, "PUT", "shutdown", None).map_err(Error::HttpApiClient)
         }
+        Some("migration-progress") => simple_api_command(socket, "GET", "migration-progress", None)
+            .map_err(Error::HttpApiClient),
         Some("nmi") => simple_api_command(socket, "PUT", "nmi", None).map_err(Error::HttpApiClient),
         Some("resize") => {
             let resize = resize_config(
@@ -1059,6 +1061,7 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
             .arg(Arg::new("path").index(1).default_value("-")),
         Command::new("delete").about("Delete a VM"),
         Command::new("info").about("Info on the VM"),
+        Command::new("migration-progress"),
         Command::new("nmi").about("Trigger NMI"),
         Command::new("pause").about("Pause the VM"),
         Command::new("ping").about("Ping the VMM to check for API server availability"),
