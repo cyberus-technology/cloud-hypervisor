@@ -1686,10 +1686,18 @@ impl Vmm {
         let mut ctx = OngoingMigrationContext::new();
 
         // Set up the socket connection
-        let mut socket = migration_transport::send_migration_socket(
-            &send_data_migration.destination_url,
-            send_data_migration.tls_dir.as_deref(),
-        )?;
+        let mut socket = if send_data_migration.connections.get() > 1 && !send_data_migration.local
+        {
+            migration_transport::send_migration_socket_with_keep_alive(
+                &send_data_migration.destination_url,
+                send_data_migration.tls_dir.as_deref(),
+            )?
+        } else {
+            migration_transport::send_migration_socket(
+                &send_data_migration.destination_url,
+                send_data_migration.tls_dir.as_deref(),
+            )?
+        };
 
         // Start the migration
         migration_transport::send_request_expect_ok(
@@ -2977,6 +2985,10 @@ impl RequestHandler for Vmm {
         while !state.finished() {
             let req = Request::read_from(&mut socket)?;
             trace!("Command {:?} received", req.command());
+
+            if req.command() == Command::KeepAlive {
+                continue;
+            }
 
             let (response, new_state) = match self.vm_receive_migration_step(
                 &mut socket,
