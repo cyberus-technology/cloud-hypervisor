@@ -974,6 +974,8 @@ fn send_migration_data(
         migration_timeout,
         connections,
         tls_dir,
+        // In next commit, we fix this properly.
+        keep_alive: false,
     };
 
     serde_json::to_string(&send_migration_data).unwrap()
