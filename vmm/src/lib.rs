@@ -1906,6 +1906,10 @@ impl Vmm {
         }
     }
 
+    fn current_postponed_lifecycle_event(&self) -> Option<PostMigrationLifecycleEvent> {
+        *self.postponed_lifecycle_event.lock().unwrap()
+    }
+
     fn clear_postponed_lifecycle_event(&self) {
         let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
         *postponed_event = None;
@@ -2310,6 +2314,7 @@ impl Vmm {
         s: &mut MigrationStateInternal,
         migration_timeout: Duration,
         migrate_downtime_limit: Duration,
+        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
     ) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut iteration_table;
         let total_memory_size_bytes = vm
@@ -2457,6 +2462,17 @@ impl Vmm {
 
             // Increment iteration counter
             s.iteration += 1;
+
+            let event = *postponed_lifecycle_event.lock().unwrap();
+            if let Some(event) = event {
+                info!(
+                    "Lifecycle event postponed during migration ({event:?}), switching to downtime phase early"
+                );
+                // The current iteration has already been sent, therefore no extra range
+                // needs to be carried into the final transfer batch.
+                iteration_table = MemoryRangeTable::default();
+                break;
+            }
         }
 
         Ok(iteration_table)
@@ -2467,6 +2483,7 @@ impl Vmm {
         socket: &mut SocketStream,
         s: &mut MigrationStateInternal,
         send_data_migration: &VmSendMigrationData,
+        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
     ) -> result::Result<(), MigratableError> {
         let mem_send = SendAdditionalConnections::new(send_data_migration, &vm.guest_memory())?;
 
@@ -2502,6 +2519,7 @@ impl Vmm {
             s,
             migration_timeout,
             migrate_downtime_limit,
+            postponed_lifecycle_event,
         )?;
 
         info!("Entering downtime phase");
@@ -2649,7 +2667,13 @@ impl Vmm {
             // Now pause VM
             vm.pause()?;
         } else {
-            Self::do_memory_migration(vm, &mut socket, &mut s, send_data_migration)?;
+            Self::do_memory_migration(
+                vm,
+                &mut socket,
+                &mut s,
+                send_data_migration,
+                postponed_lifecycle_event,
+            )?;
         }
 
         // Update migration progress snapshot
@@ -2905,7 +2929,24 @@ impl Vmm {
 
                 // Give VMM back control.
                 self.vm = MaybeVmOwnership::Vmm(vm);
-
+                if let Some(event) = self.current_postponed_lifecycle_event() {
+                    match event {
+                        PostMigrationLifecycleEvent::VmReboot => {
+                            self.reset_evt
+                                .write(1)
+                                .context("Failed replaying reset event after failed migration")
+                                .inspect_err(|write_err| error!("{write_err}"))
+                                .ok();
+                        }
+                        PostMigrationLifecycleEvent::VmmShutdown => {
+                            self.exit_evt
+                                .write(1)
+                                .context("Failed replaying shutdown event after failed migration")
+                                .inspect_err(|write_err| error!("{write_err}"))
+                                .ok();
+                        }
+                    }
+                }
                 // Update migration progress snapshot
                 {
                     let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
@@ -2915,6 +2956,7 @@ impl Vmm {
                 }
             }
         }
+        self.clear_postponed_lifecycle_event();
     }
 
     fn control_loop(
