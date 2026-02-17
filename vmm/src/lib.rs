@@ -87,7 +87,7 @@ use crate::migration::get_vm_snapshot;
 use crate::migration::{recv_vm_config, recv_vm_state};
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::sync_utils::Gate;
-use crate::vm::{Error as VmError, Vm, VmState};
+use crate::vm::{Error as VmError, PostMigrationLifecycleEvent, Vm, VmState};
 use crate::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, MemoryZoneConfig, NetConfig, PmemConfig, UserDeviceConfig,
     VdpaConfig, VmConfig, VsockConfig,
@@ -925,6 +925,7 @@ pub struct Vmm {
     console_resize_pipe: Option<Arc<File>>,
     console_info: Option<ConsoleInfo>,
     check_migration_evt: EventFd,
+    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
     /// Handle to the [`MigrationWorker`] thread.
     ///
     /// The handle will return the [`Vm`] back in any case. Further, the underlying error (if any) is returned.
@@ -1889,8 +1890,22 @@ impl Vmm {
             console_resize_pipe: None,
             console_info: None,
             check_migration_evt,
+            postponed_lifecycle_event: Arc::new(Mutex::new(None)),
             migration_thread_handle: None,
         })
+    }
+
+    fn postpone_lifecycle_event_during_migration(&self, event: PostMigrationLifecycleEvent) {
+        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+        if postponed_event.is_none() {
+            *postponed_event = Some(event);
+            info!("Postponed post-migration lifecycle event: {event:?}");
+        }
+    }
+
+    fn clear_postponed_lifecycle_event(&self) {
+        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+        *postponed_event = None;
     }
 
     /// Try to receive a file descriptor from a socket. Returns the slot number and the file descriptor.
@@ -2909,6 +2924,13 @@ impl Vmm {
                         info!("VM exit event");
                         // Consume the event.
                         self.exit_evt.read().map_err(Error::EventFdRead)?;
+                        // Workaround for guest-induced shutdown during a live-migration.
+                        if matches!(self.vm, MaybeVmOwnership::Migration) {
+                            self.postpone_lifecycle_event_during_migration(
+                                PostMigrationLifecycleEvent::VmmShutdown,
+                            );
+                            continue;
+                        }
                         self.vmm_shutdown().map_err(Error::VmmShutdown)?;
 
                         break 'outer;
@@ -2917,6 +2939,13 @@ impl Vmm {
                         info!("VM reset event");
                         // Consume the event.
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
+                        // Workaround for guest-induced shutdown during a live-migration.
+                        if matches!(self.vm, MaybeVmOwnership::Migration) {
+                            self.postpone_lifecycle_event_during_migration(
+                                PostMigrationLifecycleEvent::VmReboot,
+                            );
+                            continue;
+                        }
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
                     EpollDispatch::ActivateVirtioDevices => {
@@ -3824,6 +3853,9 @@ impl RequestHandler for Vmm {
             "Sending migration: destination_url = {}, local = {}",
             send_data_migration.destination_url, send_data_migration.local
         );
+
+        // New migration attempt: clear postponed lifecycle from any previous run.
+        self.clear_postponed_lifecycle_event();
 
         if !self
             .vm_config
