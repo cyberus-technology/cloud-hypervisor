@@ -90,11 +90,9 @@ use crate::landlock::LandlockError;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
 };
-#[cfg(target_arch = "x86_64")]
-use crate::migration::get_vm_snapshot;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::migration::url_to_file;
-use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, url_to_path};
+use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, get_vm_snapshot, url_to_path};
 use crate::vcpu_throttling::ThrottleThreadHandle;
 #[cfg(feature = "fw_cfg")]
 use crate::vm_config::FwCfgConfig;
@@ -526,6 +524,13 @@ pub struct Vm {
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
     vcpu_throttler: ThrottleThreadHandle,
+    post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PostMigrationLifecycleEvent {
+    VmReboot,
+    VmmShutdown,
 }
 
 impl Vm {
@@ -667,6 +672,15 @@ impl Vm {
         } else {
             VmState::Created
         };
+        let post_migration_lifecycle_event = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                get_vm_snapshot(snapshot)
+                    .map(|vm_snapshot| vm_snapshot.post_migration_lifecycle_event)
+                    .map_err(Error::Restore)
+            })
+            .transpose()?
+            .flatten();
 
         // TODO we could also spawn the thread when a migration with auto-converge starts.
         // Probably this is the better design.
@@ -692,6 +706,7 @@ impl Vm {
             stop_on_boot,
             load_payload_handle,
             vcpu_throttler,
+            post_migration_lifecycle_event,
         })
     }
 
@@ -1283,6 +1298,17 @@ impl Vm {
     /// Waits for the thread to finish.
     pub fn stop_vcpu_throttling(&mut self) {
         self.vcpu_throttler.shutdown();
+    }
+
+    pub fn set_post_migration_lifecycle_event(
+        &mut self,
+        event: Option<PostMigrationLifecycleEvent>,
+    ) {
+        self.post_migration_lifecycle_event = event;
+    }
+
+    pub fn post_migration_lifecycle_event(&self) -> Option<PostMigrationLifecycleEvent> {
+        self.post_migration_lifecycle_event
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3081,6 +3107,8 @@ impl Pausable for Vm {
 
 #[derive(Serialize, Deserialize)]
 pub struct VmSnapshot {
+    #[serde(default)]
+    pub post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
     #[cfg(target_arch = "x86_64")]
     pub clock: Option<hypervisor::ClockData>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -3137,6 +3165,7 @@ impl Snapshottable for Vm {
         };
 
         let vm_snapshot_state = VmSnapshot {
+            post_migration_lifecycle_event: self.post_migration_lifecycle_event(),
             #[cfg(target_arch = "x86_64")]
             clock: self.saved_clock,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
