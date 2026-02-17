@@ -110,8 +110,6 @@ pub struct ValueDefinition {
 }
 
 /// Describes values within a register populated by the CPUID instruction with specific parameters.
-///
-/// NOTE: The only way to interact with this value (beyond this crate) is via the const [`Self::as_slice()`](Self::as_slice) method.
 pub struct ValueDefinitions(&'static [ValueDefinition]);
 impl ValueDefinitions {
     /// Constructor permitting at most 32 entries.
@@ -124,6 +122,22 @@ impl ValueDefinitions {
     /// Converts this into a slice representation. This is the only way to read values of this type.
     pub const fn as_slice(&self) -> &'static [ValueDefinition] {
         self.0
+    }
+
+    /// Lookup the [`ValueDefinition`] whose bits range contains the given `BIT`.
+    pub const fn find_bit<const BIT: u8>(&self) -> Option<&ValueDefinition> {
+        let mut idx = 0;
+        let len = self.0.len();
+        while idx < len {
+            let def = &self.0[idx];
+            let start = def.bits_range.0;
+            let end = def.bits_range.1;
+            if (start <= BIT) & (end >= BIT) {
+                return Some(def);
+            }
+            idx += 1;
+        }
+        None
     }
 }
 
@@ -138,6 +152,40 @@ pub struct CpuidDefinitions<const NUM_PARAMETERS: usize>(
 impl<const NUM_PARAMETERS: usize> CpuidDefinitions<NUM_PARAMETERS> {
     pub const fn as_slice(&self) -> &[(Parameters, ValueDefinitions); NUM_PARAMETERS] {
         &self.0
+    }
+
+    /// Lookup the [`ValueDefinitions`] corresponding to the given `parameters`.
+    pub const fn get(&self, parameters: &Parameters) -> Option<&ValueDefinitions> {
+        let mut idx = 0;
+        let len = self.0.len();
+        let leaf = parameters.leaf;
+        let sub_leaf_start = *parameters.sub_leaf.start();
+        let sub_leaf_end = *parameters.sub_leaf.end();
+        // Note that as of today const Rust is quite a bit more vorbose than normal Rust.
+        // This is why the following implementation doesn't look so idiomatic.
+        let is_eax = matches!(parameters.register, CpuidReg::EAX);
+        let is_ebx = matches!(parameters.register, CpuidReg::EBX);
+        let is_ecx = matches!(parameters.register, CpuidReg::ECX);
+        let is_edx = matches!(parameters.register, CpuidReg::EDX);
+        while idx < len {
+            let (param, defs) = &self.0[idx];
+            let matching_leaf = leaf == param.leaf;
+            let matching_sub_leaf = (sub_leaf_start >= *param.sub_leaf.start())
+                & (sub_leaf_end <= *param.sub_leaf.end());
+            let matching_reg = {
+                match param.register {
+                    CpuidReg::EAX => is_eax,
+                    CpuidReg::EBX => is_ebx,
+                    CpuidReg::ECX => is_ecx,
+                    CpuidReg::EDX => is_edx,
+                }
+            };
+            if matching_leaf & matching_sub_leaf & matching_reg {
+                return Some(defs);
+            }
+            idx += 1;
+        }
+        None
     }
 }
 
