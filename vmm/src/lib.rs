@@ -72,14 +72,12 @@ use crate::coredump::GuestDebuggable;
 use crate::cpu::IS_IN_SHUTDOWN;
 use crate::landlock::Landlock;
 use crate::memory_manager::MemoryManager;
-#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-use crate::migration::get_vm_snapshot;
-use crate::migration::{recv_vm_config, recv_vm_state};
+use crate::migration::{get_vm_snapshot, recv_vm_config, recv_vm_state};
 use crate::migration_transport::{
     ReceiveAdditionalConnections, ReceiveListener, SendAdditionalConnections, SocketStream,
 };
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
-use crate::vm::{Error as VmError, Vm, VmState};
+use crate::vm::{Error as VmError, PostMigrationLifecycleEvent, Vm, VmState};
 use crate::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, MemoryZoneConfig, NetConfig,
     PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
@@ -643,6 +641,8 @@ struct MigrationWorker {
     vm: Vm,
     check_migration_evt: EventFd,
     config: VmSendMigrationData,
+    // Shared with main VMM thread
+    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
 }
@@ -669,6 +669,7 @@ impl MigrationWorker {
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
              self.hypervisor.as_ref(),
             &self.config,
+            self.postponed_lifecycle_event.as_ref(),
         )
             .inspect(|_| event!("vm", "migration-finished"))
             .inspect_err(|_| {
@@ -772,6 +773,8 @@ pub struct Vmm {
     console_info: Option<ConsoleInfo>,
     no_shutdown: bool,
     check_migration_evt: EventFd,
+    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+    received_postponed_lifecycle_event: Option<PostMigrationLifecycleEvent>,
     /// Handle to the [`MigrationWorker`] thread.
     ///
     /// The handle will return the [`Vm`] back in any case. Further, the underlying error (if any) is returned.
@@ -1002,8 +1005,23 @@ impl Vmm {
             console_info: None,
             no_shutdown,
             check_migration_evt,
+            postponed_lifecycle_event: Arc::new(Mutex::new(None)),
+            received_postponed_lifecycle_event: None,
             migration_thread_handle: None,
         })
+    }
+
+    fn postpone_lifecycle_event_during_migration(&self, event: PostMigrationLifecycleEvent) {
+        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+        if postponed_event.is_none() {
+            *postponed_event = Some(event);
+            info!("Postponed post-migration lifecycle event: {event:?}");
+        }
+    }
+
+    fn clear_postponed_lifecycle_event(&self) {
+        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+        *postponed_event = None;
     }
 
     /// Try to receive a file descriptor from a socket. Returns the slot number and the file descriptor.
@@ -1169,11 +1187,35 @@ impl Vmm {
                     // The unwrap is safe, because the state machine makes sure we called
                     // vm_receive_state before, which creates the VM.
                     let vm = self.vm.vm_mut().unwrap();
-                    let (_, resume_duration) = measure_ok(|| vm.resume())?;
-                    debug!(
-                        "Migration (incoming): resume:{}ms",
-                        resume_duration.as_millis()
-                    );
+
+                    // We are on the control-loop thread handling an API request, so
+                    // there is no concurrent access from other VMM or migration
+                    // threads. The VM is in the Paused state , which permits both
+                    // the Running transition (resume) and the Shutdown transition (reboot / exit)
+                    // triggered via the eventfds below.
+                    match self.received_postponed_lifecycle_event {
+                        None => {
+                            let (_, resume_duration) = measure_ok(|| vm.resume())?;
+                            debug!(
+                                "Migration (incoming): resume:{}ms",
+                                resume_duration.as_millis()
+                            );
+                        }
+                        Some(PostMigrationLifecycleEvent::VmReboot) => {
+                            self.reset_evt
+                                .write(1)
+                                .context("Failed writing reset eventfd after migration")
+                                .map_err(MigratableError::MigrateReceive)?;
+                        }
+                        Some(PostMigrationLifecycleEvent::VmmShutdown) => {
+                            self.exit_evt
+                                .write(1)
+                                .context("Failed writing exit eventfd after migration")
+                                .map_err(MigratableError::MigrateReceive)?;
+                        }
+                    }
+                    self.received_postponed_lifecycle_event = None;
+
                     // This logs the downtime without the final memory delta, so
                     // it does not reflect the actual downtime. While we could
                     // pass along the timestamp from when the VM was paused,
@@ -1350,6 +1392,11 @@ impl Vmm {
                 .context("Error deserialising snapshot")
                 .map_err(MigratableError::MigrateReceive)
         })?;
+
+        let vm_snapshot = get_vm_snapshot(&snapshot)
+            .context("Failed extracting VM snapshot data")
+            .map_err(MigratableError::MigrateReceive)?;
+        self.received_postponed_lifecycle_event = vm_snapshot.post_migration_lifecycle_event;
 
         let exit_evt = self
             .exit_evt
@@ -1688,6 +1735,7 @@ impl Vmm {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor: &dyn hypervisor::Hypervisor,
         send_data_migration: &VmSendMigrationData,
+        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
     ) -> result::Result<(), MigratableError> {
         // State machine that is updated with more context as we progress.
         let mut ctx = OngoingMigrationContext::new();
@@ -1831,6 +1879,7 @@ impl Vmm {
         }
 
         // Capture snapshot and send it
+        vm.set_post_migration_lifecycle_event(*postponed_lifecycle_event.lock().unwrap());
         let (vm_snapshot, snapshot_duration) = measure_ok(|| vm.snapshot())?;
         let (_, send_snapshot_duration) =
             measure_ok(|| migration_transport::send_state(&mut socket, &vm_snapshot))?;
@@ -2104,6 +2153,13 @@ impl Vmm {
                         info!("VM exit event");
                         // Consume the event.
                         self.exit_evt.read().map_err(Error::EventFdRead)?;
+                        // Workaround for guest-induced shutdown during a live-migration.
+                        if matches!(self.vm, MaybeVmOwnership::Migration) {
+                            self.postpone_lifecycle_event_during_migration(
+                                PostMigrationLifecycleEvent::VmmShutdown,
+                            );
+                            continue;
+                        }
                         self.vmm_shutdown().map_err(Error::VmmShutdown)?;
 
                         break 'outer;
@@ -2112,6 +2168,13 @@ impl Vmm {
                         info!("VM reset event");
                         // Consume the event.
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
+                        // Workaround for guest-induced shutdown during a live-migration.
+                        if matches!(self.vm, MaybeVmOwnership::Migration) {
+                            self.postpone_lifecycle_event_during_migration(
+                                PostMigrationLifecycleEvent::VmReboot,
+                            );
+                            continue;
+                        }
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
                     EpollDispatch::GuestExit => {
@@ -2965,6 +3028,9 @@ impl RequestHandler for Vmm {
             .context("Invalid receive migration configuration")
             .map_err(MigratableError::MigrateReceive)?;
 
+        // Prevent stale lifecycle intent from a previous failed receive attempt.
+        self.received_postponed_lifecycle_event = None;
+
         info!(
             "Receiving migration: receiver_url={},tls={},net_fds={:?}, tcp_url={:?}, zones={:?}",
             receive_data_migration.receiver_url,
@@ -3074,6 +3140,9 @@ impl RequestHandler for Vmm {
             send_data_migration.timeout_strategy
         );
 
+        // New migration attempt: clear postponed lifecycle from any previous run.
+        self.clear_postponed_lifecycle_event();
+
         if !self
             .vm_config
             .as_ref()
@@ -3141,6 +3210,7 @@ impl RequestHandler for Vmm {
                 vm,
                 check_migration_evt: self.check_migration_evt.try_clone().unwrap(),
                 config: send_data_migration,
+                postponed_lifecycle_event: self.postponed_lifecycle_event.clone(),
                 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
                 hypervisor: self.hypervisor.clone(),
             };
