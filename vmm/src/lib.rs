@@ -807,42 +807,18 @@ struct MigrationWorker {
 }
 
 impl MigrationWorker {
-    /// Performs any final cleanup after failed live migrations.
-    ///
-    /// Helper for [`Self::migrate`].
-    fn migrate_error_cleanup(&mut self) -> result::Result<(), MigratableError> {
-        // Stop logging dirty pages only for non-local migrations
-        if !self.config.local {
-            self.vm.stop_dirty_log()?;
-        }
+    /// Perform the migration and communicate with the [`Vmm`] thread.
+    fn run(mut self) -> MigrationThreadOut {
+        debug!("migration thread is starting");
 
-        Ok(())
-    }
-
-    /// Migrate and cleanup.
-    fn migrate(&mut self) -> result::Result<(), MigratableError> {
-        debug!("start sending migration");
-        Vmm::send_migration(
+        let res = Vmm::send_migration(
             &mut self.vm,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             self.hypervisor.as_ref(),
             &self.config,
             self.postponed_lifecycle_event.as_ref(),
-        ).inspect_err(|_| {
-            let e = self.migrate_error_cleanup();
-            if let Err(e) = e {
-                error!("Failed to clean up after a failed live migration. VM might keep running but in an odd or possibly slowed-down state: {e}");
-            }
-        })?;
-
-        Ok(())
-    }
-
-    /// Perform the migration and communicate with the [`Vmm`] thread.
-    fn run(mut self) -> MigrationThreadOut {
-        debug!("migration thread is starting");
-
-        let res = self.migrate().inspect_err(|e| error!("migrate error: {e}"));
+        )
+        .inspect_err(|e| error!("migrate error: {e}"));
 
         // Notify VMM thread to get migration result by joining this thread.
         self.check_migration_evt.write(1).unwrap();
@@ -2904,7 +2880,7 @@ impl Vmm {
             }
             Err(e) => {
                 error!("Migration failed: {e}");
-
+                // We don't fail the VMM here, it just continues running its VM.
                 // If the failure happened very late in the migration path, the VM might already be
                 // stopped. We resume it to ensure proper operation.
                 //
@@ -2914,11 +2890,6 @@ impl Vmm {
                     match vm.resume() {
                         Ok(_) => {
                             info!("Resumed VM successfully after failed migration");
-
-                            // Ensure full VM performance. The operation is idempotent.
-                            let _ = vm.stop_dirty_log().inspect_err(|e| {
-                                warn!("Failed stopping dirty log after resuming VM: {e} - VM performance might be slower than usual");
-                            });
                         }
                         Err(e) => {
                             error!("Failed resuming VM after failed migration: {e}");
@@ -2926,6 +2897,11 @@ impl Vmm {
                         }
                     }
                 }
+
+                // Ensure full VM performance. The operation is idempotent.
+                let _ = vm.stop_dirty_log().inspect_err(|e| {
+                warn!("Failed stopping dirty log after resuming VM: {e} - VM performance might be slower than usual");
+            });
 
                 // Give VMM back control.
                 self.vm = MaybeVmOwnership::Vmm(vm);
