@@ -208,3 +208,17 @@ pub const KVM_CPUID_DEFINITIONS: CpuidDefinitions<6> = const {
         ),
     ])
 };
+
+/// Compile time check that the given `BIT` in the CPUID output register specified by `params` is not
+/// declared to be overwritten by `0` for non-host CPU profiles.
+pub const fn assert_not_denied_cpuid_feature<const BIT: u8>(params: &Parameters) {
+    if let Some(defs) = KVM_CPUID_DEFINITIONS.get(params)
+        && let Some(def) = defs.find_bit::<BIT>()
+    {
+        assert!(!matches!(def.policy, ProfilePolicy::Static(0)));
+    } else {
+        panic!("Unable to lookup CPUID value definition with the given parameters and feature bit");
+    }
+}
+
+// TODO: Also include assert_denied_cpuid_feature
