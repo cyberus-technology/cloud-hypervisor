@@ -427,8 +427,6 @@ struct KvmDirtyLogSlot {
 /// Wrapper over KVM VM ioctls.
 pub struct KvmVm {
     fd: Arc<VmFd>,
-    #[cfg(target_arch = "x86_64")]
-    msrs: Vec<MsrEntry>,
     dirty_log_slots: Arc<RwLock<HashMap<u32, KvmDirtyLogSlot>>>,
 }
 
@@ -562,6 +560,7 @@ impl vm::Vm for KvmVm {
         &self,
         id: u32,
         vm_ops: Option<Arc<dyn VmOps>>,
+        #[cfg(target_arch = "x86_64")] msrs: Vec<MsrEntry>,
     ) -> vm::Result<Box<dyn cpu::Vcpu>> {
         let fd = self
             .fd
@@ -581,7 +580,7 @@ impl vm::Vm for KvmVm {
         let vcpu = KvmVcpu {
             fd,
             #[cfg(target_arch = "x86_64")]
-            msrs: self.msrs.clone(),
+            msrs,
             vm_ops,
             #[cfg(target_arch = "x86_64")]
             hyperv_synic: AtomicBool::new(false),
@@ -1239,35 +1238,10 @@ impl hypervisor::Hypervisor for KvmHypervisor {
 
         let vm_fd = Arc::new(fd);
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            let msr_list = self.get_msr_list()?;
-            let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
-            let mut msrs: Vec<MsrEntry> = vec![
-                MsrEntry {
-                    ..Default::default()
-                };
-                num_msrs
-            ];
-            let indices = msr_list.as_slice();
-            for (pos, index) in indices.iter().enumerate() {
-                msrs[pos].index = *index;
-            }
-
-            Ok(Arc::new(KvmVm {
-                fd: vm_fd,
-                msrs,
-                dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
-            }))
-        }
-
-        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-        {
-            Ok(Arc::new(KvmVm {
-                fd: vm_fd,
-                dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
-            }))
-        }
+        Ok(Arc::new(KvmVm {
+            fd: vm_fd,
+            dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
+        }))
     }
 
     fn check_required_extensions(&self) -> hypervisor::Result<()> {
@@ -1288,6 +1262,23 @@ impl hypervisor::Hypervisor for KvmHypervisor {
         let v = kvm_cpuid.as_slice().iter().map(|e| (*e).into()).collect();
 
         Ok(v)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn get_supported_msrs(&self) -> hypervisor::Result<Vec<MsrEntry>> {
+        let msr_list = self.get_msr_list()?;
+        let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
+        let mut msrs: Vec<MsrEntry> = vec![
+            MsrEntry {
+                ..Default::default()
+            };
+            num_msrs
+        ];
+        let indices = msr_list.as_slice();
+        for (pos, index) in indices.iter().enumerate() {
+            msrs[pos].index = *index;
+        }
+        Ok(msrs)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1363,7 +1354,7 @@ pub struct KvmVcpu {
 /// let kvm = KvmHypervisor::new().unwrap();
 /// let hypervisor = Arc::new(kvm);
 /// let vm = hypervisor.create_vm(HypervisorVmConfig::default()).expect("new VM fd creation failed");
-/// let vcpu = vm.create_vcpu(0, None).unwrap();
+/// let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
 /// ```
 impl cpu::Vcpu for KvmVcpu {
     ///
@@ -2343,7 +2334,7 @@ impl cpu::Vcpu for KvmVcpu {
     /// let hv = Arc::new(kvm);
     /// let vm = hv.create_vm(HypervisorVmConfig::default()).expect("new VM fd creation failed");
     /// vm.enable_split_irq().unwrap();
-    /// let vcpu = vm.create_vcpu(0, None).unwrap();
+    /// let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
     /// let state = vcpu.state().unwrap();
     /// ```
     fn state(&self) -> cpu::Result<CpuState> {
@@ -2582,7 +2573,7 @@ impl cpu::Vcpu for KvmVcpu {
     /// let hv = Arc::new(kvm);
     /// let vm = hv.create_vm(HypervisorVmConfig::default()).expect("new VM fd creation failed");
     /// vm.enable_split_irq().unwrap();
-    /// let vcpu = vm.create_vcpu(0, None).unwrap();
+    /// let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
     /// let state = vcpu.state().unwrap();
     /// vcpu.set_state(&state).unwrap();
     /// ```
