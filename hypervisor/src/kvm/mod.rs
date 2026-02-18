@@ -108,6 +108,7 @@ use kvm_bindings::{KVM_X86_DEFAULT_VM, KVM_X86_SW_PROTECTED_VM, KVMIO, kvm_run__
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{Xsave as xsave2, kvm_xsave2};
 pub use kvm_ioctls::{self, Cap, Kvm, VcpuExit};
+use log::error;
 use thiserror::Error;
 use vfio_ioctls::VfioDeviceFd;
 #[cfg(target_arch = "x86_64")]
@@ -1957,7 +1958,17 @@ impl cpu::Vcpu for KvmVcpu {
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoapicEoi(vector) => Ok(cpu::VmExit::IoapicEoi(vector)),
                 #[cfg(target_arch = "x86_64")]
-                VcpuExit::Shutdown | VcpuExit::Hlt => Ok(cpu::VmExit::Reset),
+                VcpuExit::Shutdown => {
+                    error!("Guest likely triple-faulted");
+                    // printing regs() wouldn't help as we would only see the state after the triple
+                    // fault when the vcpu is already in reset state.
+                    Ok(cpu::VmExit::Reset)
+                }
+                // Practically unlikely, as KVM emulates the LAPIC and therefore HLT
+                VcpuExit::Hlt => {
+                    error!("Received a HLT exit but KVM should handle this in kernel space");
+                    Ok(cpu::VmExit::Reset)
+                }
 
                 #[cfg(target_arch = "aarch64")]
                 VcpuExit::SystemEvent(event_type, flags) => {
