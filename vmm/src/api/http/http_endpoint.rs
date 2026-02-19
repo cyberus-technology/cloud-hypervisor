@@ -47,8 +47,8 @@ use crate::api::http::http_endpoint::fds_helper::{attach_fds_to_cfg, attach_fds_
 use crate::api::http::{EndpointHandler, HttpError, error_response};
 use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, NetConfig, VmAddDevice, VmAddFs, VmAddNet, VmAddPmem,
-    VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmConfig, VmCounters, VmDelete,
-    VmMigrationProgress, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration,
+    VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmConfig, VmCounters,
+    VmDelete, VmMigrationProgress, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration,
     VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore,
     VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
@@ -417,6 +417,7 @@ vm_action_put_handler!(VmPause);
 vm_action_put_handler!(VmResume);
 vm_action_put_handler!(VmPowerButton);
 vm_action_put_handler!(VmNmi);
+vm_action_put_handler!(VmCancelMigration);
 
 vm_action_put_handler_body!(VmAddDevice);
 vm_action_put_handler_body!(AddDisk);
