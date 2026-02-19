@@ -3296,6 +3296,19 @@ impl RequestHandler for Vmm {
         }
     }
 
+    fn vm_cancel_migration(&mut self) -> result::Result<(), MigratableError> {
+        match self.vm {
+            VmOwnership::Migration { .. } => (),
+            _ => {
+                return Err(MigratableError::CancelMigration(anyhow!(
+                    "There is no ongoing migration"
+                )));
+            }
+        }
+
+        todo!()
+    }
+
     fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
         // We explicitly do not check here for `is VM running?` to always
         // enable querying the state of the last failed migration.
