@@ -40,7 +40,7 @@ use std::str::FromStr;
 use std::sync::mpsc::{RecvError, SendError, Sender, channel};
 use std::time::Duration;
 
-use log::info;
+use log::{debug, info};
 use micro_http::Body;
 use option_parser::{OptionParser, OptionParserError, Toggle};
 use serde::{Deserialize, Serialize};
@@ -1371,7 +1371,7 @@ impl ApiAction for VmInfo {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            info!("API request event: VmInfo");
+            debug!("API request event: VmInfo");
 
             let response = vmm
                 .vm_info()
@@ -1966,7 +1966,7 @@ impl ApiAction for VmMigrationProgress {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            info!("API request event: VmMigrationProgress");
+            debug!("API request event: VmMigrationProgress");
 
             let snapshot = Ok(vmm.vm_migration_progress());
             let response = snapshot
