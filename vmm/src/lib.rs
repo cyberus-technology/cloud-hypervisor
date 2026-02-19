@@ -788,6 +788,34 @@ impl MigrationStateInternal {
     }
 }
 
+/// Handle for the [`MigrationWorker`] thread.
+struct MigrationWorkerHandle {
+    // Option to take the inner handle
+    handle: Option<JoinHandle<MigrationThreadOut>>,
+}
+
+impl MigrationWorkerHandle {
+    /// Joins the thread and returns the result.
+    fn join(mut self) -> MigrationThreadOut {
+        self.handle
+            .take()
+            .expect("should have thread")
+            .join()
+            .expect("should join migration thread gracefully")
+    }
+}
+
+impl Drop for MigrationWorkerHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            warn!("Migration thread wasn't cleaned up explicitly via join()");
+            handle
+                .join()
+                .expect("should join migration thread gracefully");
+        }
+    }
+}
+
 /// Abstraction for the thread controlling and performing the live migration.
 ///
 /// The migration thread also takes ownership of the [`Vm`] from the [`Vmm`].
@@ -823,6 +851,36 @@ impl MigrationWorker {
             vm: self.vm,
             migration_res: res,
             migration_cfg: self.config,
+        }
+    }
+
+    fn spawn(
+        vm: Vm,
+        check_migration_evt: EventFd,
+        config: VmSendMigrationData,
+        postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
+            dyn hypervisor::Hypervisor,
+        >,
+    ) -> MigrationWorkerHandle {
+        let worker = MigrationWorker {
+            vm,
+            check_migration_evt,
+            config,
+            postponed_lifecycle_event,
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            hypervisor,
+        };
+
+        let inner_handle = thread::Builder::new()
+            .name("migration".into())
+            .spawn(move || worker.run())
+            // For upstreaming, we should simply continue and return an
+            // error when this fails. For our PoC, this is fine.
+            .unwrap();
+
+        MigrationWorkerHandle {
+            handle: Some(inner_handle),
         }
     }
 }
@@ -900,9 +958,7 @@ pub struct Vmm {
     postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
     received_postponed_lifecycle_event: Option<PostMigrationLifecycleEvent>,
     /// Handle to the [`MigrationWorker`] thread.
-    ///
-    /// The handle will return the [`Vm`] back in any case. Further, the underlying error (if any) is returned.
-    migration_thread_handle: Option<JoinHandle<MigrationThreadOut>>,
+    migration_thread_handle: Option<MigrationWorkerHandle>,
 }
 
 /// Wait for a file descriptor to become readable. In this case, we return
@@ -2846,8 +2902,7 @@ impl Vmm {
             .migration_thread_handle
             .take()
             .expect("should have thread")
-            .join()
-            .expect("should have joined");
+            .join();
 
         match migration_res {
             Ok(()) => {
@@ -3963,26 +4018,17 @@ impl RequestHandler for Vmm {
             ));
         }
 
-        // Start migration thread
-        {
-            let worker = MigrationWorker {
-                vm,
-                check_migration_evt: self.check_migration_evt.try_clone().unwrap(),
-                config: send_data_migration,
-                postponed_lifecycle_event: self.postponed_lifecycle_event.clone(),
-                #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-                hypervisor: self.hypervisor.clone(),
-            };
-
-            self.migration_thread_handle = Some(
-                thread::Builder::new()
-                    .name("migration".into())
-                    .spawn(move || worker.run())
-                    // For upstreaming, we should simply continue and return an
-                    // error when this fails. For our PoC, this is fine.
-                    .unwrap(),
-            );
-        }
+        let migration_worker = MigrationWorker::spawn(
+            vm,
+            self.check_migration_evt.try_clone().unwrap(),
+            send_data_migration,
+            self.postponed_lifecycle_event.clone(),
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            self.hypervisor.clone(),
+        );
+        let old = self.migration_thread_handle.replace(migration_worker);
+        // If this fails, we messed up the thread lifecycle management.
+        debug_assert!(old.is_none());
 
         Ok(())
     }
