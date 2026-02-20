@@ -431,16 +431,17 @@ impl Vcpu {
     /// * `vm` - The virtual machine this vcpu will get attached to.
     /// * `vm_ops` - Optional object for exit handling.
     /// * `cpu_vendor` - CPU vendor as reported by __cpuid(0x0)
+    /// * `msr_buffer`(x86_64 only) - A buffer for supported MSRs.
     pub fn new(
         id: u32,
         apic_id: u32,
         vm: &dyn hypervisor::Vm,
         vm_ops: Option<Arc<dyn VmOps>>,
         #[cfg(target_arch = "x86_64")] cpu_vendor: CpuVendor,
-        #[cfg(target_arch = "x86_64")] msrs: Vec<MsrEntry>,
+        #[cfg(target_arch = "x86_64")] msr_buffer: Vec<MsrEntry>,
     ) -> Result<Self> {
         let vcpu = vm
-            .create_vcpu(apic_id, vm_ops, msrs)
+            .create_vcpu(apic_id, vm_ops, msr_buffer)
             .map_err(|e| Error::VcpuCreate(e.into()))?;
         // Initially the cpuid per vCPU is the one supported by this VM.
         Ok(Vcpu {
@@ -603,7 +604,8 @@ pub struct CpuManager {
     #[cfg(target_arch = "x86_64")]
     cpuid: Vec<CpuIdEntry>,
     #[cfg(target_arch = "x86_64")]
-    msrs: Vec<MsrEntry>,
+    /// A buffer for MSRs supported by the hardware and hypervisor
+    msr_buffer: Vec<MsrEntry>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     vm: Arc<dyn hypervisor::Vm>,
     vcpus_kill_signalled: Arc<AtomicBool>,
@@ -849,9 +851,8 @@ impl CpuManager {
             interrupt_controller: None,
             #[cfg(target_arch = "x86_64")]
             cpuid: Vec::new(),
-            msrs: hypervisor
-                .get_supported_msrs()
-                .map_err(|e| Error::VcpuCreate(e.into()))?,
+            #[cfg(target_arch = "x86_64")]
+            msr_buffer: Self::construct_msr_buffer(hypervisor.as_ref())?,
             vm,
             vcpus_kill_signalled: Arc::new(AtomicBool::new(false)),
             vcpus_pause_signalled: Arc::new(AtomicBool::new(false)),
@@ -873,6 +874,20 @@ impl CpuManager {
             #[cfg(feature = "sev_snp")]
             sev_snp_enabled,
         })))
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn construct_msr_buffer(hypervisor: &dyn hypervisor::Hypervisor) -> Result<Vec<MsrEntry>> {
+        let msr_indices = hypervisor
+            .get_msr_index_list()
+            .map_err(|e| Error::VcpuCreate(e.into()))?;
+        Ok(msr_indices
+            .into_iter()
+            .map(|index| MsrEntry {
+                index,
+                ..Default::default()
+            })
+            .collect())
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -922,7 +937,7 @@ impl CpuManager {
             #[cfg(target_arch = "x86_64")]
             self.hypervisor.get_cpu_vendor(),
             #[cfg(target_arch = "x86_64")]
-            self.msrs.clone(),
+            self.msr_buffer.clone(),
         )?;
 
         if let Some(snapshot) = snapshot {
