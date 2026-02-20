@@ -130,9 +130,6 @@ pub trait Hypervisor: Send + Sync {
     ///
     fn get_supported_cpuid(&self) -> Result<Vec<CpuIdEntry>>;
     #[cfg(target_arch = "x86_64")]
-    /// Get the supported MSRs.
-    fn get_supported_msrs(&self) -> Result<Vec<MsrEntry>>;
-    #[cfg(target_arch = "x86_64")]
     ///
     /// Get the MSR-based features supported by the hardware and hypervisor
     ///
