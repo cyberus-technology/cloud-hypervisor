@@ -140,6 +140,7 @@ pub trait Hypervisor: Send + Sync {
     ///
     #[cfg(target_arch = "x86_64")]
     fn get_msr_index_list(&self) -> Result<Vec<u32>>;
+
     ///
     /// Check particular extensions if any
     ///

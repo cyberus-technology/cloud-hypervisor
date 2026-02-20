@@ -189,6 +189,29 @@ pub enum VcpuInit {
     Mshv(mshv_bindings::MshvVcpuInit),
 }
 
+#[cfg(target_arch = "x86_64")]
+/// Parameters for filtering read and/or write accesses to a range of MSRs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MsrFilterRange<'a> {
+    /// The type of operation(s) to filter: `1 << 0`, `1 << 1`, `(1 << 0) | (1 << 1)` refers to read, write, read and write respectively.
+    // TODO: Consider using an enum here
+    pub flags: u32,
+    /// The number of MSRs in this filter range.
+    pub nmsrs: u32,
+    /// The first MSR index the bitmap starts at.
+    pub base: u32,
+    /// A '1' bit allows the operations in `flags`, while `0` denies them.
+    pub bitmap: &'a [u8],
+}
+
+impl<'a> MsrFilterRange<'a> {
+    /// Modify the `flags` so that the ops in the bitmap refer to both reads and writes.
+    pub fn with_read_write_flags(mut self) -> Self {
+        self.flags = 1 | (1 << 1);
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegList {
     #[cfg(all(feature = "kvm", any(target_arch = "aarch64", target_arch = "riscv64")))]
