@@ -20,8 +20,6 @@ use igvm_defs::IGVM_VHS_SNP_ID_BLOCK;
 use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
 
-#[cfg(target_arch = "x86_64")]
-use crate::ClockData;
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::gic::{Vgic, VgicConfig};
 #[cfg(target_arch = "riscv64")]
@@ -31,6 +29,8 @@ use crate::arch::x86::CpuIdEntry;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::MsrEntry;
 use crate::cpu::Vcpu;
+#[cfg(target_arch = "x86_64")]
+use crate::{ClockData, MsrFilterRange};
 use crate::{IoEventAddress, IrqRoutingEntry};
 
 ///
@@ -60,6 +60,22 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to create Vcpu")]
     CreateVcpu(#[source] anyhow::Error),
+    ///
+    /// Could not filter the given MSRs because too many MSR filter ranges were provided.
+    ///
+    #[error(
+        "Too many separate MSR ranges to filter. Number of given ranges:={num_ranges}, but number of permitted ranges:={num_permitted_ranges}"
+    )]
+    TooManyMsrFilterRanges {
+        num_ranges: usize,
+        num_permitted_ranges: usize,
+    },
+    #[error(
+        "Could not filter the given MSR ranges: Failed to confirm MSR filtering capability: error_code:={error_code}"
+    )]
+    MissingMsrFilterCapability { error_code: i32 },
+    #[error("Could not filter the given MSR ranges. Error code:={error_code}")]
+    MsrFilter { error_code: i32 },
     ///
     /// Identity map address error
     ///
@@ -323,6 +339,17 @@ pub trait Vm: Send + Sync + Any {
     fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Unregister an event that will, when signaled, trigger the `gsi` IRQ.
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
+    #[cfg(target_arch = "x86_64")]
+    /// Filter the given ranges of MSRs. This can be used to specify certain MSRs
+    /// that guests may not access.
+    ///
+    /// If the `default_deny` flag is set, MSRs that do not match any of the given
+    /// ranges, will be automatically denied, otherwise they are allowed.
+    ///
+    /// # Important
+    ///
+    /// This method should be called once before creating any vCPUs and never again.
+    fn msr_filter<'a>(&self, filter: &[MsrFilterRange<'a>], default_deny: bool) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding
     ///
     /// The `msr_buffer` is used to store MSR state. The entries given here are
