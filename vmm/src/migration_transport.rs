@@ -29,6 +29,7 @@ use vm_migration::protocol::{Command, MemoryRangeTable, Request, Response};
 use vm_migration::tls::{TlsServerConfig, TlsStream};
 use vm_migration::{MigratableError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::timerfd::TimerFd;
 
 use crate::sync_utils::Gate;
 use crate::{GuestMemoryMmap, VmMigrationConfig};
@@ -36,6 +37,8 @@ use crate::{GuestMemoryMmap, VmMigrationConfig};
 /// Hard upper bound for migration worker connections on both the sender and
 /// receiver side.
 pub(crate) const MAX_MIGRATION_CONNECTIONS: u32 = 128;
+
+const MIGRATION_ACCEPT_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 
 /// Transport-agnostic listener used to receive connections.
 #[derive(Debug)]
@@ -49,25 +52,27 @@ impl ReceiveListener {
     /// Block until a connection is accepted.
     pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
         match self {
-            ReceiveListener::Tcp(listener) => listener
-                .accept()
-                .map(|(socket, _)| SocketStream::Tcp(socket))
-                .context("Failed to accept TCP migration connection")
-                .map_err(MigratableError::MigrateReceive),
+            ReceiveListener::Tcp(listener) => {
+                let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
+                    .context("Failed to accept TCP migration connection")
+                    .map_err(MigratableError::MigrateReceive)?;
+                Ok(SocketStream::Tcp(socket))
+            }
             ReceiveListener::Unix(listener) => listener
                 .accept()
                 .map(|(socket, _)| SocketStream::Unix(socket))
                 .context("Failed to accept Unix migration connection")
                 .map_err(MigratableError::MigrateReceive),
-            ReceiveListener::Tls(listener, config) => listener
-                .accept()
-                .map(|(socket, _)| TlsStream::new_server(socket, config))
-                .context("Failed to accept TCP connection")
-                .map_err(MigratableError::MigrateReceive)?
-                .map(Box::new)
-                .map(SocketStream::Tls)
-                .context("Failed to accept TLS migration connection")
-                .map_err(MigratableError::MigrateReceive),
+            ReceiveListener::Tls(listener, config) => {
+                let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
+                    .context("Failed to accept TCP connection")
+                    .map_err(MigratableError::MigrateReceive)?;
+                TlsStream::new_server(socket, config)
+                    .map(Box::new)
+                    .map(SocketStream::Tls)
+                    .context("Failed to accept TLS migration connection")
+                    .map_err(MigratableError::MigrateReceive)
+            }
         }
     }
 
@@ -108,6 +113,26 @@ impl ReceiveListener {
                 .map_err(MigratableError::MigrateReceive),
         }
     }
+}
+
+/// Same as [`TcpListener::accept`], but returns an error if `timeout` expires.
+fn accept_with_timeout(
+    listener: &TcpListener,
+    timeout: Duration,
+) -> Result<(TcpStream, std::net::SocketAddr), io::Error> {
+    let mut timer_fd = TimerFd::new()?;
+    timer_fd
+        .reset(timeout, None)
+        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
+
+    wait_for_readable(listener, &timer_fd)?
+        .then(|| listener.accept())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timed out waiting for sender to connect.",
+            )
+        })?
 }
 
 impl AsFd for ReceiveListener {
