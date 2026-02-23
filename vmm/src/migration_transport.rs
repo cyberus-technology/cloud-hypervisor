@@ -30,6 +30,7 @@ use vm_migration::protocol::{Command, MemoryRangeTable, Request, Response};
 use vm_migration::tls::{TlsServerConfig, TlsStream};
 use vm_migration::{MigratableError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::timerfd::TimerFd;
 
 use crate::sync_utils::Gate;
 use crate::{GuestMemoryMmap, VmMigrationConfig};
@@ -64,8 +65,7 @@ impl ReceiveListener {
     pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
         match self {
             ReceiveListener::Tcp(listener) => {
-                let (socket, _) = listener
-                    .accept()
+                let (socket, _) = accept_with_timeout(listener, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
                     .context("Failed to accept TCP migration connection")
                     .map_err(MigratableError::MigrateReceive)?;
                 set_migration_socket_timeouts(&socket, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
@@ -79,8 +79,7 @@ impl ReceiveListener {
                 .context("Failed to accept Unix migration connection")
                 .map_err(MigratableError::MigrateReceive),
             ReceiveListener::Tls(listener, config) => {
-                let (socket, _) = listener
-                    .accept()
+                let (socket, _) = accept_with_timeout(listener, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
                     .context("Failed to accept TCP connection")
                     .map_err(MigratableError::MigrateReceive)?;
                 set_migration_socket_timeouts(&socket, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
@@ -132,6 +131,26 @@ impl ReceiveListener {
                 .map_err(MigratableError::MigrateReceive),
         }
     }
+}
+
+/// Same as [`TcpListener::accept`], but returns an error if `timeout` expires.
+fn accept_with_timeout(
+    listener: &TcpListener,
+    timeout: Duration,
+) -> Result<(TcpStream, std::net::SocketAddr), io::Error> {
+    let mut timer_fd = TimerFd::new()?;
+    timer_fd
+        .reset(timeout, None)
+        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
+
+    wait_for_readable(listener, &timer_fd)?
+        .then(|| listener.accept())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timed out waiting for sender to connect.",
+            )
+        })?
 }
 
 impl AsFd for ReceiveListener {
