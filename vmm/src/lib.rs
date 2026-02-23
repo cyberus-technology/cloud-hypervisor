@@ -69,6 +69,7 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
+use vmm_sys_util::timerfd::TimerFd;
 
 use crate::api::{
     ApiRequest, ApiResponse, RequestHandler, VmInfoResponse, VmReceiveMigrationData,
@@ -929,9 +930,9 @@ pub struct Vmm {
 /// true. In case, the eventfd was signaled, return false.
 fn wait_for_readable(
     fd: &impl AsFd,
-    eventfd: &EventFd,
+    eventfd: &impl AsRawFd,
 ) -> std::result::Result<bool, std::io::Error> {
-    let fd_event = eventfd.as_raw_fd().as_raw_fd();
+    let fd_event = eventfd.as_raw_fd();
     let fd_io = fd.as_fd().as_raw_fd();
     let mut poll_fds = [
         libc::pollfd {
@@ -960,7 +961,6 @@ fn wait_for_readable(
     if poll_fds[1].revents & libc::POLLIN != 0 {
         return Ok(true);
     }
-
     panic!("Poll returned, but neither file descriptor is readable?");
 }
 
@@ -991,11 +991,13 @@ impl ReceiveListener {
     /// Block until a connection is accepted.
     fn accept(&mut self) -> std::result::Result<SocketStream, std::io::Error> {
         match self {
-            ReceiveListener::Tcp(listener) => listener.accept().map(|(socket, _)| {
-                socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
-                socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
-                Ok(SocketStream::Tcp(socket))
-            })?,
+            ReceiveListener::Tcp(listener) => {
+                Self::accept_with_timeout(listener, Self::TIMEOUT_DURATION).map(|(socket, _)| {
+                    socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
+                    socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
+                    Ok(SocketStream::Tcp(socket))
+                })?
+            }
             ReceiveListener::Unix(listener, opt_path) => {
                 let socket = listener
                     .accept()
@@ -1012,14 +1014,16 @@ impl ReceiveListener {
 
                 Ok(socket)
             }
-            ReceiveListener::Tls(listener, conn) => listener.accept().map(|(socket, _)| {
-                socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
-                socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
-                conn.wrap(socket)
-                    .map(Box::new)
-                    .map(SocketStream::Tls)
-                    .map_err(std::io::Error::other)
-            })?,
+            ReceiveListener::Tls(listener, conn) => {
+                Self::accept_with_timeout(listener, Self::TIMEOUT_DURATION).map(|(socket, _)| {
+                    socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
+                    socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
+                    conn.wrap(socket)
+                        .map(Box::new)
+                        .map(SocketStream::Tls)
+                        .map_err(std::io::Error::other)
+                })?
+            }
         }
     }
 
@@ -1031,6 +1035,26 @@ impl ReceiveListener {
         wait_for_readable(&self, eventfd)?
             .then(|| self.accept())
             .transpose()
+    }
+
+    /// Same as listener.accept(), but returns an error if the given timeout expires.
+    fn accept_with_timeout(
+        listener: &TcpListener,
+        timeout: Duration,
+    ) -> result::Result<(TcpStream, std::net::SocketAddr), std::io::Error> {
+        let mut timer_fd = TimerFd::new()?;
+        timer_fd
+            .reset(timeout, None)
+            .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
+
+        wait_for_readable(&listener, &timer_fd)?
+            .then(|| listener.accept())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Timed out waiting for sender to connect.",
+                )
+            })?
     }
 
     fn try_clone(&self) -> std::result::Result<Self, std::io::Error> {
