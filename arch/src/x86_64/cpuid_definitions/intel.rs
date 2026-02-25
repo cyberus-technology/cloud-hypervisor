@@ -39,7 +39,7 @@ use super::{
 /// a few of the short names and descriptions to be more inline with what is written in the
 /// aforementioned Intel manual. Finally we decided on a [`ProfilePolicy`] to be set for every
 /// single [`ValueDefinition`] and manually appended those.
-pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
+pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
     CpuidDefinitions([
         // =========================================================================================
         //                           Basic CPUID Information
@@ -2392,8 +2392,20 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
                 },
                 ValueDefinition {
                     short: "xcr0_ia32_xss_bits",
-                    description: "XCR0.IA32_XSS (bit 10 - 16) used for IA32_XSS",
-                    bits_range: (10, 16),
+                    description: "XCR0.IA32_XSS (bit 10 - 13) used for IA32_XSS",
+                    bits_range: (10, 13),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "xcr0_ia32_xss_UINTR",
+                    description: "XCR0.IA32_XSS (bit 14) used for UINTR in IA32_XSS",
+                    bits_range: (14, 14),
+                    policy: ProfilePolicy::Static(0),
+                },
+                ValueDefinition {
+                    short: "xcr0_ia32_xss_bits_15_16",
+                    description: "XCR0.IA32_XSS (bit 15 - 16) used for IA32_XSS",
+                    bits_range: (15, 16),
                     policy: ProfilePolicy::Inherit,
                 },
                 // NOTE: AMX currently requires opt-in, even for the host CPU profile. We still inherit this value for profiles and modify this value at runtime if AMX is not enabled by the user.
@@ -2568,7 +2580,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
                     short: "xss_uintr",
                     description: "UINTR state, supported",
                     bits_range: (14, 14),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xss_lbr",
@@ -2719,12 +2731,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
                 policy: ProfilePolicy::Static(0),
             }]),
         ),
-        // NOTE: Sub-leaves 17 & 18 are AMX related and we will alter the adjustments corresponding to
-        // the policy declared here at runtime for those values.
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 63),
+                sub_leaf: RangeInclusive::new(5, 13),
                 register: CpuidReg::EAX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2737,7 +2747,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 63),
+                sub_leaf: RangeInclusive::new(5, 13),
                 register: CpuidReg::EBX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2750,7 +2760,115 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<153> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 63),
+                sub_leaf: RangeInclusive::new(5, 13),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[
+                ValueDefinition {
+                    short: "is_xss_bit",
+                    description: "Subleaf N describes an XSS bit, otherwise XCR0 bit",
+                    bits_range: (0, 0),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "compacted_xsave_64byte_aligned",
+                    description: "When compacted, subleaf-N feature XSAVE area is 64-byte aligned",
+                    bits_range: (1, 1),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "xfd_faulting",
+                    description: "Indicates support for xfd faulting",
+                    bits_range: (2, 2),
+                    policy: ProfilePolicy::Inherit,
+                },
+            ]),
+        ),
+        // We decided to disable UINTR for CPU profiles, hence we zero out these sub-leaves
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(14, 14),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-eax-uintr-zero",
+                description: "This leaf has been zeroed out because UINTR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(14, 14),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-ebx-uintr-zero",
+                description: "This leaf has been zeroed out because UINTR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(14, 14),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-ecx-uintr-zero",
+                description: "This leaf has been zeroed out because UINTR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(14, 14),
+                register: CpuidReg::EDX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-edx-uintr-zero",
+                description: "This leaf has been zeroed out because UINTR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        // NOTE: Sub-leaves 17 & 18 are AMX related and we will alter the adjustments corresponding to
+        // the policy declared here at runtime for those values.
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(15, 63),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "xsave_sz",
+                description: "Size of save area for subleaf-N feature, in bytes",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Inherit,
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(15, 63),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "xsave_offset",
+                description: "Offset of save area for subleaf-N feature, in bytes",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Inherit,
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(15, 63),
                 register: CpuidReg::ECX,
             },
             ValueDefinitions::new(&[
