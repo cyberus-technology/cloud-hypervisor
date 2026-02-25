@@ -562,7 +562,9 @@ impl CpuidFeatureEntry {
                 .as_slice()
                 .iter()
                 .find(|(param, _)| {
-                    (param.leaf == entry.function) && (param.sub_leaf.contains(&entry.index))
+                    (param.leaf == entry.function)
+                        && (param.sub_leaf.contains(&entry.index)
+                            && (param.register == entry.feature_reg))
                 })
             {
                 for def in defs.as_slice() {
