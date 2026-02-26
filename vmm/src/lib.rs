@@ -31,7 +31,7 @@ use std::thread::{JoinHandle, sleep};
 use std::time::{Duration, Instant};
 use std::{io, mem, result, thread};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 #[cfg(feature = "dbus_api")]
 use api::dbus::{DBusApiOptions, DBusApiShutdownChannels};
 use api::http::HttpApiHandle;
@@ -1347,7 +1347,9 @@ fn vm_send_memory(
     send_memory_regions(guest_memory, table, socket)?;
     Response::read_from(socket)?.ok_or_abandon(
         socket,
-        MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
+        MigratableError::MigrateSend(anyhow!(
+            "Error during dirty memory migration (got bad response)"
+        )),
     )?;
 
     Ok(())
@@ -1615,23 +1617,17 @@ fn send_migration_socket(
         let socket = {
             info!("Connecting to TCP socket at {address}");
 
-            let socket = TcpStream::connect(address).map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
-            })?;
+            let socket = TcpStream::connect(address)
+                .context("Error connecting to TCP socket")
+                .map_err(MigratableError::MigrateSend)?;
             socket
                 .set_read_timeout(Some(TIMEOUT_DURATION))
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!(
-                        "Error setting read timeout on TCP socket: {e}"
-                    ))
-                })?;
+                .context("Error setting read timeout on TCP socket")
+                .map_err(MigratableError::MigrateSend)?;
             socket
                 .set_write_timeout(Some(TIMEOUT_DURATION))
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!(
-                        "Error setting write timeout on TCP socket: {e}"
-                    ))
-                })?;
+                .context("Error setting write timeout on TCP socket")
+                .map_err(MigratableError::MigrateSend)?;
             if let Some(tls_dir) = &send_data_migration.tls_dir {
                 info!("Live Migration will be encrypted using TLS.");
                 // The address may still contain a port. I think we should build something more robust to also handle IPv6.
@@ -1647,22 +1643,24 @@ fn send_migration_socket(
                 SocketStream::Tcp(socket)
             }
         };
+
         // If we use multiple TCP connections, we have to send periodic keep alive messages. Thus, we create a KeepAliveStream.
         if send_data_migration.connections.get() > 1 && main_connection {
             return Ok(SocketStream::KeepAlive(
-                KeepAliveStream::new(socket, TIMEOUT_DURATION).map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!("Error creating keep alive sender: {e}"))
-                })?,
+                KeepAliveStream::new(socket, TIMEOUT_DURATION)
+                    .context("Error creating keep alive sender")
+                    .map_err(MigratableError::MigrateSend)?,
             ));
         }
+
         // Otherwise we return the socket.
         Ok(socket)
     } else if let Some(path) = &send_data_migration.destination_url.strip_prefix("unix:") {
         info!("Connecting to UNIX socket at {path:?}");
 
-        let socket = UnixStream::connect(path).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error connecting to UNIX socket: {e}"))
-        })?;
+        let socket = UnixStream::connect(path)
+            .context("Error connecting to UNIX socket")
+            .map_err(MigratableError::MigrateSend)?;
 
         Ok(SocketStream::Unix(socket))
     } else {
@@ -1725,11 +1723,8 @@ fn send_memory_regions(
                     fd,
                     (range.length - offset) as usize,
                 )
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!(
-                        "Error transferring memory to socket: {e}"
-                    ))
-                })?;
+                .context("Error transferring memory to socket")
+                .map_err(MigratableError::MigrateSend)?;
             offset += bytes_written as u64;
 
             if offset == range.length {
@@ -2522,7 +2517,7 @@ impl Vmm {
         Request::start().write_to(&mut socket)?;
         Response::read_from(&mut socket)?.ok_or_abandon(
             &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error starting migration")),
+            MigratableError::MigrateSend(anyhow!("Error starting migration (got bad response)")),
         )?;
 
         // Send config
@@ -2559,9 +2554,8 @@ impl Vmm {
                     profile,
                 },
             )
-            .map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error generating common cpuid': {e:?}"))
-            })?
+            .context("Error generating common cpuid")
+            .map_err(MigratableError::MigrateSend)?
         };
 
         if send_data_migration.local {
@@ -2596,7 +2590,9 @@ impl Vmm {
             .map_err(MigratableError::MigrateSocket)?;
         Response::read_from(&mut socket)?.ok_or_abandon(
             &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error during config migration")),
+            MigratableError::MigrateSend(anyhow!(
+                "Error during config migration (got bad response)"
+            )),
         )?;
 
         // Let every Migratable object know about the migration being started.
@@ -2639,14 +2635,16 @@ impl Vmm {
             .map_err(MigratableError::MigrateSocket)?;
         Response::read_from(&mut socket)?.ok_or_abandon(
             &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error during state migration")),
+            MigratableError::MigrateSend(anyhow!(
+                "Error during state migration (got bad response)"
+            )),
         )?;
         // Complete the migration
         // At this step, the receiving VMM will acquire disk locks again.
         Request::complete().write_to(&mut socket)?;
         Response::read_from(&mut socket)?.ok_or_abandon(
             &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error completing migration")),
+            MigratableError::MigrateSend(anyhow!("Error completing migration (got bad response)")),
         )?;
 
         // Record downtime
