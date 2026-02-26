@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{cmp, result, str, thread};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use arch::PciSpaceInfo;
 #[cfg(target_arch = "x86_64")]
@@ -3072,18 +3072,18 @@ impl Vm {
         {
             Request::memory_fd(std::mem::size_of_val(&slot) as u64)
                 .write_to(socket)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!("Error sending memory fd request: {e}"))
-                })?;
+                .context("Error sending memory fd request")
+                .map_err(MigratableError::MigrateSend)?;
             socket
                 .send_with_fd(&slot.to_le_bytes()[..], fd)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!("Error sending memory fd: {e}"))
-                })?;
+                .context("Error sending memory fd")
+                .map_err(MigratableError::MigrateSend)?;
 
             Response::read_from(socket)?.ok_or_abandon(
                 socket,
-                MigratableError::MigrateSend(anyhow!("Error during memory fd migration")),
+                MigratableError::MigrateSend(anyhow!(
+                    "Error during memory fd migration (got bad response)"
+                )),
             )?;
         }
 
@@ -3435,15 +3435,18 @@ impl Transportable for Vm {
             .write(true)
             .create_new(true)
             .open(snapshot_config_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error creating config snapshot file")
+            .map_err(MigratableError::MigrateSend)?;
 
         // Serialize and write the snapshot config
         let vm_config = serde_json::to_string(self.config.lock().unwrap().deref())
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error serializing VM config")
+            .map_err(MigratableError::MigrateSend)?;
 
         snapshot_config_file
             .write(vm_config.as_bytes())
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error writing serialized VM config")
+            .map_err(MigratableError::MigrateSend)?;
 
         let mut snapshot_state_path = url_to_path(destination_url)?;
         snapshot_state_path.push(SNAPSHOT_STATE_FILE);
@@ -3454,15 +3457,18 @@ impl Transportable for Vm {
             .write(true)
             .create_new(true)
             .open(snapshot_state_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error creating state snapshot file")
+            .map_err(MigratableError::MigrateSend)?;
 
         // Serialize and write the snapshot state
-        let vm_state =
-            serde_json::to_vec(snapshot).map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        let vm_state = serde_json::to_vec(snapshot)
+            .context("Error serializing state snapshot")
+            .map_err(MigratableError::MigrateSend)?;
 
         snapshot_state_file
             .write(&vm_state)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error writing serialized state snapshot")
+            .map_err(MigratableError::MigrateSend)?;
 
         // Tell the memory manager to also send/write its own snapshot.
         if let Some(memory_manager_snapshot) = snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID) {
