@@ -348,6 +348,10 @@ pub enum Error {
     /// Memory size is misaligned with default page size or its hugepage size
     #[error("Memory size is misaligned with default page size or its hugepage size")]
     MisalignedMemorySize,
+
+    /// Failed to prefault memory
+    #[error("Failed to prefault memory")]
+    PrefaultMemory(#[source] io::Error),
 }
 
 const ENABLE_FLAG: usize = 0;
@@ -1468,27 +1472,47 @@ impl MemoryManager {
             let barrier = Arc::new(Barrier::new(num_threads));
             thread::scope(|s| {
                 let r = &region;
+                let mut handles = Vec::new();
                 for i in 0..num_threads {
                     let barrier = Arc::clone(&barrier);
-                    s.spawn(move || {
-                        // Wait until all threads have been spawned to avoid contention
-                        // over mmap_sem between thread stack allocation and page faulting.
-                        barrier.wait();
-                        let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
-                        let offset =
-                            page_size * ((i * pages_per_thread) + std::cmp::min(i, remainder));
-                        // SAFETY: FFI call with correct arguments
-                        let ret = unsafe {
-                            let addr = r.as_ptr().add(offset);
-                            libc::madvise(addr as _, pages * page_size, libc::MADV_POPULATE_WRITE)
-                        };
-                        if ret != 0 {
-                            let e = io::Error::last_os_error();
-                            warn!("Failed to prefault pages: {e}");
-                        }
-                    });
+                    let h: thread::ScopedJoinHandle<'_, Result<(), io::Error>> =
+                        s.spawn(move || {
+                            // Wait until all threads have been spawned to avoid contention
+                            // over mmap_sem between thread stack allocation and page faulting.
+                            barrier.wait();
+                            let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
+                            let offset =
+                                page_size * ((i * pages_per_thread) + std::cmp::min(i, remainder));
+                            // SAFETY: FFI call with correct arguments
+                            let ret = unsafe {
+                                let addr = r.as_ptr().add(offset);
+                                libc::madvise(
+                                    addr as _,
+                                    pages * page_size,
+                                    libc::MADV_POPULATE_WRITE,
+                                )
+                            };
+                            if ret != 0 {
+                                let e = io::Error::last_os_error();
+                                warn!("Failed to prefault pages: {e}");
+                                return Err(e);
+                            }
+                            Ok(())
+                        });
+                    handles.push(h);
                 }
-            });
+
+                for handle in handles {
+                    handle
+                        .join()
+                        .map_err(|_| {
+                            Error::PrefaultMemory(io::Error::other("Prefault thread died"))
+                        })?
+                        .map_err(Error::PrefaultMemory)?;
+                }
+
+                Ok(())
+            })?;
         }
 
         info!(
