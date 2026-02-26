@@ -39,7 +39,7 @@ use super::{
 /// a few of the short names and descriptions to be more inline with what is written in the
 /// aforementioned Intel manual. Finally we decided on a [`ProfilePolicy`] to be set for every
 /// single [`ValueDefinition`] and manually appended those.
-pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
+pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
     CpuidDefinitions([
         // =========================================================================================
         //                           Basic CPUID Information
@@ -1446,7 +1446,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
                     short: "cet_ss",
                     description: "CET shadow stack features",
                     bits_range: (7, 7),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "gfni",
@@ -1668,7 +1668,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
                     short: "ibt",
                     description: "CET indirect branch tracking",
                     bits_range: (20, 20),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "amx_bf16",
@@ -2005,7 +2005,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
                     short: "cet_sss",
                     description: "CET supervisor shadow stacks safe to use",
                     bits_range: (18, 18),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "avx10",
@@ -2392,8 +2392,20 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
                 },
                 ValueDefinition {
                     short: "xcr0_ia32_xss_bits",
-                    description: "XCR0.IA32_XSS (bit 10 - 13) used for IA32_XSS",
-                    bits_range: (10, 13),
+                    description: "XCR0.IA32_XSS (bit 10) used for IA32_XSS",
+                    bits_range: (10, 10),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "xcr0_ia32_xss_cet",
+                    description: "XCR0.IA32_XSS (bits 11 - 12) used for IA32_XSS",
+                    bits_range: (11, 12),
+                    policy: ProfilePolicy::Static(0),
+                },
+                ValueDefinition {
+                    short: "xcr0_ia32_xss_bits",
+                    description: "XCR0.IA32_XSS (bit 13) used for IA32_XSS",
+                    bits_range: (13, 13),
                     policy: ProfilePolicy::Inherit,
                 },
                 ValueDefinition {
@@ -2562,13 +2574,13 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
                     short: "xss_cet_u",
                     description: "CET user state, supported",
                     bits_range: (11, 11),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xss_cet_p",
                     description: "CET supervisor state, supported",
                     bits_range: (12, 12),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xss_hdc",
@@ -2734,7 +2746,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 13),
+                sub_leaf: RangeInclusive::new(5, 10),
                 register: CpuidReg::EAX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2747,7 +2759,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 13),
+                sub_leaf: RangeInclusive::new(5, 10),
                 register: CpuidReg::EBX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2760,7 +2772,113 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<160> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 13),
+                sub_leaf: RangeInclusive::new(5, 10),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[
+                ValueDefinition {
+                    short: "is_xss_bit",
+                    description: "Subleaf N describes an XSS bit, otherwise XCR0 bit",
+                    bits_range: (0, 0),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "compacted_xsave_64byte_aligned",
+                    description: "When compacted, subleaf-N feature XSAVE area is 64-byte aligned",
+                    bits_range: (1, 1),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "xfd_faulting",
+                    description: "Indicates support for xfd faulting",
+                    bits_range: (2, 2),
+                    policy: ProfilePolicy::Inherit,
+                },
+            ]),
+        ),
+        // We leave CET out of CPU profiles for the time being
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(11, 12),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-11-12-eax-cet-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(11, 12),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-11-12-ebx-cet-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(11, 12),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-11-12-ecx-cet-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(11, 12),
+                register: CpuidReg::EDX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-11-12-edx-cet-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(13, 13),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "xsave_sz",
+                description: "Size of save area for subleaf-N feature, in bytes",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Inherit,
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(13, 13),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "xsave_offset",
+                description: "Offset of save area for subleaf-N feature, in bytes",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Inherit,
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(13, 13),
                 register: CpuidReg::ECX,
             },
             ValueDefinitions::new(&[
