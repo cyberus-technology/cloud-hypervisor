@@ -1012,9 +1012,10 @@ impl Vmm {
     ) -> std::result::Result<(u32, File), MigratableError> {
         if let SocketStream::Unix(unix_socket) = socket {
             let mut buf = [0u8; 4];
-            let (_, file) = unix_socket.recv_with_fd(&mut buf).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error receiving slot from socket: {e}"))
-            })?;
+            let (_, file) = unix_socket
+                .recv_with_fd(&mut buf)
+                .context("Error receiving slot from socket")
+                .map_err(MigratableError::MigrateReceive)?;
 
             file.ok_or_else(|| MigratableError::MigrateReceive(anyhow!("Failed to receive socket")))
                 .map(|file| (u32::from_le_bytes(buf), file))
@@ -1211,10 +1212,9 @@ impl Vmm {
             .read_exact(&mut data)
             .map_err(MigratableError::MigrateSocket)?;
 
-        let vm_migration_config: VmMigrationConfig =
-            serde_json::from_slice(&data).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error deserialising config: {e}"))
-            })?;
+        let vm_migration_config: VmMigrationConfig = serde_json::from_slice(&data)
+            .context("Error deserialising config")
+            .map_err(MigratableError::MigrateReceive)?;
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         self.vm_check_cpuid_compatibility(
@@ -1266,9 +1266,11 @@ impl Vmm {
             }
         }
 
-        self.console_info = Some(pre_create_console_devices(self).map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error creating console devices: {e:?}"))
-        })?);
+        self.console_info = Some(
+            pre_create_console_devices(self)
+                .context("Error creating console devices")
+                .map_err(MigratableError::MigrateReceive)?,
+        );
 
         if self
             .vm_config
@@ -1279,9 +1281,9 @@ impl Vmm {
             .landlock_enable
         {
             let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-            apply_landlock(&mut config).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error applying landlock: {e:?}"))
-            })?;
+            apply_landlock(&mut config)
+                .context("Error applying landlock")
+                .map_err(MigratableError::MigrateReceive)?;
         }
 
         let vm = Vm::create_hypervisor_vm(
@@ -1314,11 +1316,8 @@ impl Vmm {
             Some(&vm_migration_config.memory_manager_data),
             existing_memory_files,
         )
-        .map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!(
-                "Error creating MemoryManager from snapshot: {e:?}"
-            ))
-        })?;
+        .context("Error creating MemoryManager from snapshot")
+        .map_err(MigratableError::MigrateReceive)?;
 
         Ok(memory_manager)
     }
@@ -1347,27 +1346,35 @@ impl Vmm {
             socket
                 .read_exact(&mut data)
                 .map_err(MigratableError::MigrateSocket)?;
-            serde_json::from_slice(&data).map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error deserialising snapshot: {e}"))
-            })
+            serde_json::from_slice(&data)
+                .context("Error deserialising snapshot")
+                .map_err(MigratableError::MigrateReceive)
         })?;
 
-        let exit_evt = self.exit_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning exit EventFd: {e}"))
-        })?;
-        let reset_evt = self.reset_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning reset EventFd: {e}"))
-        })?;
+        let exit_evt = self
+            .exit_evt
+            .try_clone()
+            .context("Error cloning exit EventFd")
+            .map_err(MigratableError::MigrateReceive)?;
+        let reset_evt = self
+            .reset_evt
+            .try_clone()
+            .context("Error cloning reset EventFd")
+            .map_err(MigratableError::MigrateReceive)?;
         let guest_exit_evt = self.guest_exit_evt.try_clone().map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error cloning guest exit EventFd: {e}"))
         })?;
         #[cfg(feature = "guest_debug")]
-        let debug_evt = self.vm_debug_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning debug EventFd: {e}"))
-        })?;
-        let activate_evt = self.activate_evt.try_clone().map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error cloning activate EventFd: {e}"))
-        })?;
+        let debug_evt = self
+            .vm_debug_evt
+            .try_clone()
+            .context("Error clonung debug EventFd")
+            .map_err(MigratableError::MigrateReceive)?;
+        let activate_evt = self
+            .activate_evt
+            .try_clone()
+            .context("Error cloning activate EventFd")
+            .map_err(MigratableError::MigrateReceive)?;
 
         let (vm, restore_duration) = measure_ok(|| {
             #[cfg(not(target_arch = "riscv64"))]
@@ -1891,15 +1898,12 @@ impl Vmm {
                     amx: vm_config.cpus.features.amx,
                 },
             )
-            .map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error generating common cpuid: {e:?}"))
-            })?
+            .context("Error generating common cpuid")
+            .map_err(MigratableError::MigrateReceive)?
         };
-        arch::CpuidFeatureEntry::check_cpuid_compatibility(src_vm_cpuid, dest_cpuid).map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!(
-                "Error checking cpu feature compatibility': {e:?}"
-            ))
-        })
+        arch::CpuidFeatureEntry::check_cpuid_compatibility(src_vm_cpuid, dest_cpuid)
+            .context("Error checking cpu feature compatibility")
+            .map_err(MigratableError::MigrateReceive)
     }
 
     fn vm_restore(
@@ -2975,7 +2979,13 @@ impl RequestHandler for Vmm {
             receive_data_migration.tls_dir.as_deref(),
         )?;
         // Accept the connection and get the socket
-        let mut socket = listener.accept()?;
+        let mut socket = listener
+            .accept()
+            .context("Failed to accept migration connection")
+            .map_err(|e| {
+                warn!("{e}");
+                MigratableError::MigrateReceive(e)
+            })?;
 
         event!("vm", "migration-receive-started");
 
