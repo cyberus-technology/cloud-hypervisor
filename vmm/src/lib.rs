@@ -2895,7 +2895,7 @@ impl Vmm {
         // At this point, the thread must be finished.
         // If we fail here, we have lost anyway. Just panic.
         let MigrationThreadOut {
-            mut vm,
+            vm,
             migration_res,
             migration_cfg,
         } = self
@@ -2903,6 +2903,53 @@ impl Vmm {
             .take()
             .expect("should have thread")
             .join();
+
+        let mut try_resume_vm = |mut vm: Vm| {
+            // If the failure happened very late in the migration path, the VM might already be
+            // stopped. We resume it to ensure proper operation.
+            //
+            // Cloud Hypervisor only supports migration of running VMs, therefore it cannot
+            // happen that we resume a previously paused VM.
+            let state = vm.get_state().expect("should acquire lock");
+            if state == VmState::Paused {
+                match vm.resume() {
+                    Ok(_) => {
+                        info!("Resumed VM successfully after failed migration");
+                    }
+                    Err(e) => {
+                        error!("Failed resuming VM after failed migration: {e}");
+                        self.exit_evt.write(1).unwrap();
+                    }
+                }
+            }
+
+            // Ensure full VM performance. The operation is idempotent.
+            let _ = vm.stop_dirty_log().inspect_err(|e| {
+                warn!("Failed stopping dirty log after resuming VM: {e} - VM performance might be slower than usual");
+            });
+
+            // Give VMM back control.
+            self.vm = MaybeVmOwnership::Vmm(vm);
+
+            if let Some(event) = self.current_postponed_lifecycle_event() {
+                match event {
+                    PostMigrationLifecycleEvent::VmReboot => {
+                        self.reset_evt
+                            .write(1)
+                            .context("Failed replaying reset event after failed migration")
+                            .inspect_err(|write_err| error!("{write_err}"))
+                            .ok();
+                    }
+                    PostMigrationLifecycleEvent::VmmShutdown => {
+                        self.exit_evt
+                            .write(1)
+                            .context("Failed replaying shutdown event after failed migration")
+                            .inspect_err(|write_err| error!("{write_err}"))
+                            .ok();
+                    }
+                }
+            }
+        };
 
         match migration_res {
             Ok(()) => {
@@ -2928,57 +2975,7 @@ impl Vmm {
             }
             Err(e) => {
                 error!("Migration failed: {e}");
-                // we don't fail the VMM here, it just continues running its VM
-                // If the failure happened very late in the migration path, the VM might already be
-                // stopped. We resume it to ensure proper operation.
-                //
-                // Cloud Hypervisor only supports migration of running VMs, therefore it cannot
-                // happen that we resume a previously paused VM.
-                let state = vm.get_state().expect("should acquire lock");
-                if state == VmState::Paused {
-                    match vm.resume() {
-                        Ok(_) => {
-                            info!("Resumed VM successfully after failed migration");
-                        }
-                        Err(e) => {
-                            error!("Failed resuming VM after failed migration: {e}");
-                            self.exit_evt.write(1).unwrap();
-                        }
-                    }
-                }
-
-                // Ensure full VM performance. The operation is idempotent.
-                let _ = vm.stop_dirty_log().inspect_err(|e| {
-                warn!("Failed stopping dirty log after resuming VM: {e} - VM performance might be slower than usual");
-            });
-
-                // Give VMM back control.
-                self.vm = MaybeVmOwnership::Vmm(vm);
-                if let Some(event) = self.current_postponed_lifecycle_event() {
-                    match event {
-                        PostMigrationLifecycleEvent::VmReboot => {
-                            self.reset_evt
-                                .write(1)
-                                .context("Failed replaying reset event after failed migration")
-                                .inspect_err(|write_err| error!("{write_err}"))
-                                .ok();
-                        }
-                        PostMigrationLifecycleEvent::VmmShutdown => {
-                            self.exit_evt
-                                .write(1)
-                                .context("Failed replaying shutdown event after failed migration")
-                                .inspect_err(|write_err| error!("{write_err}"))
-                                .ok();
-                        }
-                    }
-                }
-                // Update migration progress snapshot
-                {
-                    let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
-                    lock.as_mut()
-                        .expect("live migration should be ongoing")
-                        .mark_as_failed(&e);
-                }
+                try_resume_vm(vm);
             }
         }
         self.clear_postponed_lifecycle_event();
