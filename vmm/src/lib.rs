@@ -792,9 +792,20 @@ impl MigrationStateInternal {
 struct MigrationWorkerHandle {
     // Option to take the inner handle
     handle: Option<JoinHandle<MigrationThreadOut>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl MigrationWorkerHandle {
+    /// Cancels the migration.
+    ///
+    /// Note that timing issues in the very last phase of the migration allow a
+    /// tiny window in that migration succeeds before they could be canceled.
+    fn trigger_cancellation(&self) {
+        info!("Will cancel ongoing live-migration");
+        self.cancel.store(true, Ordering::Release);
+        // we just dispatch here and do not block for the migration thread
+    }
+
     /// Joins the thread and returns the result.
     fn join(mut self) -> MigrationThreadOut {
         self.handle
@@ -827,6 +838,7 @@ struct MigrationWorker {
     postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl MigrationWorker {
@@ -840,6 +852,7 @@ impl MigrationWorker {
             self.hypervisor.as_ref(),
             &self.config,
             self.postponed_lifecycle_event.as_ref(),
+            self.cancel.clone(),
         )
         .inspect_err(|e| error!("migrate error: {e}"));
 
@@ -863,6 +876,7 @@ impl MigrationWorker {
             dyn hypervisor::Hypervisor,
         >,
     ) -> MigrationWorkerHandle {
+        let cancel = Arc::new(AtomicBool::new(false));
         let worker = MigrationWorker {
             vm,
             check_migration_evt,
@@ -870,6 +884,7 @@ impl MigrationWorker {
             postponed_lifecycle_event,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             hypervisor,
+            cancel: cancel.clone(),
         };
 
         let inner_handle = thread::Builder::new()
@@ -881,6 +896,7 @@ impl MigrationWorker {
 
         MigrationWorkerHandle {
             handle: Some(inner_handle),
+            cancel,
         }
     }
 }
@@ -2597,7 +2613,17 @@ impl Vmm {
         hypervisor: &dyn hypervisor::Hypervisor,
         send_data_migration: &VmSendMigrationData,
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        cancel: Arc<AtomicBool>,
     ) -> result::Result<(), MigratableError> {
+        let return_if_cancelled_cb = move |socket: &mut SocketStream| {
+            if cancel.load(Ordering::Acquire) {
+                info!("Cancelling migration now");
+                Request::abandon().write_to(socket)?;
+                Err(MigratableError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
         let mut s = MigrationStateInternal::new();
 
         // Set up the socket connection
@@ -2738,6 +2764,10 @@ impl Vmm {
         )?;
         // Complete the migration
         // At this step, the receiving VMM will acquire disk locks again.
+
+        // Very last and final check:
+        return_if_cancelled_cb(&mut socket)?;
+
         Request::complete().write_to(&mut socket)?;
         Response::read_from(&mut socket)?.ok_or_abandon(
             &mut socket,
@@ -2973,9 +3003,29 @@ impl Vmm {
                     }
                 }
             }
+            Err(MigratableError::Cancelled) => {
+                error!("Migration cancelled");
+                try_resume_vm(vm);
+
+                // Update migration progress snapshot
+                {
+                    let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+                    lock.as_mut()
+                        .expect("live migration should be ongoing")
+                        .mark_as_cancelled();
+                }
+            }
             Err(e) => {
                 error!("Migration failed: {e}");
                 try_resume_vm(vm);
+
+                // Update migration progress snapshot
+                {
+                    let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+                    lock.as_mut()
+                        .expect("live migration should be ongoing")
+                        .mark_as_failed(&e);
+                }
             }
         }
         self.clear_postponed_lifecycle_event();
@@ -4040,7 +4090,14 @@ impl RequestHandler for Vmm {
             }
         }
 
-        todo!()
+        let handle = self
+            .migration_thread_handle
+            .as_ref()
+            .expect("should have handle");
+        // We just dispatch the cancellation.
+        handle.trigger_cancellation();
+
+        Ok(())
     }
 
     fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
