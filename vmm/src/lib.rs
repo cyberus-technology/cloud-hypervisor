@@ -19,6 +19,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::panic::AssertUnwindSafe;
 #[cfg(feature = "guest_debug")]
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1681,9 +1682,19 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         initial_vm_state: VmState,
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        cancel: Arc<AtomicBool>,
     ) -> result::Result<(), MigratableError> {
         // State machine that is updated with more context as we progress.
         let mut ctx = OngoingMigrationContext::new();
+        let return_if_cancelled_cb = move |socket: &mut SocketStream| {
+            if cancel.load(Ordering::Acquire) {
+                info!("Cancelling migration now");
+                Request::abandon().write_to(socket)?;
+                Err(MigratableError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
 
         // Set up the socket connection
         let mut socket = if send_data_migration.local {
@@ -1811,6 +1822,10 @@ impl Vmm {
 
             mem_send.cleanup()?;
         }
+
+        // Very last cancellation check. After this, we release the disk locks and we can't cancel
+        // anymore.
+        return_if_cancelled_cb(&mut socket)?;
 
         // Update migration progress snapshot
         {
@@ -2087,6 +2102,19 @@ impl Vmm {
                     info!("Keeping VMM alive as requested");
                 } else if let Err(e) = self.exit_evt.write(1) {
                     error!("Failed exiting the VMM after migration: {e}");
+                }
+            }
+            Err(MigratableError::Cancelled) => {
+                error!("Migration cancelled");
+                event!("vm", "migration-cancelled");
+                try_resume_vm_after_failed_migration(vm);
+
+                // Update migration progress snapshot
+                {
+                    let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+                    lock.as_mut()
+                        .expect("live migration should be ongoing")
+                        .mark_as_cancelled();
                 }
             }
             Err(e) => {
@@ -3297,16 +3325,20 @@ impl RequestHandler for Vmm {
     }
 
     fn vm_cancel_migration(&mut self) -> result::Result<(), MigratableError> {
-        match self.vm {
-            VmOwnership::Migration { .. } => (),
-            _ => {
-                return Err(MigratableError::CancelMigration(anyhow!(
-                    "There is no ongoing migration"
-                )));
-            }
-        }
+        let VmOwnership::Migration {
+            ref migration_worker_handle,
+            ..
+        } = self.vm
+        else {
+            return Err(MigratableError::CancelMigration(anyhow!(
+                "There is no ongoing migration"
+            )));
+        };
 
-        todo!()
+        // We just dispatch the cancellation.
+        migration_worker_handle.trigger_cancellation();
+
+        Ok(())
     }
 
     fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
