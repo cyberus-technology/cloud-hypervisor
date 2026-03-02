@@ -1573,6 +1573,7 @@ impl SendAdditionalConnections {
         &self,
         table: &MemoryRangeTable,
         socket: &mut SocketStream,
+        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> std::result::Result<(), MigratableError> {
         let thread_len = self.threads.len();
 
@@ -1581,7 +1582,11 @@ impl SendAdditionalConnections {
         // because we wait for a response after each chunk instead of sending
         // everything in one go.
         if thread_len == 0 {
-            vm_send_memory(&self.guest_memory, socket, table)?;
+            for chunk in table.partition(Self::CHUNK_SIZE) {
+                return_if_cancelled_cb(socket)
+                    .inspect_err(|_| info!("cancelling migration during memory iteration"))?;
+                vm_send_memory(&self.guest_memory, socket, &chunk)?;
+            }
             return Ok(());
         }
 
@@ -1592,6 +1597,9 @@ impl SendAdditionalConnections {
             // The channel we put work into has a limited size. Thus it may happen that we have to
             // retry putting this chunk into it.
             'retry_chunk: loop {
+                return_if_cancelled_cb(socket)
+                    .inspect_err(|_| info!("cancelling migration during memory iteration"))?;
+
                 // If one of the workers encountered an error, we return it.
                 if self.cancel.load(Ordering::Relaxed) {
                     loop {
@@ -2348,6 +2356,7 @@ impl Vmm {
     ///
     /// This transmits the initial VM memory as well as all VM memory delta transmissions while the
     /// VM keeps running.
+    #[allow(clippy::too_many_arguments)]
     fn memory_copy_iterations(
         vm: &mut Vm,
         mem_send: &SendAdditionalConnections,
@@ -2356,6 +2365,7 @@ impl Vmm {
         migration_timeout: Duration,
         migrate_downtime_limit: Duration,
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut iteration_table;
         let total_memory_size_bytes = vm
@@ -2404,6 +2414,8 @@ impl Vmm {
 
         // We loop until we converge (target downtime is achievable).
         loop {
+            return_if_cancelled_cb(socket)?;
+
             // Update the start time of the iteration
             s.iteration_start_time = Instant::now();
 
@@ -2487,7 +2499,7 @@ impl Vmm {
 
             // Send the current dirty pages
             s.transmit_start_time = Instant::now();
-            mem_send.send_memory(&iteration_table, socket)?;
+            mem_send.send_memory(&iteration_table, socket, return_if_cancelled_cb)?;
             s.transmit_duration = s.transmit_start_time.elapsed();
 
             s.total_transferred_bytes += s.bytes_to_transmit;
@@ -2525,6 +2537,7 @@ impl Vmm {
         s: &mut MigrationStateInternal,
         send_data_migration: &VmSendMigrationData,
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<(), MigratableError> {
         let mem_send = SendAdditionalConnections::new(send_data_migration, &vm.guest_memory())?;
 
@@ -2561,6 +2574,7 @@ impl Vmm {
             migration_timeout,
             migrate_downtime_limit,
             postponed_lifecycle_event,
+            return_if_cancelled_cb,
         )?;
 
         info!("Entering downtime phase");
@@ -2576,7 +2590,7 @@ impl Vmm {
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
         final_table.extend(iteration_table.clone());
-        mem_send.send_memory(&final_table, socket)?;
+        mem_send.send_memory(&final_table, socket, return_if_cancelled_cb)?;
 
         // Update statistics
         s.bytes_to_transmit = final_table.regions().iter().map(|range| range.length).sum();
@@ -2636,6 +2650,8 @@ impl Vmm {
             MigratableError::MigrateSend(anyhow!("Error starting migration (got bad response)")),
         )?;
 
+        return_if_cancelled_cb(&mut socket)?;
+
         // Send config
         let vm_config = vm.get_config();
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -2674,6 +2690,8 @@ impl Vmm {
             .map_err(MigratableError::MigrateSend)?
         };
 
+        return_if_cancelled_cb(&mut socket)?;
+
         if send_data_migration.local {
             match &mut socket {
                 SocketStream::Unix(unix_socket) => {
@@ -2693,6 +2711,8 @@ impl Vmm {
             }
         }
 
+        return_if_cancelled_cb(&mut socket)?;
+
         let vm_migration_config = VmMigrationConfig {
             vm_config,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -2711,6 +2731,8 @@ impl Vmm {
             )),
         )?;
 
+        return_if_cancelled_cb(&mut socket)?;
+
         // Let every Migratable object know about the migration being started.
         vm.start_migration()?;
 
@@ -2724,8 +2746,11 @@ impl Vmm {
                 &mut s,
                 send_data_migration,
                 postponed_lifecycle_event,
+                &return_if_cancelled_cb,
             )?;
         }
+
+        return_if_cancelled_cb(&mut socket)?;
 
         // Update migration progress snapshot
         {
