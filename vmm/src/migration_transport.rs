@@ -691,6 +691,7 @@ impl SendAdditionalConnections {
         &mut self,
         table: MemoryRangeTable,
         socket: &mut SocketStream,
+        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> Result<(), MigratableError>,
     ) -> Result<bool, MigratableError> {
         if table.regions().is_empty() {
             return Ok(false);
@@ -698,13 +699,19 @@ impl SendAdditionalConnections {
 
         // If we use only one connection, we send the memory directly.
         if self.threads.is_empty() {
-            send_memory_ranges(&self.guest_memory, &table, socket)?;
+            for chunk in table.partition(Self::CHUNK_SIZE) {
+                return_if_cancelled_cb(socket)
+                    .inspect_err(|_| info!("cancelling migration during memory iteration"))?;
+                send_memory_ranges(&self.guest_memory, &chunk, socket)?;
+            }
             return Ok(true);
         }
 
         // The chunk size is chosen to be big enough so that even very fast links need some
         // milliseconds to send it.
         for chunk in table.partition(Self::CHUNK_SIZE) {
+            return_if_cancelled_cb(socket)
+                .inspect_err(|_| info!("cancelling migration during memory iteration"))?;
             self.send_chunk(chunk)?;
         }
 
