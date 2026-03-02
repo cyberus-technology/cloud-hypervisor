@@ -3750,7 +3750,7 @@ impl RequestHandler for Vmm {
 
         let mut state = ReceiveMigrationState::Established;
 
-        while !state.finished() {
+        let res: result::Result<ReceiveMigrationState, MigratableError> = loop {
             let req = Request::read_from(&mut socket)?;
             trace!("Command {:?} received", req.command());
 
@@ -3758,35 +3758,46 @@ impl RequestHandler for Vmm {
                 continue;
             }
 
-            let (response, new_state) = match self.vm_receive_migration_step(
+            let (response, new_state, mut maybe_error) = match self.vm_receive_migration_step(
                 &listener,
                 &mut socket,
                 state,
                 &req,
                 &receive_data_migration,
             ) {
-                Ok(next_state) => (Response::ok(), next_state),
+                Ok(next_state) => (Response::ok(), next_state, None),
                 Err(err) => {
                     warn!(
                         "Migration aborted as migration command {:?} failed: {}",
                         req.command(),
                         err
                     );
-                    (Response::error(), ReceiveMigrationState::Aborted)
+                    (Response::error(), ReceiveMigrationState::Aborted, Some(err))
                 }
             };
 
             state = new_state;
             assert_eq!(response.length(), 0);
             response.write_to(&mut socket)?;
-        }
 
-        if let ReceiveMigrationState::Aborted = state {
+            if maybe_error.is_some() {
+                break Err(maybe_error.take().unwrap());
+            } else if state.finished() {
+                break Ok(state);
+            }
+        };
+
+        if matches!(res, Err(_) | Ok(ReceiveMigrationState::Aborted)) {
             self.vm = MaybeVmOwnership::None;
             self.vm_config = None;
-            return Err(MigratableError::CompleteMigration(anyhow!(
-                "Migration was aborted"
-            )));
+            match res {
+                Ok(_) => {
+                    return Err(MigratableError::CompleteMigration(anyhow!(
+                        "Migration was aborted by sender"
+                    )));
+                }
+                Err(e) => return Err(MigratableError::CompleteMigration(e.into())),
+            }
         }
 
         Ok(())
