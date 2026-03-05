@@ -23,7 +23,8 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{
-    Receiver, RecvError, SendError, Sender, SyncSender, TrySendError, channel, sync_channel,
+    Receiver, RecvError, SendError, Sender, SyncSender, TryRecvError, TrySendError, channel,
+    sync_channel,
 };
 use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, sleep};
@@ -1369,6 +1370,8 @@ struct SendAdditionalConnections {
     // using this flag. Only the main thread checks this variable, the other
     // workers will be stopped in the destructor.
     cancel: Arc<AtomicBool>,
+    // Externally triggered cancel.
+    external_cancel: Arc<AtomicBool>,
     // After the main thread sent all memory chunks to the sender threads, it waits until
     // one of the sender threads notifies it. Either because an error occurred, or because
     // they arrived at the Gate.
@@ -1430,6 +1433,7 @@ impl SendAdditionalConnections {
         let buffer_size = Self::BUFFERED_REQUESTS_PER_THREAD * configured_connections as usize;
         let (channel_tx, channel_rx) = sync_channel::<SendMemoryThreadMessage>(buffer_size);
         let cancel = Arc::new(AtomicBool::new(false));
+        let external_cancel = Arc::new(AtomicBool::new(false));
         let (notify_tx, notify_rx) = channel::<SendMemoryThreadNotify>();
 
         let recv = Arc::new(Mutex::new(channel_rx));
@@ -1442,6 +1446,7 @@ impl SendAdditionalConnections {
                 threads,
                 sender: channel_tx,
                 cancel,
+                external_cancel,
                 notify_rx,
             });
         }
@@ -1465,8 +1470,10 @@ impl SendAdditionalConnections {
             let guest_mem = guest_mem.clone();
             let recv = recv.clone();
             let cancel = cancel.clone();
+            let external_cancel = external_cancel.clone();
             let notify_tx = notify_tx.clone();
 
+            // Thread worker loop:
             let thread = thread::spawn(move || {
                 info!("Spawned thread to send VM memory.");
 
@@ -1482,6 +1489,11 @@ impl SendAdditionalConnections {
                     let msg = recv.lock().unwrap().recv().unwrap();
                     match msg {
                         SendMemoryThreadMessage::Memory(table) => {
+                            if external_cancel.load(Ordering::Acquire) {
+                                // We drain all Memory messages and then wait for the Disconnect
+                                continue;
+                            }
+
                             match vm_send_memory(&guest_mem, &mut socket, &table) {
                                 Ok(()) => {
                                     total_sent += table
@@ -1527,12 +1539,17 @@ impl SendAdditionalConnections {
             threads,
             sender: channel_tx,
             cancel,
+            external_cancel,
             notify_rx,
         })
     }
 
     /// Wait until all data that is in-flight has actually been sent and acknowledged.
-    fn wait_for_pending_data(&self) -> std::result::Result<(), MigratableError> {
+    fn wait_for_pending_data(
+        &self,
+        socket: &mut SocketStream,
+        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
+    ) -> result::Result<(), MigratableError> {
         let gate = Arc::new(Gate::new());
 
         for _ in 0..self.threads.len() {
@@ -1546,19 +1563,36 @@ impl SendAdditionalConnections {
         // threads to notify us that they arrived at the gate using notify_rx.
         let mut seen_threads = 0;
         loop {
-            match self.notify_rx.recv().unwrap() {
-                SendMemoryThreadNotify::Error(e) => {
+            // We instruct all worker threads to cancel all remaining work.
+            return_if_cancelled_cb(socket).inspect_err(|_e| {
+                gate.open();
+                self.external_cancel.store(true, Ordering::Release);
+            })?;
+
+            sleep(Duration::from_millis(2));
+
+            match self.notify_rx.try_recv() {
+                Ok(SendMemoryThreadNotify::Error(e)) => {
                     // If an error occurred in one of the worker threads, we open the gate to make
                     // sure that no thread hangs.
                     gate.open();
                     return Err(e);
                 }
-                SendMemoryThreadNotify::Gate => {
+                Ok(SendMemoryThreadNotify::Gate) => {
                     seen_threads += 1;
                     if seen_threads == self.threads.len() {
                         gate.open();
                         return Ok(());
                     }
+                }
+                Err(TryRecvError::Empty) => {
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    // Unlikely
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "All senders died unexpectedly."
+                    )));
                 }
             }
         }
@@ -1597,8 +1631,9 @@ impl SendAdditionalConnections {
             // The channel we put work into has a limited size. Thus it may happen that we have to
             // retry putting this chunk into it.
             'retry_chunk: loop {
-                return_if_cancelled_cb(socket)
-                    .inspect_err(|_| info!("cancelling migration during memory iteration"))?;
+                return_if_cancelled_cb(socket).inspect_err(|_e| {
+                    self.external_cancel.store(true, Ordering::Release);
+                })?;
 
                 // If one of the workers encountered an error, we return it.
                 if self.cancel.load(Ordering::Relaxed) {
@@ -1628,7 +1663,8 @@ impl SendAdditionalConnections {
             }
         }
 
-        self.wait_for_pending_data()?;
+        // When we exit here, drop() will tell all threads to stop next.
+        self.wait_for_pending_data(socket, return_if_cancelled_cb)?;
 
         Ok(())
     }
