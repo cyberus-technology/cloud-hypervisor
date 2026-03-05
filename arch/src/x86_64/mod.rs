@@ -740,6 +740,123 @@ pub fn generate_common_cpuid(
         .get_supported_cpuid()
         .map_err(Error::CpuidGetSupported)?;
 
+    CpuidPatch::patch_cpuid(&mut host_cpuid, &cpuid_patches);
+
+    #[cfg(feature = "tdx")]
+    let tdx_capabilities = if config.tdx {
+        let caps = hypervisor
+            .tdx_capabilities()
+            .map_err(Error::TdxCapabilities)?;
+        info!("TDX capabilities {caps:#?}");
+        Some(caps)
+    } else {
+        None
+    };
+
+    // Update some existing CPUID
+    for entry in host_cpuid.as_mut_slice().iter_mut() {
+        match entry.function {
+            // Clear AMX related bits if the AMX feature is not enabled
+            0x7 if !config.amx => {
+                if entry.index == 0 {
+                    entry.edx &= !((1 << AMX_BF16) | (1 << AMX_TILE) | (1 << AMX_INT8));
+                }
+                if entry.index == 1 {
+                    entry.eax &= !(1 << AMX_FP16);
+                    entry.edx &= !(1 << AMX_COMPLEX);
+                }
+            }
+            0xd =>
+            {
+                #[cfg(feature = "tdx")]
+                if let Some(caps) = &tdx_capabilities {
+                    let xcr0_mask: u64 = 0x82ff;
+                    let xss_mask: u64 = !xcr0_mask;
+                    if entry.index == 0 {
+                        entry.eax &= (caps.xfam_fixed0 as u32) & (xcr0_mask as u32);
+                        entry.eax |= (caps.xfam_fixed1 as u32) & (xcr0_mask as u32);
+                        entry.edx &= ((caps.xfam_fixed0 & xcr0_mask) >> 32) as u32;
+                        entry.edx |= ((caps.xfam_fixed1 & xcr0_mask) >> 32) as u32;
+                    } else if entry.index == 1 {
+                        entry.ecx &= (caps.xfam_fixed0 as u32) & (xss_mask as u32);
+                        entry.ecx |= (caps.xfam_fixed1 as u32) & (xss_mask as u32);
+                        entry.edx &= ((caps.xfam_fixed0 & xss_mask) >> 32) as u32;
+                        entry.edx |= ((caps.xfam_fixed1 & xss_mask) >> 32) as u32;
+                    }
+                }
+            }
+            // Tile Information (purely AMX related).
+            0x1d if !config.amx => {
+                entry.eax = 0;
+                entry.ebx = 0;
+                entry.ecx = 0;
+                entry.edx = 0;
+            }
+            // TMUL information (purely AMX related)
+            0x1e if !config.amx => {
+                entry.eax = 0;
+                entry.ebx = 0;
+                entry.ecx = 0;
+                entry.edx = 0;
+            }
+
+            // Copy host L1 cache details if not populated by KVM
+            0x8000_0005
+                if entry.eax == 0
+                    && entry.ebx == 0
+                    && entry.ecx == 0
+                    && entry.edx == 0
+                    // SAFETY: cpuid called with valid leaves
+                    && unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0005 =>
+            {
+                // SAFETY: cpuid called with valid leaves
+                let leaf = unsafe { std::arch::x86_64::__cpuid(0x8000_0005) };
+                entry.eax = leaf.eax;
+                entry.ebx = leaf.ebx;
+                entry.ecx = leaf.ecx;
+                entry.edx = leaf.edx;
+            }
+            // Copy host L2 cache details if not populated by KVM
+            0x8000_0006
+                if entry.eax == 0
+                    && entry.ebx == 0
+                    && entry.ecx == 0
+                    && entry.edx == 0
+                    // SAFETY: cpuid called with valid leaves
+                    && unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0006 =>
+            {
+                #[allow(unused_unsafe)]
+                // SAFETY: cpuid called with valid leaves
+                let leaf = unsafe { std::arch::x86_64::__cpuid(0x8000_0006) };
+                entry.eax = leaf.eax;
+                entry.ebx = leaf.ebx;
+                entry.ecx = leaf.ecx;
+                entry.edx = leaf.edx;
+            }
+            // Set CPU physical bits
+            0x8000_0008 => {
+                entry.eax = (entry.eax & 0xffff_ff00) | (config.phys_bits as u32 & 0xff);
+            }
+            0x4000_0001 => {
+                // Enable KVM_FEATURE_MSI_EXT_DEST_ID. This allows the guest to target
+                // device interrupts to cpus with APIC IDs > 254 without interrupt remapping.
+                entry.eax |= 1 << KVM_FEATURE_MSI_EXT_DEST_ID;
+
+                // These features are not supported by TDX
+                #[cfg(feature = "tdx")]
+                if config.tdx {
+                    entry.eax &= !((1 << KVM_FEATURE_CLOCKSOURCE_BIT)
+                        | (1 << KVM_FEATURE_CLOCKSOURCE2_BIT)
+                        | (1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT)
+                        | (1 << KVM_FEATURE_ASYNC_PF_BIT)
+                        | (1 << KVM_FEATURE_ASYNC_PF_VMEXIT_BIT)
+                        | (1 << KVM_FEATURE_STEAL_TIME_BIT));
+                }
+            }
+            _ => {}
+        }
+    }
+
     // Copy CPU identification string
     //
     // If a CPU profile has been applied then this will get
