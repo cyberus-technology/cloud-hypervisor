@@ -82,11 +82,12 @@ pub const KVM_CPUID_DEFINITIONS: CpuidDefinitions<6> = const {
                 register: CpuidReg::EAX,
             },
             ValueDefinitions::new(&[
+                // NOTE: This is deprecated and KVM now prefers CLOCKSOURCE2
                 ValueDefinition {
                     short: "kvm_feature_clocksource",
                     description: "kvmclock available at MSRs 0x11 and 0x12",
                     bits_range: (0, 0),
-                    policy: ProfilePolicy::Passthrough,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "kvm_feature_nop_io_delay",
