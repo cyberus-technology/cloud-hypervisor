@@ -8,6 +8,8 @@ pub mod intel;
 #[cfg(all(feature = "kvm", any(test, feature = "cpu_profile_generation")))]
 pub mod kvm;
 
+pub mod hyperv;
+
 use crate::{deserialize_u32_hex, serialize_u32_hex};
 /// The register address of an MSR
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
