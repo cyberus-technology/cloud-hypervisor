@@ -132,10 +132,10 @@ impl SerialManager {
 
         let in_fd = match output {
             ConsoleOutput::Pty(ref fd) => fd.as_raw_fd(),
-            ConsoleOutput::Tty(_) => {
+            ConsoleOutput::Tty(_)
                 // If running on an interactive TTY then accept input
                 // SAFETY: trivially safe
-                if unsafe { libc::isatty(libc::STDIN_FILENO) == 1 } {
+                if unsafe { libc::isatty(libc::STDIN_FILENO) == 1 } => {
                     // SAFETY: STDIN_FILENO is a valid fd
                     let fd = unsafe { libc::dup(libc::STDIN_FILENO) };
                     if fd == -1 {
@@ -156,10 +156,7 @@ impl SerialManager {
 
                     output = ConsoleOutput::Tty(Arc::new(stdin_clone));
                     fd
-                } else {
-                    return Ok(None);
                 }
-            }
             ConsoleOutput::Socket(ref fd) => {
                 if let Some(path_in_socket) = socket {
                     socket_path = Some(path_in_socket.clone());

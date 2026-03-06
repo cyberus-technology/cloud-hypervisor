@@ -643,8 +643,8 @@ pub fn generate_common_cpuid(
     for entry in cpuid.as_mut_slice().iter_mut() {
         match entry.function {
             // Clear AMX related bits if the AMX feature is not enabled
-            0x7 => {
-                if !config.amx {
+            0x7
+                if !config.amx => {
                     if entry.index == 0 {
                         entry.edx &= !((1 << AMX_BF16) | (1 << AMX_TILE) | (1 << AMX_INT8));
                     }
@@ -653,7 +653,6 @@ pub fn generate_common_cpuid(
                         entry.edx &= !(1 << AMX_COMPLEX);
                     }
                 }
-            }
             0xd =>
             {
                 #[cfg(feature = "tdx")]
@@ -673,31 +672,29 @@ pub fn generate_common_cpuid(
                     }
                 }
             }
-            0x1d => {
+            0x1d
                 // Tile Information (purely AMX related).
-                if !config.amx {
+                if !config.amx => {
                     entry.eax = 0;
                     entry.ebx = 0;
                     entry.ecx = 0;
                     entry.edx = 0;
                 }
-            }
-            0x1e => {
+            0x1e
                 // TMUL information (purely AMX related)
-                if !config.amx {
+                if !config.amx => {
                     entry.eax = 0;
                     entry.ebx = 0;
                     entry.ecx = 0;
                     entry.edx = 0;
                 }
-            }
 
             // Copy host L1 cache details if not populated by KVM
-            0x8000_0005 => {
-                if entry.eax == 0 && entry.ebx == 0 && entry.ecx == 0 && entry.edx == 0 {
-                    #[allow(unused_unsafe)]
+            #[allow(unused_unsafe)]
+            0x8000_0005
+                if entry.eax == 0 && entry.ebx == 0 && entry.ecx == 0 && entry.edx == 0
                     // SAFETY: cpuid called with valid leaves
-                    if unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0005 {
+                     && unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0005 => {
                         // SAFETY: cpuid called with valid leaves
                         let leaf = unsafe { std::arch::x86_64::__cpuid(0x8000_0005) };
                         entry.eax = leaf.eax;
@@ -705,14 +702,13 @@ pub fn generate_common_cpuid(
                         entry.ecx = leaf.ecx;
                         entry.edx = leaf.edx;
                     }
-                }
-            }
             // Copy host L2 cache details if not populated by KVM
-            0x8000_0006 => {
-                if entry.eax == 0 && entry.ebx == 0 && entry.ecx == 0 && entry.edx == 0 {
-                    #[allow(unused_unsafe)]
+            #[allow(unused_unsafe)]
+            0x8000_0006
+                if entry.eax == 0 && entry.ebx == 0 && entry.ecx == 0 && entry.edx == 0
+
                     // SAFETY: cpuid called with valid leaves
-                    if unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0006 {
+                    && unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0006 => {
                         #[allow(unused_unsafe)]
                         // SAFETY: cpuid called with valid leaves
                         let leaf = unsafe { std::arch::x86_64::__cpuid(0x8000_0006) };
@@ -721,8 +717,6 @@ pub fn generate_common_cpuid(
                         entry.ecx = leaf.ecx;
                         entry.edx = leaf.edx;
                     }
-                }
-            }
             // Set CPU physical bits
             0x8000_0008 => {
                 entry.eax = (entry.eax & 0xffff_ff00) | (config.phys_bits as u32 & 0xff);
