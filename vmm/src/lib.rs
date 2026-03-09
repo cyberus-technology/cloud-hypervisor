@@ -272,6 +272,7 @@ pub enum EpollDispatch {
     ActivateVirtioDevices = 3,
     Debug = 4,
     CheckMigration = 5,
+    GuestExit = 6,
     Unknown,
 }
 
@@ -285,6 +286,7 @@ impl From<u64> for EpollDispatch {
             3 => ActivateVirtioDevices,
             4 => Debug,
             5 => CheckMigration,
+            6 => GuestExit,
             _ => Unknown,
         }
     }
@@ -960,6 +962,7 @@ pub struct Vmm {
     epoll: EpollContext,
     exit_evt: EventFd,
     reset_evt: EventFd,
+    guest_exit_evt: EventFd,
     api_evt: EventFd,
     #[cfg(feature = "guest_debug")]
     debug_evt: EventFd,
@@ -1935,6 +1938,7 @@ impl Vmm {
     ) -> Result<Self> {
         let mut epoll = EpollContext::new().map_err(Error::Epoll)?;
         let reset_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
+        let guest_exit_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
         let activate_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
         let check_migration_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
 
@@ -1944,6 +1948,10 @@ impl Vmm {
 
         epoll
             .add_event(&reset_evt, EpollDispatch::Reset)
+            .map_err(Error::Epoll)?;
+
+        epoll
+            .add_event(&guest_exit_evt, EpollDispatch::GuestExit)
             .map_err(Error::Epoll)?;
 
         epoll
@@ -1967,6 +1975,7 @@ impl Vmm {
             epoll,
             exit_evt,
             reset_evt,
+            guest_exit_evt,
             api_evt,
             #[cfg(feature = "guest_debug")]
             debug_evt,
@@ -2351,6 +2360,11 @@ impl Vmm {
             .try_clone()
             .context("Error cloning activate EventFd")
             .map_err(MigratableError::MigrateReceive)?;
+        let guest_exit_evt = self
+            .guest_exit_evt
+            .try_clone()
+            .context("Error cloning guest exit EventFd")
+            .map_err(MigratableError::MigrateReceive)?;
 
         #[cfg(not(target_arch = "riscv64"))]
         let timestamp = Instant::now();
@@ -2361,6 +2375,7 @@ impl Vmm {
             hypervisor_vm,
             exit_evt,
             reset_evt,
+            guest_exit_evt,
             #[cfg(feature = "guest_debug")]
             debug_evt,
             &self.seccomp_action,
@@ -2938,6 +2953,10 @@ impl Vmm {
 
         let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
         let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
+        let guest_exit_evt = self
+            .guest_exit_evt
+            .try_clone()
+            .map_err(VmError::EventFdClone)?;
         #[cfg(feature = "guest_debug")]
         let debug_evt = self
             .vm_debug_evt
@@ -2952,6 +2971,7 @@ impl Vmm {
             vm_config,
             exit_evt,
             reset_evt,
+            guest_exit_evt,
             #[cfg(feature = "guest_debug")]
             debug_evt,
             &self.seccomp_action,
@@ -3161,6 +3181,13 @@ impl Vmm {
                         }
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
+                    EpollDispatch::GuestExit => {
+                        info!("VM guest exit event");
+                        self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
+                        self.vmm_shutdown().map_err(Error::VmmShutdown)?;
+
+                        break 'outer;
+                    }
                     EpollDispatch::ActivateVirtioDevices => {
                         if let MaybeVmOwnership::Vmm(ref vm) = self.vm {
                             let count = self.activate_evt.read().map_err(Error::EventFdRead)?;
@@ -3281,6 +3308,10 @@ impl RequestHandler for Vmm {
         if matches!(self.vm, MaybeVmOwnership::None) {
             let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
             let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
+            let guest_exit_evt = self
+                .guest_exit_evt
+                .try_clone()
+                .map_err(VmError::EventFdClone)?;
             #[cfg(feature = "guest_debug")]
             let vm_debug_evt = self
                 .vm_debug_evt
@@ -3296,6 +3327,7 @@ impl RequestHandler for Vmm {
                     Arc::clone(vm_config),
                     exit_evt,
                     reset_evt,
+                    guest_exit_evt,
                     #[cfg(feature = "guest_debug")]
                     vm_debug_evt,
                     &self.seccomp_action,
@@ -3462,6 +3494,10 @@ impl RequestHandler for Vmm {
 
         let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
         let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
+        let guest_exit_evt = self
+            .guest_exit_evt
+            .try_clone()
+            .map_err(VmError::EventFdClone)?;
         #[cfg(feature = "guest_debug")]
         let debug_evt = self
             .vm_debug_evt
@@ -3487,6 +3523,7 @@ impl RequestHandler for Vmm {
             config,
             exit_evt,
             reset_evt,
+            guest_exit_evt,
             #[cfg(feature = "guest_debug")]
             debug_evt,
             &self.seccomp_action,
