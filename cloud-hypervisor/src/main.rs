@@ -362,6 +362,12 @@ fn get_cli_options_sorted(
             .help(NetConfig::SYNTAX)
             .num_args(1..)
             .group("vm-config"),
+        Arg::new("no-shutdown")
+            .long("no-shutdown")
+            .help("Do not exit the VMM when the guest shuts down")
+            .num_args(0)
+            .action(ArgAction::SetTrue)
+            .group("vmm-config"),
         Arg::new("numa")
             .long("numa")
             .help(NumaConfig::SYNTAX)
@@ -613,6 +619,7 @@ fn start_vmm(cmd_arguments: &ArgMatches) -> Result<Option<String>, Error> {
 
     let exit_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::CreateExitEventFd)?;
     let landlock_enable = cmd_arguments.get_flag("landlock");
+    let no_shutdown = cmd_arguments.get_flag("no-shutdown");
 
     #[allow(unused_mut)]
     let mut event_monitor = cmd_arguments
@@ -709,6 +716,7 @@ fn start_vmm(cmd_arguments: &ArgMatches) -> Result<Option<String>, Error> {
         exit_evt.try_clone().unwrap(),
         &seccomp_action,
         hypervisor,
+        no_shutdown,
         landlock_enable,
     )
     .map_err(Error::StartVmmThread)?;
