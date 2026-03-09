@@ -587,7 +587,7 @@ pub struct Vm {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PostMigrationLifecycleEvent {
     VmReboot,
-    VmmShutdown,
+    VmShutdown,
 }
 
 impl Vm {
