@@ -1467,9 +1467,6 @@ impl DeviceManager {
                 self.reset_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
-                self.exit_evt
-                    .try_clone()
-                    .map_err(DeviceManagerError::EventFd)?,
                 self.guest_exit_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
@@ -1843,8 +1840,7 @@ impl DeviceManager {
         &mut self,
         interrupt_manager: &dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>,
         reset_evt: EventFd,
-        exit_evt: EventFd,
-        _guest_exit_evt: EventFd,
+        guest_exit_evt: EventFd,
     ) -> DeviceManagerResult<Option<Arc<Mutex<devices::AcpiGedDevice>>>> {
         let vcpus_kill_signalled = self
             .cpu_manager
@@ -1859,7 +1855,7 @@ impl DeviceManager {
             .vcpus_pause_signalled()
             .clone();
         let shutdown_device = Arc::new(Mutex::new(devices::AcpiShutdownDevice::new(
-            exit_evt,
+            guest_exit_evt,
             reset_evt,
             vcpus_kill_signalled,
             vcpus_pause_signalled,
