@@ -183,6 +183,10 @@ pub enum Error {
     #[error("Error rebooting VM")]
     VmReboot(#[source] VmError),
 
+    /// Cannot shut the VM down
+    #[error("Error shutting down VM")]
+    VmShutdown(#[source] VmError),
+
     /// Cannot create VMM thread
     #[error("Error spawning VMM thread")]
     VmmThreadSpawn(#[source] io::Error),
@@ -578,6 +582,7 @@ pub fn start_vmm_thread(
     exit_event: EventFd,
     seccomp_action: &SeccompAction,
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
+    no_shutdown: bool,
     landlock_enable: bool,
 ) -> Result<VmmThreadHandle> {
     #[cfg(feature = "guest_debug")]
@@ -617,6 +622,7 @@ pub fn start_vmm_thread(
                     vmm_seccomp_action,
                     hypervisor,
                     exit_event,
+                    no_shutdown,
                 )?;
 
                 vmm.setup_signal_handler(landlock_enable)?;
@@ -984,6 +990,7 @@ pub struct Vmm {
     received_postponed_lifecycle_event: Option<PostMigrationLifecycleEvent>,
     /// Handle to the [`MigrationWorker`] thread.
     migration_thread_handle: Option<MigrationWorkerHandle>,
+    no_shutdown: bool,
 }
 
 /// Wait for a file descriptor to become readable. In this case, we return
@@ -1935,6 +1942,7 @@ impl Vmm {
         seccomp_action: SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         exit_evt: EventFd,
+        no_shutdown: bool,
     ) -> Result<Self> {
         let mut epoll = EpollContext::new().map_err(Error::Epoll)?;
         let reset_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
@@ -1996,6 +2004,7 @@ impl Vmm {
             postponed_lifecycle_event: Arc::new(Mutex::new(None)),
             received_postponed_lifecycle_event: None,
             migration_thread_handle: None,
+            no_shutdown,
         })
     }
 
@@ -3184,9 +3193,12 @@ impl Vmm {
                     EpollDispatch::GuestExit => {
                         info!("VM guest exit event");
                         self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
-                        self.vmm_shutdown().map_err(Error::VmmShutdown)?;
-
-                        break 'outer;
+                        if self.no_shutdown {
+                            self.vm_shutdown().map_err(Error::VmShutdown)?;
+                        } else {
+                            self.vmm_shutdown().map_err(Error::VmmShutdown)?;
+                            break 'outer;
+                        }
                     }
                     EpollDispatch::ActivateVirtioDevices => {
                         if let MaybeVmOwnership::Vmm(ref vm) = self.vm {
@@ -4233,6 +4245,7 @@ mod unit_tests {
             SeccompAction::Allow,
             hypervisor::new().unwrap(),
             EventFd::new(EFD_NONBLOCK).unwrap(),
+            false,
         )
         .unwrap()
     }
