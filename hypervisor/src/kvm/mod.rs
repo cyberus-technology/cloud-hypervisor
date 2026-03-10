@@ -69,6 +69,7 @@ use crate::ClockData;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::{
     CpuIdEntry, FpuState, LapicState, MsrEntry, NUM_IOAPIC_PINS, SpecialRegisters, XsaveState,
+    msr_index::MSR_IA32_APICBASE,
 };
 use crate::{CpuState, IoEventAddress, IrqRoutingEntry, MpState, StandardRegisters};
 // aarch64 dependencies
@@ -118,6 +119,13 @@ use vmm_sys_util::{ioctl::ioctl_with_val, ioctl_iowr_nr};
 
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use crate::RegList;
+
+#[cfg(target_arch = "x86_64")]
+fn filter_apicbase_msr_entries(msrs: &mut Vec<MsrEntry>) -> bool {
+    let before = msrs.len();
+    msrs.retain(|msr| msr.index != MSR_IA32_APICBASE);
+    before != msrs.len()
+}
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::regs;
 #[cfg(target_arch = "x86_64")]
@@ -1277,6 +1285,14 @@ impl hypervisor::Hypervisor for KvmHypervisor {
         let indices = msr_list.as_slice();
         for (pos, index) in indices.iter().enumerate() {
             msrs[pos].index = *index;
+        }
+        // IA32_APICBASE is already restored through sregs.apic_base plus
+        // KVM_SET_LAPIC. Keeping it in the generic MSR buffer would replay it
+        // later during restore and can clobber the APIC configuration.
+        if filter_apicbase_msr_entries(&mut msrs) {
+            warn!(
+                "Dropping IA32_APICBASE from KVM supported MSR list. APIC base is restored via SREGS/LAPIC"
+            );
         }
         Ok(msrs)
     }
@@ -2618,21 +2634,30 @@ impl cpu::Vcpu for KvmVcpu {
         // expected amount, we fallback onto a slower method by setting MSRs
         // by chunks. This is the only way to make sure we try to set as many
         // MSRs as possible, even if some MSRs are not supported.
-        let expected_num_msrs = state.msrs.len();
-        let num_msrs = self.set_msrs(&state.msrs)?;
+        let mut msrs = state.msrs.clone();
+        // Older snapshots may already contain IA32_APICBASE in the saved MSR
+        // list, so drop it again here before the generic KVM_SET_MSRS pass.
+        if filter_apicbase_msr_entries(&mut msrs) {
+            warn!(
+                "Dropping IA32_APICBASE from restored vCPU MSR state. APIC base is restored via SREGS/LAPIC"
+            );
+        }
+
+        let expected_num_msrs = msrs.len();
+        let num_msrs = self.set_msrs(&msrs)?;
         if num_msrs != expected_num_msrs {
             let mut faulty_msr_index = num_msrs;
 
             loop {
                 warn!(
                     "Detected faulty MSR 0x{:x} while setting MSRs",
-                    state.msrs[faulty_msr_index].index
+                    msrs[faulty_msr_index].index
                 );
 
                 // Skip the first bad MSR
                 let start_pos = faulty_msr_index + 1;
 
-                let sub_msr_entries = &state.msrs[start_pos..];
+                let sub_msr_entries = &msrs[start_pos..];
 
                 let num_msrs = self.set_msrs(sub_msr_entries)?;
 
