@@ -3146,6 +3146,10 @@ impl Vm {
         Ok(())
     }
 
+    pub fn device_manager(&self) -> &Arc<Mutex<DeviceManager>> {
+        &self.device_manager
+    }
+
     pub fn activate_virtio_devices(&self) -> Result<()> {
         self.device_manager
             .lock()
