@@ -3248,6 +3248,10 @@ impl Vm {
         self.device_manager.lock().unwrap().device_tree()
     }
 
+    pub fn device_manager(&self) -> &Arc<Mutex<DeviceManager>> {
+        &self.device_manager
+    }
+
     /// Release all advisory locks held for the disk images.
     ///
     /// This should only be called when the VM is stopped and the VMM supposed
