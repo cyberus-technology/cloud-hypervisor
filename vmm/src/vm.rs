@@ -3038,6 +3038,14 @@ impl Vm {
             .nmi()
             .map_err(|_| Error::ErrorNmi);
     }
+
+    pub fn memory_manager(&self) -> &Arc<Mutex<MemoryManager>> {
+        &self.memory_manager
+    }
+
+    pub fn cpu_manager(&self) -> &Arc<Mutex<cpu::CpuManager>> {
+        &self.cpu_manager
+    }
 }
 
 impl Pausable for Vm {
@@ -3279,6 +3287,8 @@ impl Migratable for Vm {
     }
 
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        // Please note that this is unused, since we have a different thread
+        // that operates directly on the underlying data sources!
         Ok(MemoryRangeTable::new_from_tables(vec![
             self.memory_manager.lock().unwrap().dirty_log()?,
             self.device_manager.lock().unwrap().dirty_log()?,

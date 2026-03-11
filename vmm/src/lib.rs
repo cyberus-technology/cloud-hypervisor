@@ -81,6 +81,7 @@ use crate::config::{RestoreConfig, add_to_config};
 use crate::coredump::GuestDebuggable;
 #[cfg(feature = "kvm")]
 use crate::cpu::IS_IN_SHUTDOWN;
+use crate::dirty_log_worker::{DirtyLogWorker, DirtyLogWorkerHandle};
 use crate::landlock::Landlock;
 use crate::memory_manager::MemoryManager;
 use crate::migration::{get_vm_snapshot, recv_vm_config, recv_vm_state};
@@ -2434,6 +2435,7 @@ impl Vmm {
         migrate_downtime_limit: Duration,
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
+        dirty_log_aggregator: &DirtyLogWorkerHandle,
     ) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut iteration_table;
         let total_memory_size_bytes = vm
@@ -2516,7 +2518,9 @@ impl Vmm {
             iteration_table = if s.iteration == 0 {
                 vm.memory_range_table()?
             } else {
-                vm.dirty_log()?
+                let (dirty_table, new_dirty_rate_pps) = dirty_log_aggregator.get();
+                s.dirty_rate_pps = new_dirty_rate_pps;
+                dirty_table
             };
 
             // Update the pending size (amount of data to transfer)
@@ -2634,6 +2638,11 @@ impl Vmm {
 
         // Start logging dirty pages
         vm.start_dirty_log()?;
+
+        // Start dirty log aggregator after dirty log was started.
+        let dirty_log_aggregator = DirtyLogWorker::spawn(vm.cpu_manager(), vm.memory_manager())
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+
         let iteration_table = Self::memory_copy_iterations(
             vm,
             &mem_send,
@@ -2643,6 +2652,7 @@ impl Vmm {
             migrate_downtime_limit,
             postponed_lifecycle_event,
             return_if_cancelled_cb,
+            &dirty_log_aggregator,
         )?;
 
         info!("Entering downtime phase");
@@ -2655,10 +2665,15 @@ impl Vmm {
         vm.pause()?;
         info!("paused VM");
 
-        // Send last batch of dirty pages
-        let mut final_table = vm.dirty_log()?;
+        // Send last batch of dirty pages:
+        let (mut final_table, _) = dirty_log_aggregator.stop().map_err(|e| {
+            MigratableError::MigrateSend(anyhow!("Failed to join dirty log worker: {e:?}"))
+        })?;
         final_table.merge_in_place(iteration_table);
         mem_send.send_memory(&final_table, socket, return_if_cancelled_cb)?;
+
+        // Must happen after the dirty log aggregator is stopped
+        vm.stop_dirty_log()?;
 
         // Update statistics
         s.bytes_to_transmit = final_table.regions().iter().map(|range| range.length).sum();
