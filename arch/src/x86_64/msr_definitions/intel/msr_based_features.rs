@@ -86,6 +86,8 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 bits_range: (1, 1),
                 policy: ProfilePolicy::Inherit,
             },
+            // Skylake has this bit set, but not Sapphire Rapids
+            // TODO: Is Inherit the right policy here? (Will it still be possible to use the Skylake profile on a Sapphire Rapids machine?)
             ValueDefinition {
                 short: "RSBA",
                 description: "The processor supports RSB Alternate",
@@ -102,19 +104,19 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 short: "SSB_NO",
                 description: "Processor is not susceptible to Speculation Store Bypass",
                 bits_range: (4, 4),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
             ValueDefinition {
                 short: "MDS_NO",
                 description: "Processor is not susceptible to Microarchitectural Data Sampling (MDS)",
                 bits_range: (5, 5),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
             ValueDefinition {
                 short: "IF_PSCHANGE_MC_NO",
                 description: "The processor is not susceptible to a machine check error due to modifying the size of a code page without TLB invalidation",
                 bits_range: (6, 6),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
             ValueDefinition {
                 short: "TSX_CTRL",
@@ -128,7 +130,8 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 short: "TAA_NO",
                 description: "If 1, processor is not affected by TAA",
                 bits_range: (8, 8),
-                policy: ProfilePolicy::Passthrough,
+                // This is TSX related which we disable anyway
+                policy: ProfilePolicy::Static(0),
             },
             ValueDefinition {
                 short: "MCU_CONTROL",
@@ -153,25 +156,25 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 short: "DOITM:",
                 description: "If 1, the processor supports Data Operand Independent Timing Mode",
                 bits_range: (12, 12),
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             },
             ValueDefinition {
                 short: "SBDR_SSDP_NO",
                 description: "The processor is not affected by either the Shared Buffers Data Read (SBDR) vulnerability or the Sideband Stale Data Propagator (SSDP)",
                 bits_range: (13, 13),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
             ValueDefinition {
                 short: "FBSDP_NO",
                 description: "The processor is not affected by the Fill Buffer Stale Data Propagator (DBSDP)",
                 bits_range: (14, 14),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
             ValueDefinition {
                 short: "PSDP_NO",
                 description: "The processor is not affected by vulnerabilities involving the Primary Stale Data Propagator (PSDP)",
                 bits_range: (15, 15),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
             ValueDefinition {
                 short: "MCU_ENUMERATION",
@@ -191,7 +194,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 short: "FB_CLEAR_CTRL",
                 description: "If 1, the processor supports the IA32_MCU_OPT_CTRL MSR and allows software to set bit 3 of that MSR (FB_CLEAR_DIS)",
                 bits_range: (18, 18),
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             },
 
             ValueDefinition {
@@ -205,14 +208,14 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 short: "BHI_NO",
                 description: "A value of 1 indicates BHI_NO branch prediction behavior, regardless of the value of IA32_SPEC_CTRL[BHI_DIS_S] MSR bit",
                 bits_range: (20, 20),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
 
             ValueDefinition {
                 short: "XAPIC_DISABLE_STATUS",
                 description: "Enumerates that the IA32_XAPIC_DISABLE_STATUS MSR exists, and that bit 0 specifies whether the legacy xAPIC is disabled and APIC state is locked to x2APIC",
                 bits_range: (21, 21),
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             },
 
             ValueDefinition {
@@ -228,14 +231,14 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 description: "If set, the IA32_OVERCLOCKING_STATUS MSR exists",
                 bits_range: (23, 23),
                 // TODO: Check
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             },
 
             ValueDefinition {
                 short: "PBRSB_NO",
                 description: "If 1, the processor is not affected by issues related to Post-Barrier Return Stack Buffer Predictions",
                 bits_range: (24, 24),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
             ValueDefinition {
                 short: "GDS_CTRL",
@@ -249,38 +252,36 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 short: "GDS_NO",
                 description: "If 1, the processor is not affected by Gather Data Sampling",
                 bits_range: (26, 26),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
 
             ValueDefinition {
                 short: "RFDS_NO",
                 description: "If 1, processor is not affected by Register File Data Sampling",
                 bits_range: (27, 27),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
 
             ValueDefinition {
                 short: "RFDS_CLEAR",
                 description: "If 1, when VERW is executed the processor will clear stale data from register files affected by Register File Data Sampling",
                 bits_range: (28, 28),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
             },
 
             ValueDefinition {
                 short: "IGN_UMONITOR_SUPPORT",
                 description: "If 0, IA32_MCU_OPT_CTRL bit 6 (IGN_UMONITOR) is not supported. If 1, it indicates support of IA32_MCU_OPT_CTRL bit 6 (IGN_UMONITOR)",
                 bits_range: (29, 29),
-                // TODO: Check
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             },
 
             ValueDefinition {
                 short: "MON_UMON_MITG_SUPPORT",
                 description: "If 1, indicates support for IA32_MCU_OPT_CTRL bit 7 (MON_UMON_MITG), otherwise it is not supported",
                 bits_range: (30, 30),
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             },
-
 
             ValueDefinition {
                 short: "PBOPT_SUPPORT",
