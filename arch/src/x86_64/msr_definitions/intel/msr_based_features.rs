@@ -4029,7 +4029,13 @@ fn check_arch_capabilities_compatibility(
     dest_id: &str,
 ) -> Result<(), ()> {
     // Make a mask out of
+    const RDCL_NO: u64 = 1 << 0;
+    const IBRS_ALL: u64 = 1 << 1;
+    const SKIP_L1_DFL_VMENTRY: u64 = 1 << 3;
+    const SSB_NO: u64 = 1 << 4;
+    const MDS_NO: u64 = 1 << 5;
     const TSX_CONTROL: u64 = 1 << 7;
+    const TAA_NO: u64 = 1 << 8;
     const MCU_CONTROL: u64 = 1 << 9;
     const MISC_PACKAGE_CTLS: u64 = 1 << 10;
     const ENERGY_FILTERING_CTL: u64 = 1 << 11;
@@ -4037,10 +4043,14 @@ fn check_arch_capabilities_compatibility(
     const MCU_ENUMERATION: u64 = 1 << 16;
     const FB_CLEAR: u64 = 1 << 17;
     const FB_CLEAR_CTRL: u64 = 1 << 18;
+    const BHI_NO: u64 = 1 << 20;
     const XAPIC_DISABLE_STATUS: u64 = 1 << 21;
     const MCU_EXTENDED_SERVICE: u64 = 1 << 22;
     const OVERCLOCKING_STATUS: u64 = 1 << 23;
+    const PBRSB_NO: u64 = 1 << 24;
     const GDS_CTRL: u64 = 1 << 25;
+    const GDS_NO: u64 = 1 << 26;
+    const RFDS_NO: u64 = 1 << 27;
     // TODO: Should we perhaps ignore checking this (is it too strict)?
     const RFDS_CLEAR: u64 = 1 << 28;
     const IGN_UMONITOR_SUPPORT: u64 = 1 << 29;
@@ -4048,7 +4058,13 @@ fn check_arch_capabilities_compatibility(
     const PBOPT_SUPPORT: u64 = 1 << 32;
 
     let mask: u64 = {
-        TSX_CONTROL
+        RDCL_NO
+            | IBRS_ALL
+            | SKIP_L1_DFL_VMENTRY
+            | SSB_NO
+            | MDS_NO
+            | TAA_NO
+            | TSX_CONTROL
             | MCU_CONTROL
             | MISC_PACKAGE_CTLS
             | ENERGY_FILTERING_CTL
@@ -4064,6 +4080,10 @@ fn check_arch_capabilities_compatibility(
             | MON_UMON_MITG_SUPPORT
             | PBOPT_SUPPORT
             | RFDS_CLEAR
+            | PBRSB_NO
+            | GDS_NO
+            | RFDS_NO
+            | BHI_NO
     };
     if let Err(only_in_src) = check_subset(src_val & mask, dest_val & mask) {
         error!(
