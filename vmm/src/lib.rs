@@ -2656,7 +2656,7 @@ impl Vmm {
 
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
-        final_table.extend(iteration_table.clone());
+        final_table.merge_in_place(iteration_table);
         mem_send.send_memory(&final_table, socket, return_if_cancelled_cb)?;
 
         // Update statistics

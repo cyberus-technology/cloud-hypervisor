@@ -271,10 +271,28 @@ impl Response {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryRange {
     pub gpa: u64,
     pub length: u64,
+}
+
+impl MemoryRange {
+    /// Tries to merge `next` into `current` if they overlap or touch.
+    /// Returns the extended range on success, or `None` if they are disjoint.
+    ///
+    /// Assumes `next.gpa >= current.gpa` (i.e. ranges are sorted).
+    fn try_merge(current: MemoryRange, next: MemoryRange) -> Option<MemoryRange> {
+        let current_end = current.gpa + current.length;
+        if next.gpa <= current_end {
+            Some(MemoryRange {
+                gpa: current.gpa,
+                length: (next.gpa + next.length).max(current_end) - current.gpa,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -353,6 +371,57 @@ impl Iterator for MemoryRangeTableIterator {
 impl MemoryRangeTable {
     pub fn ranges(&self) -> &[MemoryRange] {
         &self.data
+    }
+
+    /// Merges a [`MemoryRangeTable`] into the current table and collapses overlapping ranges into
+    /// a single range.
+    ///
+    /// It expects that `self` and `other` are sorted and hold each `gpa` once, i.e., unique entries
+    /// per gpa.
+    pub fn merge_in_place(&mut self, mut other: MemoryRangeTable) {
+        if other.data.is_empty() {
+            return;
+        }
+
+        if self.data.is_empty() {
+            self.data = other.data;
+            return;
+        }
+
+        // Check invariants we require, which makes the algorithm much simpler
+        {
+            debug_assert!(self.data.is_sorted_by_key(|r| r.gpa));
+            debug_assert!(other.data.is_sorted_by_key(|r| r.gpa));
+
+            debug_assert!(
+                self.data.windows(2).all(|w| w[0].gpa != w[1].gpa),
+                "gpa not unique!"
+            );
+            debug_assert!(
+                other.data.windows(2).all(|w| w[0].gpa != w[1].gpa),
+                "gpa not unique!"
+            );
+        }
+
+        // Algorithm: Combine both tables, sort by gpa, then do a single pass
+        // collapsing overlapping or touching ranges.
+        self.data.append(&mut other.data);
+        self.data.sort_unstable_by_key(|r| r.gpa);
+
+        let mut write = 0_usize;
+
+        // For each gpa, we check if we can merge it with the next range
+        for read in 1..self.data.len() {
+            match MemoryRange::try_merge(self.data[write], self.data[read]) {
+                Some(merged) => self.data[write] = merged,
+                None => {
+                    write += 1;
+                    self.data[write] = self.data[read];
+                }
+            }
+        }
+
+        self.data.truncate(write + 1);
     }
 
     /// Partitions the table into chunks of at most `chunk_size` bytes.
@@ -540,10 +609,10 @@ mod unit_tests {
             assert_eq!(
                 chunks,
                 &[
-                    [expected_regions[0].clone()].to_vec(),
-                    [expected_regions[1].clone()].to_vec(),
-                    [expected_regions[2].clone()].to_vec(),
-                    [expected_regions[3].clone()].to_vec(),
+                    [expected_regions[0]].to_vec(),
+                    [expected_regions[1]].to_vec(),
+                    [expected_regions[2]].to_vec(),
+                    [expected_regions[3]].to_vec(),
                 ]
             );
         }
@@ -592,5 +661,120 @@ mod unit_tests {
                 ]
             );
         }
+    }
+
+    fn table(ranges: &[(u64, u64)]) -> MemoryRangeTable {
+        MemoryRangeTable {
+            data: ranges
+                .iter()
+                .map(|&(gpa, length)| MemoryRange { gpa, length })
+                .collect(),
+        }
+    }
+
+    fn ranges(t: &MemoryRangeTable) -> Vec<(u64, u64)> {
+        t.data.iter().map(|r| (r.gpa, r.length)).collect()
+    }
+
+    fn assert_canonical(t: &MemoryRangeTable) {
+        for w in t.data.windows(2) {
+            let a = &w[0];
+            let b = &w[1];
+            let a_end = a.gpa + a.length;
+
+            assert!(a.length > 0);
+            assert!(
+                a_end < b.gpa,
+                "Ranges overlap or touch (and should have been merged)"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_disjoint() {
+        let mut a = table(&[(0, 10)]);
+        let b = table(&[(20, 5)]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(0, 10), (20, 5)]);
+        assert_canonical(&a);
+    }
+
+    #[test]
+    fn merge_overlap() {
+        let mut a = table(&[(0, 10)]);
+        let b = table(&[(5, 10)]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(0, 15)]);
+        assert_canonical(&a);
+    }
+
+    #[test]
+    fn merge_adjacent() {
+        let mut a = table(&[(0, 10)]);
+        let b = table(&[(10, 5)]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(0, 15)]);
+        assert_canonical(&a);
+    }
+
+    #[test]
+    fn merge_contained() {
+        let mut a = table(&[(0, 20)]);
+        let b = table(&[(5, 5)]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(0, 20)]);
+        assert_canonical(&a);
+    }
+
+    #[test]
+    fn merge_chain_across_tables() {
+        let mut a = table(&[(0, 5), (20, 5)]);
+        let b = table(&[(5, 15)]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(0, 25)]);
+        assert_canonical(&a);
+    }
+
+    #[test]
+    fn merge_self_empty() {
+        let mut a = table(&[]);
+        let b = table(&[(10, 5)]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(10, 5)]);
+        assert_canonical(&a);
+    }
+
+    #[test]
+    fn merge_other_empty() {
+        let mut a = table(&[(10, 5)]);
+        let b = table(&[]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(10, 5)]);
+        assert_canonical(&a);
+    }
+
+    #[test]
+    fn merge_duplicates() {
+        let mut a = table(&[(2, 1), (3, 2), (10, 5)]);
+        let b = table(&[(2, 1), (10, 5), (20, 9)]);
+
+        a.merge_in_place(b);
+
+        assert_eq!(ranges(&a), vec![(2, 3), (10, 5), (20, 9)]);
+        assert_canonical(&a);
     }
 }
