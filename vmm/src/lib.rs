@@ -102,6 +102,7 @@ mod coredump;
 pub mod cpu;
 pub mod device_manager;
 pub mod device_tree;
+mod dirty_log_worker;
 #[cfg(feature = "guest_debug")]
 mod gdb;
 #[cfg(feature = "igvm")]
