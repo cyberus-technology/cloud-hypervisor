@@ -42,21 +42,6 @@ mod permitted_architectural_msrs {
                 register: CpuidReg::EAX,
             });
         };
-        /// Overclocking Status (R/O)
-        const IA32_OVERCLOCKING_STATUS: u32 = 0x195;
-        // TODO: Also check consistency with IA32_ARCH_CAPABILITIES[23]
-
-        /// xAPIC Disable Status (R/O)
-        const IA32_XAPIC_DISABLE_STATUS: u32 = 0xbd;
-        const _IA32_XAPIC_DISABLE_STATUS_CPUID_CHECK: () =
-            assert_not_denied_cpuid_feature::<29>(&Parameters {
-                leaf: 0x7,
-                sub_leaf: 0..=0,
-                register: CpuidReg::EDX,
-            });
-
-        // TODO: Also assert that IA32_ARCH_CAPABILITIES[21] is also not hard-coded to prevent
-        // this MSR from being accessed
 
         /// MTRR Capability (R/O)
         const IA32_MTRRCAP: u32 = 0xfe;
@@ -113,11 +98,9 @@ mod permitted_architectural_msrs {
         const IA32_X2APIC_IRR7: u32 = 0x827;
         const IA32_X2APIC_CUR_COUNT: u32 = 0x839;
 
-        pub(super) const READ_ONLY_IA32_MSRS: [u32; 40] = [
+        pub(super) const READ_ONLY_IA32_MSRS: [u32; 38] = [
             IA32_BARRIER,
             IA32_MTRRCAP,
-            IA32_OVERCLOCKING_STATUS,
-            IA32_XAPIC_DISABLE_STATUS,
             IA32_FZM_DOMAIN_CONFIG,
             IA32_FZM_RANGE_STARTADDR,
             IA32_FZM_RANGE_ENDADDR,
@@ -159,12 +142,7 @@ mod permitted_architectural_msrs {
 
     mod read_write {
         use super::{CpuidReg, Parameters, assert_not_denied_cpuid_feature};
-        // TODO: Not sure if we need to permit this
-        const IA32_P5_MC_ADDR: u32 = 0x0;
-        // TODO: Not sure if we need to permit this
-        const IA32_P5_MC_TYPE: u32 = 0x1;
 
-        // TODO: Is this also write?
         const IA32_TIME_STAMP_COUNTER: u32 = 0x10;
 
         const IA32_APIC_BASE: u32 = 0x1b;
@@ -217,15 +195,8 @@ mod permitted_architectural_msrs {
         /// Enable Misc. Processr Features
         const IA32_MISC_ENABLE: u32 = 0x1a0;
 
-        // TODO: Not sure what this does and whether it should be enabled
-        const IA32_FZM_RANGE_INDEX: u32 = 0x82;
-
         const IA32_XFD: u32 = 0x1c4;
         const IA32_XFD_ERR: u32 = 0x1c5;
-
-        // TODO: Not sure about SMRR_* (note that they are writable only in SMM)
-        const IA32_SMRR_PHYSBASE: u32 = 0x1f2;
-        const IA32_SMRR_PHYSMASK: u32 = 0x1f3;
 
         const IA32_DCA_0_CAP: u32 = 0x1fa;
 
@@ -257,7 +228,6 @@ mod permitted_architectural_msrs {
         const IA32_MTRR_PHYSBASE9: u32 = 0x212;
         const IA32_MTRR_PHYSMASK9: u32 = 0x213;
 
-        // TODO: Are these actually READ + Write?
         const IA32_MTRR_FIX64K_00000: u32 = 0x250;
         const IA32_MTRR_FIX16K_80000: u32 = 0x258;
         const IA32_MTRR_FIX16K_A0000: u32 = 0x259;
@@ -297,9 +267,6 @@ mod permitted_architectural_msrs {
                 register: CpuidReg::ECX,
             });
 
-        // TODO: We should probably not permit this if possible
-        const IA32_PECI_HWP_REQUEST_INFO: u32 = 0x775;
-
         // NOTE: THE X2APIC related MSRs cannot be filtered by KVM, but we include them here anyway for completeness sake.
         const IA32_X2APIC_TPR: u32 = 0x808;
         const IA32_X2APIC_SIVR: u32 = 0x80f;
@@ -316,13 +283,6 @@ mod permitted_architectural_msrs {
         const IA32_X2APIC_LVT_ERROR: u32 = 0x837;
         const IA32_X2APIC_INIT_COUNT: u32 = 0x838;
         const IA32_X2APIC_DIV_CONF: u32 = 0x83e;
-
-        // TODO: Not sure about this MSR
-        const IA32_RESOURCE_PRIORITY: u32 = 0xc88;
-        // TODO: Not sure about this MSR
-        const IA32_RESOURCE_PRIORITY_PKG: u32 = 0xc89;
-
-        const IA32_PASID: u32 = 0xd93;
 
         const IA32_XSS: u32 = 0xda0;
         const _IA32_XSS_CPUID_CHECK: () = assert_not_denied_cpuid_feature::<3>(&Parameters {
@@ -356,11 +316,7 @@ mod permitted_architectural_msrs {
             register: CpuidReg::ECX,
         });
 
-        const IA32_UARCH_MISC_CTL: u32 = 0x1b01;
-        // TODO: Check against IA32_ARCH_CAPABILITIES[12]
-        pub(super) const READ_WRITE_IA32_MSRS: [u32; 83] = [
-            IA32_P5_MC_ADDR,
-            IA32_P5_MC_TYPE,
+        pub(super) const READ_WRITE_IA32_MSRS: [u32; 73] = [
             IA32_TIME_STAMP_COUNTER,
             IA32_APIC_BASE,
             IA32_FEATURE_CONTROL,
@@ -372,11 +328,8 @@ mod permitted_architectural_msrs {
             IA32_SYSENTER_EIP,
             IA32_SMM_MONITOR_CTL,
             IA32_MISC_ENABLE,
-            IA32_FZM_RANGE_INDEX,
             IA32_XFD,
             IA32_XFD_ERR,
-            IA32_SMRR_PHYSBASE,
-            IA32_SMRR_PHYSMASK,
             IA32_DCA_0_CAP,
             IA32_MTRR_PHYSBASE0,
             IA32_MTRR_PHYSMASK0,
@@ -414,7 +367,6 @@ mod permitted_architectural_msrs {
             IA32_U_CET,
             IA32_S_CET,
             IA32_TSC_DEADLINE,
-            IA32_PECI_HWP_REQUEST_INFO,
             IA32_X2APIC_TPR,
             IA32_X2APIC_SIVR,
             IA32_X2APIC_ESR,
@@ -428,9 +380,6 @@ mod permitted_architectural_msrs {
             IA32_X2APIC_LVT_ERROR,
             IA32_X2APIC_INIT_COUNT,
             IA32_X2APIC_DIV_CONF,
-            IA32_RESOURCE_PRIORITY,
-            IA32_RESOURCE_PRIORITY_PKG,
-            IA32_PASID,
             IA32_XSS,
             IA32_EFER,
             IA32_STAR,
@@ -441,7 +390,6 @@ mod permitted_architectural_msrs {
             IA32_GS_BASE,
             IA32_KERNEL_GS_BASE,
             IA32_TSC_AUX,
-            IA32_UARCH_MISC_CTL,
         ];
     }
 
@@ -485,8 +433,8 @@ mod permitted_architectural_msrs {
     ///
     /// The MSRs listed here can be studied further in Table 2.2 in Section 2.1 of the Intel SDM
     /// Vol. 4 from October 2025
-    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 127] = const {
-        let mut permitted = [0u32; 127];
+    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 115] = const {
+        let mut permitted = [0u32; 115];
         let read_only_len = READ_ONLY_IA32_MSRS.len();
         let write_only_len = WRITE_ONLY_IA32_MSRS.len();
         let read_write_len = READ_WRITE_IA32_MSRS.len();
@@ -523,7 +471,8 @@ mod permitted_architectural_msrs {
 }
 
 mod forbidden_architectural_msrs {
-    // TODO: Not sure about IA32_P5_MC_ADDR & IA32_P5_MC_TYPE
+    const IA32_P5_MC_ADDR: (u32, u32) = (0x0, 0x0);
+    const IA32_P5_MC_TYPE: (u32, u32) = (0x1, 0x1);
 
     const IA32_MONITOR_FILTER_SIZE: (u32, u32) = (0x6, 0x6);
     // TODO: Not sure about this one
@@ -546,10 +495,12 @@ mod forbidden_architectural_msrs {
 
     const IA32_MCU_STATUS: (u32, u32) = (0x7c, 0x7c);
 
-    /// Related to total memory encryption
-    const IA32_MKTME_KEYID_PARTITIONING: (u32, u32) = (0x87, 0x87);
+    // TODO: Not sure what this does and whether it should be enabled
+    const IA32_FZM_RANGE_INDEX: (u32, u32) = (0x82, 0x82);
 
-    // TODO: Not sure what to do about IA32_BIOS_SIGN_ID (note that it is also a MSR-based feature according to KVM)
+    /// Related to total memory encryption
+    ///
+    const IA32_MKTME_KEYID_PARTITIONING: (u32, u32) = (0x87, 0x87);
 
     const IA32_SGXLEPUBKEYHASH0: (u32, u32) = (0x8c, 0x8c);
 
@@ -568,11 +519,19 @@ mod forbidden_architectural_msrs {
 
     const IA32_MISC_PACKAGE_CTLS: (u32, u32) = (0xbc, 0xbc);
 
+    /// xAPIC Disable Status
+    // TODO: Also check consistency with IA32_ARCH_CAPABILITIES[21]
+    const IA32_XAPIC_DISABLE_STATUS: (u32, u32) = (0xbd, 0xbd);
+
+    const IA32_SMRR_PHYS_BASE_MASK: (u32, u32) = (0x1f2, 0x1f3);
+
+    /// Overclocking Status (R/O)
+    // TODO: Also check consistency with IA32_ARCH_CAPABILITIES[23]
+    const IA32_OVERCLOCKING_STATUS: (u32, u32) = (0x195, 0x195);
+
     /// Clock Modulation Control
     /// This is disabled via CPUID for non-host CPU profiles
     const IA32_CLOCK_MODULATION: (u32, u32) = (0x19a, 0x19a);
-
-    // TODO: IA32_X2APIC_DISABLE_STATUS
 
     // IA32_PLI_SSP is disabled via CPUID for non-host profiles
     const IA32_PLI_SSP: (u32, u32) = (0x6a4, 0x6a7);
@@ -580,6 +539,7 @@ mod forbidden_architectural_msrs {
     // This is disabled via CPUID for non-host profiles
     const IA32_INTERRUPT_SSP_TABLE_ADDR: (u32, u32) = (0x6a8, 0x6a8);
 
+    const IA32_PECI_HWP_REQUEST_INFO: (u32, u32) = (0x775, 0x775);
     const IA32_PMC0: (u32, u32) = (0xc1, 0xc1);
     const IA32_PMC1: (u32, u32) = (0xc2, 0xc2);
     const IA32_PMC2: (u32, u32) = (0xc3, 0xc3);
@@ -609,22 +569,10 @@ mod forbidden_architectural_msrs {
     // NOTE: IA32_MCU_OPT_CTRL must necessarily be available, due to
     // what we set in CPUID for some CPU profiles (inherit policy)
 
-    // TODO: Don't know about IA32_SYSENTER_CS, IA32_SYSENTER_ESP,
-    // IA32_SYSENTER_EIP
-    //
-
-    // TODO: Not sure if we can/should deny this MSR, but
-    // it doesn't really make sense to have it available in
-    // a virtualized environment
-    //
-    // If we keep it denied we should document that
-    // even for 06_01H one cannot rely on the existence of this MSR
     const IA32_MCG_CAP: (u32, u32) = (0x179, 0x179);
 
-    // TODO: Also not sure if we may deny this MSR
     const IA32_MCG_STATUS: (u32, u32) = (0x17a, 0x17a);
 
-    // TODO: Can we deny this?
     const IA32_MCG_CTL: (u32, u32) = (0x17b, 0x17b);
 
     // TODO: 0x180- 0x185 is reserved, we should not list these MSRS at all
@@ -656,8 +604,6 @@ mod forbidden_architectural_msrs {
     // Disabled via CPUID for non-host profiles
     const IA32_THERM_STATUS: (u32, u32) = (0x19c, 0x19c);
 
-    // TODO: Consider disabling IA32_MISC_ENABLE
-
     // Disabled via CPUID for non-host profiles
     const IA32_ENERGY_PERF_BIAS: (u32, u32) = (0x1b0, 0x1b0);
 
@@ -674,8 +620,6 @@ mod forbidden_architectural_msrs {
     const IA32_LER_TO_IP: (u32, u32) = (0x1de, 0x1de);
 
     const IA32_LER_INFO: (u32, u32) = (0x1e0, 0x1e0);
-
-    // TODO: Not sure about IA32_SMRR_PHYSBASE & IA32_SMRR_PHYSMASK
 
     const IA32_MC_I_CTL2: (u32, u32) = (0x280, 0x29f);
 
@@ -909,16 +853,12 @@ mod forbidden_architectural_msrs {
     // Disabled via CPUID for non-host CPU profiles
     const IA32_HWP_REQUEST: (u32, u32) = (0x774, 0x774);
 
-    // TODO: Can we also deny IA32_PECI_HWP_REQUEST_INFO?
-
     // Disabled via CPUID for non-host CPU profiles
     const IA32_HWP_CTL: (u32, u32) = (0x776, 0x776);
 
     // Disabled via CPUID for non-host CPU profiles
     const IA32_HWP_STATUS: (u32, u32) = (0x777, 0x777);
 
-    // TODO: Currently permitted via IA32_ARCH_CAPABILITIES (bit 22),
-    // but that bit should probably have policy Static(0) ?
     const IA32_MCU_EXT_SERVICE: (u32, u32) = (0x7a3, 0x7a3);
 
     const IA32_MCU_ROLLBACK_MIN_ID: (u32, u32) = (0x7a4, 0x7a4);
@@ -992,7 +932,8 @@ mod forbidden_architectural_msrs {
     // Disabled via CPUID
     const IA32_L3_IO_QOS_CFG: (u32, u32) = (0xc83, 0xc83);
 
-    // TODO: Not sure about IA32_RESOURCE_PRIORITY and IA32_RESOURCE_PRIORITY_PKG
+    const IA32_RESOURCE_PRIORITY: (u32, u32) = (0xc88, 0xc88);
+    const IA32_RESOURCE_PRIORITY_PKG: (u32, u32) = (0xc89, 0xc89);
 
     // Disabled via CPUID for non-host CPU profiles
     const IA32_QM_EVTSEL: (u32, u32) = (0xc8d, 0xc8d);
@@ -1026,8 +967,7 @@ mod forbidden_architectural_msrs {
     // Disabled via CPUID for non-host CPU profiles
     const IA32_COPY_PLATFORM_TO_LOCAL: (u32, u32) = (0xd92, 0xd92);
 
-    // TODO: Not sure about IA32_PASID
-
+    const IA32_PASID: (u32, u32) = (0xd93, 0xd93);
     // Disabled via CPUID for non-host CPU profiles
     const IA32_PKG_HDC_CTL: (u32, u32) = (0xdb0, 0xdb0);
 
@@ -1043,7 +983,6 @@ mod forbidden_architectural_msrs {
     // Disabled via CPUID for non-host CPU profiles
     const IA32_QOS_CORE_BW_THRTL_1: (u32, u32) = (0xe01, 0xe01);
 
-    // TODO: Is it OK to disable this for CPU profiles?
     // Note that we have CPUID 0x7.EDX.[19] = 0 (ARCH_LBR)
     const IA32_LBR_X_INFO: (u32, u32) = (0x1200, 0x121f);
 
@@ -1190,12 +1129,13 @@ mod forbidden_architectural_msrs {
     const IA32_PMC_FX6_CTR: (u32, u32) = (0x1998, 0x1998);
     const IA32_PMC_FX6_CFG_C: (u32, u32) = (0x199b, 0x199b);
 
-    // TODO: Check IA32_UARCH_MISC_CTL
-    //
-
+    // TODO: Check against IA32_ARCH_CAPABILITIES[12]
+    const IA32_UARCH_MISC_CTL: (u32, u32) = (0x1b01, 0x1b01);
     /// A list of ARCHITECTURAL MSR register addresses that are forbidden for all non-host CPU profiles and also not
     /// considered MSR-based FEATURE indices by KVM.
-    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 345] = [
+    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 356] = [
+        IA32_P5_MC_ADDR,
+        IA32_P5_MC_TYPE,
         // TODO: Not sure about IA32_P5_MC_ADDR & IA32_P5_MC_TYPE
         IA32_MONITOR_FILTER_SIZE,
         // TODO: Not sure about this one
@@ -1208,6 +1148,9 @@ mod forbidden_architectural_msrs {
         IA32_BIOS_UPDT_TRIG,
         /// Currently only related to Secure enclaves/Keylocker which is not available for non-host CPU profiles
         IA32_FEATURE_ACTIVATION,
+        IA32_FZM_RANGE_INDEX,
+        IA32_SMRR_PHYS_BASE_MASK,
+        IA32_PECI_HWP_REQUEST_INFO,
         /// Related to microcode updates
         IA32_MCU_ENUMERATION,
         IA32_MCU_STATUS,
@@ -1223,7 +1166,8 @@ mod forbidden_architectural_msrs {
         // TODO: Check this
         IA32_SMBASE,
         IA32_MISC_PACKAGE_CTLS,
-        // TODO: IA32_X2APIC_DISABLE_STATUS
+        IA32_XAPIC_DISABLE_STATUS,
+        IA32_OVERCLOCKING_STATUS,
         IA32_PMC0,
         IA32_PMC1,
         IA32_PMC2,
@@ -1480,10 +1424,6 @@ mod forbidden_architectural_msrs {
         IA32_RTIT_ADDR3_B,
         // Disabled via CPUID for non-host CPU profiles
         IA32_DS_AREA,
-        // TODO: IA32_TSC_DEADLINE should be available because the TSC_DEADLINE CPUID bit
-        // is set by CHV unconditionally. The availability of this MSR probably needs to be
-        // handled by CHV itself and not the CPU profiles
-
         // Disabled via CPUID for non-host CPU profiles
         IA32_PKRS,
         // Disabled via CPUID for non-host CPU profiles
@@ -1556,8 +1496,8 @@ mod forbidden_architectural_msrs {
         IA32_L2_QOS_CFG,
         // Disabled via CPUID
         IA32_L3_IO_QOS_CFG,
-        // TODO: Not sure about IA32_RESOURCE_PRIORITY and IA32_RESOURCE_PRIORITY_PKG
-
+        IA32_RESOURCE_PRIORITY,
+        IA32_RESOURCE_PRIORITY_PKG,
         // Disabled via CPUID for non-host CPU profiles
         IA32_QM_EVTSEL,
         // Disabled via CPUID for non-host CPU profiles
@@ -1579,8 +1519,7 @@ mod forbidden_architectural_msrs {
         IA32_COPY_LOCAL_TO_PLATFORM,
         // Disabled via CPUID for non-host CPU profiles
         IA32_COPY_PLATFORM_TO_LOCAL,
-        // TODO: Not sure about IA32_PASID
-
+        IA32_PASID,
         // Disabled via CPUID for non-host CPU profiles
         IA32_PKG_HDC_CTL,
         // Disabled via CPUID for non-host CPU profiles
@@ -1702,6 +1641,6 @@ mod forbidden_architectural_msrs {
         // Disabled via CPUID for non-host CPU profiles
         IA32_PMC_FX6_CTR,
         IA32_PMC_FX6_CFG_C,
-        // TODO: Check IA32_UARCH_MISC_CTL
+        IA32_UARCH_MISC_CTL,
     ];
 }
