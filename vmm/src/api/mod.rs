@@ -1602,8 +1602,6 @@ impl ApiAction for VmMigrationProgress {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            debug!("API request event: VmMigrationProgress");
-
             let snapshot = Ok(vmm.vm_migration_progress());
             let response = snapshot
                 .map(Box::new)
