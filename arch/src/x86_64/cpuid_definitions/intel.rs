@@ -1618,7 +1618,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     short: "md_clear",
                     description: "VERW MD_CLEAR microcode support",
                     bits_range: (10, 10),
-                    policy: ProfilePolicy::Passthrough,
+                    policy: ProfilePolicy::Inherit,
                 },
                 ValueDefinition {
                     short: "rtm_always_abort",
@@ -1707,14 +1707,14 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     short: "intel_stibp",
                     description: "Single thread indirect branch predictors",
                     bits_range: (27, 27),
-                    policy: ProfilePolicy::Passthrough,
+                    policy: ProfilePolicy::Inherit,
                 },
                 // MSR related
                 ValueDefinition {
                     short: "flush_l1d",
                     description: "FLUSH L1D cache: IA32_FLUSH_CMD MSR",
                     bits_range: (28, 28),
-                    policy: ProfilePolicy::Passthrough,
+                    policy: ProfilePolicy::Inherit,
                 },
                 // MSR related
                 ValueDefinition {
