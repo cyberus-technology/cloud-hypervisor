@@ -20,7 +20,7 @@ use virtio_bindings::virtio_net::{
     VIRTIO_NET_F_STATUS, VIRTIO_NET_S_ANNOUNCE, VIRTIO_NET_S_LINK_UP,
 };
 use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
-use virtio_queue::{Queue, QueueT};
+use virtio_queue::QueueT;
 use vm_memory::{ByteValued, GuestMemoryAtomic};
 use vm_migration::protocol::MemoryRangeTable;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
@@ -372,12 +372,13 @@ impl VirtioDevice for Net {
         self.read_config_from_slice(config.as_slice(), offset, data);
     }
 
-    fn activate(
-        &mut self,
-        mem: GuestMemoryAtomic<GuestMemoryMmap>,
-        interrupt_cb: Arc<dyn VirtioInterrupt>,
-        mut queues: Vec<(usize, Queue, EventFd)>,
-    ) -> ActivateResult {
+    fn activate(&mut self, context: crate::device::ActivationContext) -> ActivateResult {
+        let crate::device::ActivationContext {
+            mem,
+            interrupt_cb,
+            mut queues,
+            ..
+        } = context;
         self.common.activate(&queues, interrupt_cb.clone())?;
         self.guest_memory = Some(mem.clone());
 
