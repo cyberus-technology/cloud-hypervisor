@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::{result, thread};
 
@@ -176,6 +176,8 @@ struct NetEpollHandler {
     queue_index_base: u16,
     queue_pair: (Queue, Queue),
     queue_evt_pair: (EventFd, EventFd),
+    #[allow(unused)]
+    device_status: Arc<AtomicU8>,
 }
 
 impl NetEpollHandler {
@@ -411,6 +413,7 @@ pub struct Net {
     seccomp_action: SeccompAction,
     rate_limiter_config: Option<RateLimiterConfig>,
     exit_evt: EventFd,
+    device_status: Arc<AtomicU8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -577,6 +580,7 @@ impl Net {
             seccomp_action,
             rate_limiter_config,
             exit_evt,
+            device_status: Arc::new(AtomicU8::new(0)),
         })
     }
 
@@ -832,7 +836,9 @@ impl VirtioDevice for Net {
             mem,
             interrupt_cb,
             mut queues,
+            device_status,
         } = context;
+        self.device_status = device_status;
         self.common.activate(&queues, interrupt_cb.clone())?;
 
         let num_queues = queues.len();
@@ -946,6 +952,7 @@ impl VirtioDevice for Net {
                 interrupt_cb: interrupt_cb.clone(),
                 kill_evt,
                 pause_evt,
+                device_status: self.device_status.clone(),
             };
 
             let paused = self.common.paused.clone();
@@ -1170,6 +1177,7 @@ mod unit_tests {
             seccomp_action: SeccompAction::Allow,
             rate_limiter_config: None,
             exit_evt: EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            device_status: Arc::new(Default::default()),
         }
     }
 
