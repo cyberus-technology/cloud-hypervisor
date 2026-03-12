@@ -176,7 +176,6 @@ struct NetEpollHandler {
     queue_index_base: u16,
     queue_pair: (Queue, Queue),
     queue_evt_pair: (EventFd, EventFd),
-    #[allow(unused)]
     device_status: Arc<AtomicU8>,
 }
 
@@ -191,6 +190,9 @@ impl NetEpollHandler {
     }
 
     fn handle_rx_event(&mut self) -> result::Result<(), DeviceError> {
+        if self.needs_reset() {
+            return Ok(());
+        }
         let queue_evt = &self.queue_evt_pair.0;
         if let Err(e) = queue_evt.read() {
             error!("Failed to get rx queue event: {e:?}");
@@ -219,12 +221,43 @@ impl NetEpollHandler {
         Ok(())
     }
 
+    fn handle_queue_iterator_error(&mut self, err: &virtio_queue::Error) {
+        // The guest submitted a corrupted VirtQ request, and the error
+        // was logged during queue processing. We cannot just ignore the
+        // error, as the guest could continue spamming the VMM with bad
+        // requests, triggering excessive error logging. So we mark
+        // the device "NEEDS_RESET", effectively stopping all request
+        // processing (see self.needs_reset() usage) until the guest
+        // resets and reactivates the device.
+
+        warn!(
+            "Corrupted request detected (virtqueue error: {err:?}). \
+Setting device status to 'NEEDS_RESET' and stopping processing queues until reset."
+        );
+
+        self.device_status
+            .fetch_or(crate::DEVICE_NEEDS_RESET as u8, Ordering::SeqCst);
+
+        // Let the guest know that the device status has changed.
+        if let Err(e) = self.interrupt_cb.trigger(VirtioInterruptType::Config) {
+            error!("Failed to signal config interrupt: {e:?}");
+        }
+    }
+
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
-        if self
+        if self.needs_reset() {
+            return Ok(());
+        }
+        let res = self
             .net
-            .process_tx(&self.mem.memory(), &mut self.queue_pair.1)
-            .map_err(DeviceError::NetQueuePair)?
-        {
+            .process_tx(&self.mem.memory(), &mut self.queue_pair.1);
+
+        if let Err(net_util::NetQueuePairError::QueueIteratorFailed(err)) = res {
+            self.handle_queue_iterator_error(&err);
+            return Ok(());
+        }
+
+        if res.map_err(DeviceError::NetQueuePair)? {
             self.signal_used_queue(self.queue_index_base + 1)?;
             debug!("Signalling TX queue");
         } else {
@@ -248,11 +281,19 @@ impl NetEpollHandler {
     }
 
     fn handle_rx_tap_event(&mut self) -> result::Result<(), DeviceError> {
-        if self
+        if self.needs_reset() {
+            return Ok(());
+        }
+        let res = self
             .net
-            .process_rx(&self.mem.memory(), &mut self.queue_pair.0)
-            .map_err(DeviceError::NetQueuePair)?
-        {
+            .process_rx(&self.mem.memory(), &mut self.queue_pair.0);
+
+        if let Err(net_util::NetQueuePairError::QueueIteratorFailed(err)) = res {
+            self.handle_queue_iterator_error(&err);
+            return Ok(());
+        }
+
+        if res.map_err(DeviceError::NetQueuePair)? {
             self.signal_used_queue(self.queue_index_base)?;
             trace!("Signalling RX queue");
         } else {
@@ -301,6 +342,10 @@ impl NetEpollHandler {
         helper.run(paused, paused_sync, self)?;
 
         Ok(())
+    }
+
+    fn needs_reset(&self) -> bool {
+        (self.device_status.load(Ordering::Acquire) & crate::DEVICE_NEEDS_RESET as u8) != 0
     }
 }
 
