@@ -869,6 +869,7 @@ impl MigrationWorker {
     /// Perform the migration and communicate with the [`Vmm`] thread.
     fn run(mut self) -> MigrationThreadOut {
         debug!("migration thread is starting");
+        event!("vm", "migration-started");
 
         let res = Vmm::send_migration(
             &mut self.vm,
@@ -884,6 +885,7 @@ impl MigrationWorker {
         self.check_migration_evt.write(1).unwrap();
 
         debug!("migration thread is finished");
+        event!("vm", "migration-finished");
         MigrationThreadOut {
             vm: self.vm,
             migration_res: res,
@@ -3165,6 +3167,7 @@ impl Vmm {
             }
             Err(MigratableError::Cancelled) => {
                 error!("Migration cancelled");
+                event!("vm", "migration-cancelled");
                 try_resume_vm(vm);
 
                 // Update migration progress snapshot
@@ -3177,6 +3180,7 @@ impl Vmm {
             }
             Err(e) => {
                 error!("Migration failed: {e}");
+                event!("vm", "migration-failed");
                 try_resume_vm(vm);
 
                 // Update migration progress snapshot
@@ -4128,6 +4132,8 @@ impl RequestHandler for Vmm {
                 MigratableError::MigrateReceive(e)
             })?;
 
+        event!("vm", "migration-receive-started");
+
         let mut state = ReceiveMigrationState::Established;
 
         let res: result::Result<ReceiveMigrationState, MigratableError> = loop {
@@ -4164,6 +4170,7 @@ impl RequestHandler for Vmm {
         };
 
         if matches!(res, Err(_) | Ok(ReceiveMigrationState::Aborted)) {
+            event!("vm", "migration-receive-failed");
             self.vm = MaybeVmOwnership::None;
             self.vm_config = None;
             match res {
@@ -4176,6 +4183,7 @@ impl RequestHandler for Vmm {
             }
         }
 
+        event!("vm", "migration-receive-finished");
         Ok(())
     }
 
