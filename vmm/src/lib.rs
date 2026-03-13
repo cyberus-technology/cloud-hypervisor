@@ -2655,6 +2655,14 @@ impl Vmm {
             s.iteration_duration = s.iteration_start_time.elapsed();
             log_migration_progress(s, vm);
 
+            // Enables management software (e.g., libvirt) to easily track forward progress.
+            event!(
+                "vm",
+                "migration-memory-iteration",
+                "id",
+                format!("{}", s.iteration)
+            );
+
             // Increment iteration counter
             s.iteration += 1;
 
