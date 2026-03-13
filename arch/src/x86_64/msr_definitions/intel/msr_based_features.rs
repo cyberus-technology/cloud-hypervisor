@@ -1689,7 +1689,6 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                         bits_range: (5, 5),
                         policy: ProfilePolicy::Inherit
                     },
-                    // TODO: Perhaps we should force this to 0?
                     ValueDefinition {
                         short: "CR4.MCE",
                         description: "If 0, then bit 6 (Machine-Check Enable) of CR4 is allowed to be 0. Bit 6 of CR4 disables the machine-check exception when clear",
@@ -1706,7 +1705,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                         short: "CR4.PCE",
                         description: "If 0, then bit 8 (Performance-Monitoring Counter Enable) of CR4 is allowed to be 0. The RDPMC instruction can only be executed at protection level 0 when bit 8 of CR4 is clear",
                         bits_range: (8, 8),
-                        policy: ProfilePolicy::Inherit
+                        policy: ProfilePolicy::Static(0)
                     },
                     ValueDefinition {
                         short: "CR4.OSFXSR",
@@ -1793,7 +1792,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                         short: "CR4.PKE",
                         description: "If 0, then bit 22 (Enable protection keys for user-mode pages) of CR4 is allowed to be 0. See Intel SDM Vol. 3.A Section 2.5 for more information.",
                         bits_range: (22, 22),
-                        policy: ProfilePolicy::Inherit,
+                        policy: ProfilePolicy::Static(0),
                     },
                     ValueDefinition {
                         short: "CR4.CET",
@@ -1880,7 +1879,6 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                         bits_range: (5, 5),
                         policy: ProfilePolicy::Inherit
                     },
-                    // TODO: Perhaps we should force this to 0?
                     ValueDefinition {
                         short: "CR4.MCE",
                         description: "If 1, then bit 6 (Machine-Check Enable) of CR4 is allowed to be 1. Bit 6 of CR4 enables the machine-check exception when set",
@@ -1897,7 +1895,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                         short: "CR4.PCE",
                         description: "If 1, then bit 8 (Performance-Monitoring Counter Enable) of CR4 is allowed to be 1. The RDPMC instruction can be executed at any protection level when bit 8 of CR4 is set.",
                         bits_range: (8, 8),
-                        policy: ProfilePolicy::Inherit
+                        policy: ProfilePolicy::Static(0)
                     },
                     ValueDefinition {
                         short: "CR4.OSFXSR",
@@ -1985,7 +1983,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                         short: "CR4.PKE",
                         description: "If 1, then bit 22 (Enable protection keys for user-mode pages) of CR4 is allowed to be 1. When bit 22 of CR4 is set, CPUID.0x7.ECX[4] is displayed as 1. See Intel SDM Vol. 3.A Section 2.5 for more information.",
                         bits_range: (22, 22),
-                        policy: ProfilePolicy::Inherit
+                        policy: ProfilePolicy::Static(0)
                     },
                     ValueDefinition {
                         short: "CR4.CET",
