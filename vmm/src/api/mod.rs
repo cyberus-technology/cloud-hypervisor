@@ -38,7 +38,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::mpsc::{RecvError, SendError, Sender, channel};
 
-use log::{debug, info};
+use log::{info, trace};
 use micro_http::Body;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -869,7 +869,7 @@ impl ApiAction for VmCounters {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            info!("API request event: VmCounters");
+            trace!("API request event: VmCounters");
 
             let response = vmm
                 .vm_counters()
@@ -974,7 +974,7 @@ impl ApiAction for VmInfo {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            debug!("API request event: VmInfo");
+            trace!("API request event: VmInfo");
 
             let response = vmm
                 .vm_info()
@@ -1602,7 +1602,7 @@ impl ApiAction for VmMigrationProgress {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            debug!("API request event: VmMigrationProgress");
+            trace!("API request event: VmMigrationProgress");
 
             let snapshot = Ok(vmm.vm_migration_progress());
             let response = snapshot
