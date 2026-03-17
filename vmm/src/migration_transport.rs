@@ -966,7 +966,7 @@ pub(crate) fn send_migration_socket_with_keep_alive(
 ) -> Result<SocketStream, MigratableError> {
     match send_migration_socket(destination_url, tls_dir)? {
         socket @ (SocketStream::Tcp(_) | SocketStream::Tls(_)) => {
-            KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION)
+            KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION, true)
                 .map(SocketStream::KeepAlive)
                 .context("Error creating keep-alive migration stream")
                 .map_err(MigratableError::MigrateSend)
