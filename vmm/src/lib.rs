@@ -300,6 +300,17 @@ impl From<u64> for EpollDispatch {
 // TODO make this a member of Vmm?
 static MIGRATION_PROGRESS_SNAPSHOT: Mutex<Option<MigrationProgress>> = Mutex::new(None);
 
+// The time a writer may block on a socket until it throws an error.
+// Also the interval at which the [`KeepAliveStream`] sends keep alive messages.
+// This timeout has to be smaller than [`MIGRATION_READ_TIMEOUT_DURATION`],
+// otherwise spurious timeouts may happen.
+const MIGRATION_WRITE_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+
+/// The time a reader may block on a socket until it throws an error.
+/// This timeout has to be larger than [`MIGRATION_WRITE_TIMEOUT_DURATION`],
+/// otherwise spurious timeouts may happen.
+const MIGRATION_READ_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+
 enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
@@ -1075,20 +1086,17 @@ impl AsFd for ReceiveListener {
 }
 
 impl ReceiveListener {
-    /// The time the receiver side may read on a socket until it throws an error.
-    /// This timeout has to be larger than `TIMEOUT_DURATION` in `send_migration_timeout`,
-    /// otherwise spurious timeouts may happen.
-    const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
-
     /// Block until a connection is accepted.
     fn accept(&mut self) -> std::result::Result<SocketStream, std::io::Error> {
         match self {
             ReceiveListener::Tcp(listener) => {
-                Self::accept_with_timeout(listener, Self::TIMEOUT_DURATION).map(|(socket, _)| {
-                    socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
-                    socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
-                    Ok(SocketStream::Tcp(socket))
-                })?
+                Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION).map(
+                    |(socket, _)| {
+                        socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
+                        socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
+                        Ok(SocketStream::Tcp(socket))
+                    },
+                )?
             }
             ReceiveListener::Unix(listener, opt_path) => {
                 let socket = listener
@@ -1107,14 +1115,16 @@ impl ReceiveListener {
                 Ok(socket)
             }
             ReceiveListener::Tls(listener, conn) => {
-                Self::accept_with_timeout(listener, Self::TIMEOUT_DURATION).map(|(socket, _)| {
-                    socket.set_read_timeout(Some(Self::TIMEOUT_DURATION))?;
-                    socket.set_write_timeout(Some(Self::TIMEOUT_DURATION))?;
-                    conn.wrap(socket)
-                        .map(Box::new)
-                        .map(SocketStream::Tls)
-                        .map_err(std::io::Error::other)
-                })?
+                Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION).map(
+                    |(socket, _)| {
+                        socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
+                        socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
+                        conn.wrap(socket)
+                            .map(Box::new)
+                            .map(SocketStream::Tls)
+                            .map_err(std::io::Error::other)
+                    },
+                )?
             }
         }
     }
@@ -1735,12 +1745,6 @@ fn send_migration_socket(
     send_data_migration: &VmSendMigrationData,
     main_connection: bool,
 ) -> std::result::Result<SocketStream, MigratableError> {
-    // The time the sender side may block on a socket, until it throws an error.
-    // Also the interval at which the {`KeepAliveStream`] sends keep alive messages.
-    // This timeout has to be smaller than [`ReceiveListener::TIMEOUT_DURATION`],
-    // otherwise spurious timeouts may happen.
-    const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
-
     if let Some(address) = send_data_migration.destination_url.strip_prefix("tcp:") {
         let socket = {
             info!("Connecting to TCP socket at {address}");
@@ -1749,11 +1753,11 @@ fn send_migration_socket(
                 .context("Error connecting to TCP socket")
                 .map_err(MigratableError::MigrateSend)?;
             socket
-                .set_read_timeout(Some(TIMEOUT_DURATION))
+                .set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))
                 .context("Error setting read timeout on TCP socket")
                 .map_err(MigratableError::MigrateSend)?;
             socket
-                .set_write_timeout(Some(TIMEOUT_DURATION))
+                .set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))
                 .context("Error setting write timeout on TCP socket")
                 .map_err(MigratableError::MigrateSend)?;
             if let Some(tls_dir) = &send_data_migration.tls_dir {
@@ -1775,7 +1779,7 @@ fn send_migration_socket(
         // If we use multiple TCP connections, we have to send periodic keep alive messages. Thus, we create a KeepAliveStream.
         if send_data_migration.connections.get() > 1 && main_connection {
             return Ok(SocketStream::KeepAlive(
-                KeepAliveStream::new(socket, TIMEOUT_DURATION)
+                KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION)
                     .context("Error creating keep alive sender")
                     .map_err(MigratableError::MigrateSend)?,
             ));
