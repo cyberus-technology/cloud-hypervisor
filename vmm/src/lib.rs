@@ -1779,7 +1779,7 @@ fn send_migration_socket(
         // If we use multiple TCP connections, we have to send periodic keep alive messages. Thus, we create a KeepAliveStream.
         if send_data_migration.connections.get() > 1 && main_connection {
             return Ok(SocketStream::KeepAlive(
-                KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION)
+                KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION, true)
                     .context("Error creating keep alive sender")
                     .map_err(MigratableError::MigrateSend)?,
             ));
