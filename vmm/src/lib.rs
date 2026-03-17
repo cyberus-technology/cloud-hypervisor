@@ -1156,7 +1156,7 @@ impl Vmm {
     ) -> result::Result<(), MigratableError> {
         event!("vm", "migration-receive-ready");
         // Accept the connection and get the socket
-        let mut socket = listener.accept()?;
+        let mut socket = listener.accept(true)?;
 
         event!("vm", "migration-receive-starting");
         let mut state = ReceiveMigrationState::Established;

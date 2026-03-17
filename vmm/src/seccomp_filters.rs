@@ -1245,6 +1245,8 @@ fn migration_tcp_worker_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, B
         (libc::SYS_setsockopt, vec![]),
         (libc::SYS_sigaltstack, vec![]),
         (libc::SYS_writev, vec![]),
+        (libc::SYS_timerfd_create, vec![]),
+        (libc::SYS_timerfd_settime, vec![]),
     ])
 }
 
