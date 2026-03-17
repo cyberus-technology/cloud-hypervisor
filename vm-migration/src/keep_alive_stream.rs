@@ -13,7 +13,7 @@ use std::{result, thread};
 use vm_memory::bitmap::BitmapSlice;
 use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
 
-use crate::protocol::Request;
+use crate::protocol::{Request, Response};
 
 /// The `KeepAliveStream` is a stream that is intended to be used for the main
 /// connection of live migrations. If the `KeepAliveStream` does not read or
@@ -51,14 +51,16 @@ enum KeepAliveStreamAnswer {
 
 struct KeepAliveWorker<S: Read + Write + AsFd> {
     stream: S,
+    /// Is this running on the sender or receiver side?
+    is_sender: bool,
 }
 
 impl<S> KeepAliveWorker<S>
 where
     S: Read + Write + AsFd,
 {
-    pub fn new(stream: S) -> Self {
-        Self { stream }
+    pub fn new(stream: S, is_sender: bool) -> Self {
+        Self { stream, is_sender }
     }
 
     pub fn read(&mut self, mut buf: Vec<u8>, len: usize) -> io::Result<(Vec<u8>, usize)> {
@@ -101,6 +103,7 @@ impl KeepAliveStream {
     pub fn new<T: Read + Write + Send + AsFd + 'static>(
         stream: T,
         timeout: Duration,
+        is_sender: bool,
     ) -> result::Result<Self, io::Error> {
         let fd = stream.as_fd().try_clone_to_owned()?;
 
@@ -109,9 +112,9 @@ impl KeepAliveStream {
         let (answer_tx, answer_rx) = sync_channel::<KeepAliveStreamAnswer>(0);
 
         let thread = thread::Builder::new()
-            .name("keep_alive_sender_thread".to_string())
+            .name("migration_keep_alive_thread".to_string())
             .spawn(move || {
-                let mut worker = KeepAliveWorker::new(stream);
+                let mut worker = KeepAliveWorker::new(stream, is_sender);
                 loop {
                     // The idea is to always send a keep alive message when this times out.
                     match message_rx.recv_timeout(timeout) {
@@ -145,8 +148,13 @@ impl KeepAliveStream {
                             KeepAliveStreamMessage::Disconnect => break,
                         },
                         Err(RecvTimeoutError::Timeout) => {
-                            let keep_alive = Request::keep_alive();
-                            let _ = keep_alive.write_to(&mut worker.stream);
+                            if worker.is_sender {
+                                let keep_alive = Request::keep_alive();
+                                let _ = keep_alive.write_to(&mut worker.stream);
+                            } else {
+                                let keep_alive = Response::keep_alive();
+                                let _ = keep_alive.write_to(&mut worker.stream);
+                            }
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
