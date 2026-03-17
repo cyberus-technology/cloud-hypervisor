@@ -1087,16 +1087,29 @@ impl AsFd for ReceiveListener {
 
 impl ReceiveListener {
     /// Block until a connection is accepted.
-    fn accept(&mut self) -> std::result::Result<SocketStream, std::io::Error> {
+    fn accept(
+        &mut self,
+        main_connection: bool,
+    ) -> std::result::Result<SocketStream, std::io::Error> {
         match self {
             ReceiveListener::Tcp(listener) => {
-                Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION).map(
-                    |(socket, _)| {
-                        socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
-                        socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
-                        Ok(SocketStream::Tcp(socket))
-                    },
-                )?
+                let socket = {
+                    let socket =
+                        Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION)?;
+
+                    socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
+                    socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
+                    SocketStream::Tcp(socket)
+                };
+
+                if main_connection {
+                    return Ok(SocketStream::KeepAlive(KeepAliveStream::new(
+                        socket,
+                        MIGRATION_WRITE_TIMEOUT_DURATION,
+                        false,
+                    )?));
+                }
+                Ok(socket)
             }
             ReceiveListener::Unix(listener, opt_path) => {
                 let socket = listener
@@ -1115,16 +1128,25 @@ impl ReceiveListener {
                 Ok(socket)
             }
             ReceiveListener::Tls(listener, conn) => {
-                Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION).map(
-                    |(socket, _)| {
-                        socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
-                        socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
-                        conn.wrap(socket)
-                            .map(Box::new)
-                            .map(SocketStream::Tls)
-                            .map_err(std::io::Error::other)
-                    },
-                )?
+                let socket = {
+                    let socket =
+                        Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION)?;
+                    socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
+                    socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
+                    conn.wrap(socket)
+                        .map(Box::new)
+                        .map(SocketStream::Tls)
+                        .map_err(io::Error::other)?
+                };
+
+                if main_connection {
+                    return Ok(SocketStream::KeepAlive(KeepAliveStream::new(
+                        socket,
+                        MIGRATION_WRITE_TIMEOUT_DURATION,
+                        false,
+                    )?));
+                }
+                Ok(socket)
             }
         }
     }
@@ -1135,7 +1157,7 @@ impl ReceiveListener {
         eventfd: &EventFd,
     ) -> std::result::Result<Option<SocketStream>, std::io::Error> {
         wait_for_readable(&self, eventfd)?
-            .then(|| self.accept())
+            .then(|| self.accept(false))
             .transpose()
     }
 
@@ -1143,14 +1165,17 @@ impl ReceiveListener {
     fn accept_with_timeout(
         listener: &TcpListener,
         timeout: Duration,
-    ) -> result::Result<(TcpStream, std::net::SocketAddr), std::io::Error> {
+    ) -> result::Result<TcpStream, std::io::Error> {
         let mut timer_fd = TimerFd::new()?;
         timer_fd
             .reset(timeout, None)
             .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
 
         wait_for_readable(&listener, &timer_fd)?
-            .then(|| listener.accept())
+            .then(|| {
+                let (stream, _) = listener.accept()?;
+                Ok(stream)
+            })
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -4070,7 +4095,7 @@ impl RequestHandler for Vmm {
         let mut listener = receive_migration_listener(&receive_data_migration)?;
         // Accept the connection and get the socket
         let mut socket = listener
-            .accept()
+            .accept(true)
             .context("Failed to accept migration connection")
             .map_err(|e| {
                 warn!("{e}");
