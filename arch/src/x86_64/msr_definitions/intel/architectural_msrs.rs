@@ -51,6 +51,8 @@ mod permitted_architectural_msrs {
         const IA32_FZM_RANGE_STARTADDR: u32 = 0x84;
         const IA32_FZM_RANGE_ENDADDR: u32 = 0x85;
         const IA32_FZM_RANGE_WRITESTATUS: u32 = 0x86;
+        // NOTE: This is permitted, but will be zeroed out for all non-host CPU profiles.
+        const IA32_MCG_CAP: u32 = 0x179;
 
         /// DCA Capability (R)
         const IA32_PLATFORM_DCA_CAP: u32 = 0x1f8;
@@ -98,13 +100,14 @@ mod permitted_architectural_msrs {
         const IA32_X2APIC_IRR7: u32 = 0x827;
         const IA32_X2APIC_CUR_COUNT: u32 = 0x839;
 
-        pub(super) const READ_ONLY_IA32_MSRS: [u32; 38] = [
+        pub(super) const READ_ONLY_IA32_MSRS: [u32; 39] = [
             IA32_BARRIER,
             IA32_MTRRCAP,
             IA32_FZM_DOMAIN_CONFIG,
             IA32_FZM_RANGE_STARTADDR,
             IA32_FZM_RANGE_ENDADDR,
             IA32_FZM_RANGE_WRITESTATUS,
+            IA32_MCG_CAP,
             IA32_PLATFORM_DCA_CAP,
             IA32_CPU_DCA_CAP,
             IA32_MCU_STAGING_MBOX_ADDR,
@@ -183,6 +186,11 @@ mod permitted_architectural_msrs {
         /// SYSENTER_ESP_MSR
         const IA32_SYSENTER_EIP: u32 = 0x176;
 
+        // Technically permitted (as users will expect it given that MCA is available via CPUID),
+        // but probably not very useful since IA32_MCG_CAP will be zeroed out for all non-host
+        // CPU profiles
+        const IA32_MCG_STATUS: u32 = 0x17a;
+
         // TODO: Does it really make sense to permit this MSR?
         const IA32_SMM_MONITOR_CTL: u32 = 0x9b;
         const _IA32_SMM_MONITOR_CTL_CPUID_CHECK: () =
@@ -256,6 +264,146 @@ mod permitted_architectural_msrs {
 
         const IA32_MTRR_DEF_TYPE: u32 = 0x2ff;
 
+        // Error reporting banks. KVM always reports 32
+        // of them by default.
+        // TODO: Consider conditionally compiling this based
+        // on whether we are using KVM
+        const IA32_MC0_CTL: u32 = 0x400;
+        const IA32_MC0_STATUS: u32 = 0x401;
+        const IA32_MC0_ADDR: u32 = 0x402;
+        const IA32_MC0_MISC: u32 = 0x403;
+        const IA32_MC1_CTL: u32 = 0x404;
+        const IA32_MC1_STATUS: u32 = 0x405;
+        const IA32_MC1_ADDR: u32 = 0x406;
+
+        const IA32_MC1_MISC: u32 = 0x407;
+        const IA32_MC2_CTL: u32 = 0x408;
+        const IA32_MC2_STATUS: u32 = 0x409;
+        const IA32_MC2_ADDR: u32 = 0x40a;
+        const IA32_MC2_MISC: u32 = 0x40b;
+        const IA32_MC3_CTL: u32 = 0x40c;
+        const IA32_MC3_STATUS: u32 = 0x40d;
+        const IA32_MC3_ADDR1: u32 = 0x40e;
+        const IA32_MC3_MISC: u32 = 0x40f;
+        const IA32_MC4_CTL: u32 = 0x410;
+        const IA32_MC4_STATUS: u32 = 0x411;
+        const IA32_MC4_ADDR: u32 = 0x412;
+        const IA32_MC4_MISC: u32 = 0x413;
+        const IA32_MC5_CTL: u32 = 0x414;
+        const IA32_MC5_STATUS: u32 = 0x415;
+        const IA32_MC5_ADDR: u32 = 0x416;
+        const IA32_MC5_MISC: u32 = 0x417;
+        const IA32_MC6_CTL: u32 = 0x418;
+
+        const IA32_MC6_STATUS: u32 = 0x419;
+        const IA32_MC6_ADDR1: u32 = 0x41a;
+        const IA32_MC6_MISC: u32 = 0x41b;
+        const IA32_MC7_CTL: u32 = 0x41c;
+        const IA32_MC7_STATUS: u32 = 0x41d;
+        const IA32_MC7_ADDR: u32 = 0x41e;
+        const IA32_MC7_MISC: u32 = 0x41f;
+        const IA32_MC8_CTL: u32 = 0x420;
+        const IA32_MC8_STATUS: u32 = 0x421;
+        const IA32_MC8_ADDR: u32 = 0x422;
+        const IA32_MC8_MISC: u32 = 0x423;
+        const IA32_MC9_CTL: u32 = 0x424;
+        const IA32_MC9_STATUS: u32 = 0x425;
+        const IA32_MC9_ADDR: u32 = 0x426;
+        const IA32_MC9_MISC: u32 = 0x427;
+        const IA32_MC10_CTL: u32 = 0x428;
+        const IA32_MC10_STATUS: u32 = 0x429;
+        const IA32_MC10_ADDR: u32 = 0x42a;
+        const IA32_MC10_MISC: u32 = 0x42b;
+
+        const IA32_MC11_CTL: u32 = 0x42c;
+        const IA32_MC11_STATUS: u32 = 0x42d;
+        const IA32_MC11_ADDR: u32 = 0x42e;
+        const IA32_MC11_MISC: u32 = 0x42f;
+        const IA32_MC12_CTL: u32 = 0x430;
+        const IA32_MC12_STATUS: u32 = 0x431;
+        const IA32_MC12_ADDR: u32 = 0x432;
+        const IA32_MC12_MISC: u32 = 0x433;
+        const IA32_MC13_CTL: u32 = 0x434;
+        const IA32_MC13_STATUS: u32 = 0x435;
+        const IA32_MC13_ADDR: u32 = 0x436;
+        const IA32_MC13_MISC: u32 = 0x437;
+        const IA32_MC14_CTL: u32 = 0x438;
+        const IA32_MC14_STATUS: u32 = 0x439;
+        const IA32_MC14_ADDR: u32 = 0x43a;
+        const IA32_MC14_MISC: u32 = 0x43b;
+        const IA32_MC15_CTL: u32 = 0x43c;
+        const IA32_MC15_STATUS: u32 = 0x43d;
+
+        const IA32_MC15_ADDR: u32 = 0x43e;
+        const IA32_MC15_MISC: u32 = 0x43f;
+        const IA32_MC16_CTL: u32 = 0x440;
+        const IA32_MC16_STATUS: u32 = 0x441;
+        const IA32_MC16_ADDR: u32 = 0x442;
+        const IA32_MC16_MISC: u32 = 0x443;
+        const IA32_MC17_CTL: u32 = 0x444;
+        const IA32_MC17_STATUS: u32 = 0x445;
+        const IA32_MC17_ADDR: u32 = 0x446;
+        const IA32_MC17_MISC: u32 = 0x447;
+        const IA32_MC18_CTL: u32 = 0x448;
+        const IA32_MC18_STATUS: u32 = 0x449;
+        const IA32_MC18_ADDR: u32 = 0x44a;
+        const IA32_MC18_MISC: u32 = 0x44b;
+        const IA32_MC19_CTL: u32 = 0x44c;
+        const IA32_MC19_STATUS: u32 = 0x44d;
+        const IA32_MC19_ADDR: u32 = 0x44e;
+        const IA32_MC19_MISC: u32 = 0x44f;
+        const IA32_MC20_CTL: u32 = 0x450;
+
+        const IA32_MC20_STATUS: u32 = 0x451;
+        const IA32_MC20_ADDR: u32 = 0x452;
+        const IA32_MC20_MISC: u32 = 0x453;
+        const IA32_MC21_CTL: u32 = 0x454;
+        const IA32_MC21_STATUS: u32 = 0x455;
+        const IA32_MC21_ADDR: u32 = 0x456;
+        const IA32_MC21_MISC: u32 = 0x457;
+        const IA32_MC22_CTL: u32 = 0x458;
+        const IA32_MC22_STATUS: u32 = 0x459;
+        const IA32_MC22_ADDR: u32 = 0x45a;
+        const IA32_MC22_MISC: u32 = 0x45b;
+        const IA32_MC23_CTL: u32 = 0x45c;
+        const IA32_MC23_STATUS: u32 = 0x45d;
+        const IA32_MC23_ADDR: u32 = 0x45e;
+        const IA32_MC23_MISC: u32 = 0x45f;
+        const IA32_MC24_CTL: u32 = 0x460;
+        const IA32_MC24_STATUS: u32 = 0x461;
+        const IA32_MC24_ADDR: u32 = 0x462;
+
+        const IA32_MC24_MISC: u32 = 0x463;
+        const IA32_MC25_CTL: u32 = 0x464;
+        const IA32_MC25_STATUS: u32 = 0x465;
+        const IA32_MC25_ADDR: u32 = 0x466;
+        const IA32_MC25_MISC: u32 = 0x467;
+        const IA32_MC26_CTL: u32 = 0x468;
+        const IA32_MC26_STATUS: u32 = 0x469;
+        const IA32_MC26_ADDR: u32 = 0x46a;
+        const IA32_MC26_MISC: u32 = 0x46b;
+        const IA32_MC27_CTL: u32 = 0x46c;
+        const IA32_MC27_STATUS: u32 = 0x46d;
+        const IA32_MC27_ADDR: u32 = 0x46e;
+        const IA32_MC27_MISC: u32 = 0x46f;
+        const IA32_MC28_CTL: u32 = 0x470;
+        const IA32_MC28_STATUS: u32 = 0x471;
+        const IA32_MC28_ADDR: u32 = 0x472;
+        const IA32_MC28_MISC: u32 = 0x473;
+        const IA32_MC29_CTL: u32 = 0x474;
+        const IA32_MC29_STATUS: u32 = 0x475;
+
+        const IA32_MC29_ADDR: u32 = 0x476;
+        const IA32_MC29_MISC: u32 = 0x477;
+        const IA32_MC30_CTL: u32 = 0x478;
+        const IA32_MC30_STATUS: u32 = 0x479;
+        const IA32_MC30_ADDR: u32 = 0x47a;
+        const IA32_MC30_MISC: u32 = 0x47b;
+        const IA32_MC31_CTL: u32 = 0x47c;
+        const IA32_MC31_STATUS: u32 = 0x47d;
+        const IA32_MC31_ADDR: u32 = 0x47e;
+        const IA32_MC31_MISC: u32 = 0x47f;
+
         const IA32_U_CET: u32 = 0x6a0;
         const IA32_S_CET: u32 = 0x6a2;
 
@@ -316,7 +464,7 @@ mod permitted_architectural_msrs {
             register: CpuidReg::ECX,
         });
 
-        pub(super) const READ_WRITE_IA32_MSRS: [u32; 73] = [
+        pub(super) const READ_WRITE_IA32_MSRS: [u32; 202] = [
             IA32_TIME_STAMP_COUNTER,
             IA32_APIC_BASE,
             IA32_FEATURE_CONTROL,
@@ -326,6 +474,7 @@ mod permitted_architectural_msrs {
             IA32_SYSENTER_CS,
             IA32_SYSENTER_ESP,
             IA32_SYSENTER_EIP,
+            IA32_MCG_STATUS,
             IA32_SMM_MONITOR_CTL,
             IA32_MISC_ENABLE,
             IA32_XFD,
@@ -364,6 +513,134 @@ mod permitted_architectural_msrs {
             IA32_MTRR_FIX4K_F8000,
             IA32_PAT,
             IA32_MTRR_DEF_TYPE,
+            IA32_MC0_CTL,
+            IA32_MC0_STATUS,
+            IA32_MC0_ADDR,
+            IA32_MC0_MISC,
+            IA32_MC1_CTL,
+            IA32_MC1_STATUS,
+            IA32_MC1_ADDR,
+            IA32_MC1_MISC,
+            IA32_MC2_CTL,
+            IA32_MC2_STATUS,
+            IA32_MC2_ADDR,
+            IA32_MC2_MISC,
+            IA32_MC3_CTL,
+            IA32_MC3_STATUS,
+            IA32_MC3_ADDR1,
+            IA32_MC3_MISC,
+            IA32_MC4_CTL,
+            IA32_MC4_STATUS,
+            IA32_MC4_ADDR,
+            IA32_MC4_MISC,
+            IA32_MC5_CTL,
+            IA32_MC5_STATUS,
+            IA32_MC5_ADDR,
+            IA32_MC5_MISC,
+            IA32_MC6_CTL,
+            IA32_MC6_STATUS,
+            IA32_MC6_ADDR1,
+            IA32_MC6_MISC,
+            IA32_MC7_CTL,
+            IA32_MC7_STATUS,
+            IA32_MC7_ADDR,
+            IA32_MC7_MISC,
+            IA32_MC8_CTL,
+            IA32_MC8_STATUS,
+            IA32_MC8_ADDR,
+            IA32_MC8_MISC,
+            IA32_MC9_CTL,
+            IA32_MC9_STATUS,
+            IA32_MC9_ADDR,
+            IA32_MC9_MISC,
+            IA32_MC10_CTL,
+            IA32_MC10_STATUS,
+            IA32_MC10_ADDR,
+            IA32_MC10_MISC,
+            IA32_MC11_CTL,
+            IA32_MC11_STATUS,
+            IA32_MC11_ADDR,
+            IA32_MC11_MISC,
+            IA32_MC12_CTL,
+            IA32_MC12_STATUS,
+            IA32_MC12_ADDR,
+            IA32_MC12_MISC,
+            IA32_MC13_CTL,
+            IA32_MC13_STATUS,
+            IA32_MC13_ADDR,
+            IA32_MC13_MISC,
+            IA32_MC14_CTL,
+            IA32_MC14_STATUS,
+            IA32_MC14_ADDR,
+            IA32_MC14_MISC,
+            IA32_MC15_CTL,
+            IA32_MC15_STATUS,
+            IA32_MC15_ADDR,
+            IA32_MC15_MISC,
+            IA32_MC16_CTL,
+            IA32_MC16_STATUS,
+            IA32_MC16_ADDR,
+            IA32_MC16_MISC,
+            IA32_MC17_CTL,
+            IA32_MC17_STATUS,
+            IA32_MC17_ADDR,
+            IA32_MC17_MISC,
+            IA32_MC18_CTL,
+            IA32_MC18_STATUS,
+            IA32_MC18_ADDR,
+            IA32_MC18_MISC,
+            IA32_MC19_CTL,
+            IA32_MC19_STATUS,
+            IA32_MC19_ADDR,
+            IA32_MC19_MISC,
+            IA32_MC20_CTL,
+            IA32_MC20_STATUS,
+            IA32_MC20_ADDR,
+            IA32_MC20_MISC,
+            IA32_MC21_CTL,
+            IA32_MC21_STATUS,
+            IA32_MC21_ADDR,
+            IA32_MC21_MISC,
+            IA32_MC22_CTL,
+            IA32_MC22_STATUS,
+            IA32_MC22_ADDR,
+            IA32_MC22_MISC,
+            IA32_MC23_CTL,
+            IA32_MC23_STATUS,
+            IA32_MC23_ADDR,
+            IA32_MC23_MISC,
+            IA32_MC24_CTL,
+            IA32_MC24_STATUS,
+            IA32_MC24_ADDR,
+            IA32_MC24_MISC,
+            IA32_MC25_CTL,
+            IA32_MC25_STATUS,
+            IA32_MC25_ADDR,
+            IA32_MC25_MISC,
+            IA32_MC26_CTL,
+            IA32_MC26_STATUS,
+            IA32_MC26_ADDR,
+            IA32_MC26_MISC,
+            IA32_MC27_CTL,
+            IA32_MC27_STATUS,
+            IA32_MC27_ADDR,
+            IA32_MC27_MISC,
+            IA32_MC28_CTL,
+            IA32_MC28_STATUS,
+            IA32_MC28_ADDR,
+            IA32_MC28_MISC,
+            IA32_MC29_CTL,
+            IA32_MC29_STATUS,
+            IA32_MC29_ADDR,
+            IA32_MC29_MISC,
+            IA32_MC30_CTL,
+            IA32_MC30_STATUS,
+            IA32_MC30_ADDR,
+            IA32_MC30_MISC,
+            IA32_MC31_CTL,
+            IA32_MC31_STATUS,
+            IA32_MC31_ADDR,
+            IA32_MC31_MISC,
             IA32_U_CET,
             IA32_S_CET,
             IA32_TSC_DEADLINE,
@@ -433,8 +710,8 @@ mod permitted_architectural_msrs {
     ///
     /// The MSRs listed here can be studied further in Table 2.2 in Section 2.1 of the Intel SDM
     /// Vol. 4 from October 2025
-    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 115] = const {
-        let mut permitted = [0u32; 115];
+    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 245] = const {
+        let mut permitted = [0u32; 245];
         let read_only_len = READ_ONLY_IA32_MSRS.len();
         let write_only_len = WRITE_ONLY_IA32_MSRS.len();
         let read_write_len = READ_WRITE_IA32_MSRS.len();
@@ -569,10 +846,6 @@ mod forbidden_architectural_msrs {
     // NOTE: IA32_MCU_OPT_CTRL must necessarily be available, due to
     // what we set in CPUID for some CPU profiles (inherit policy)
 
-    const IA32_MCG_CAP: (u32, u32) = (0x179, 0x179);
-
-    const IA32_MCG_STATUS: (u32, u32) = (0x17a, 0x17a);
-
     const IA32_MCG_CTL: (u32, u32) = (0x17b, 0x17b);
 
     // TODO: 0x180- 0x185 is reserved, we should not list these MSRS at all
@@ -651,142 +924,6 @@ mod forbidden_architectural_msrs {
     // TODO: Not sure about this one, but seems to be related to performance monitoring which
     // should be disabled for non-host CPU profiles.
     const IA32_PEBS_ENABLE: (u32, u32) = (0x3f1, 0x3f1);
-
-    const IA32_MC0_CTL: (u32, u32) = (0x400, 0x400);
-    const IA32_MC0_STATUS: (u32, u32) = (0x401, 0x401);
-    const IA32_MC0_ADDR: (u32, u32) = (0x402, 0x402);
-    const IA32_MC0_MISC: (u32, u32) = (0x403, 0x403);
-    const IA32_MC1_CTL: (u32, u32) = (0x404, 0x404);
-    const IA32_MC1_STATUS: (u32, u32) = (0x405, 0x405);
-    const IA32_MC1_ADDR: (u32, u32) = (0x406, 0x406);
-
-    const IA32_MC1_MISC: (u32, u32) = (0x407, 0x407);
-    const IA32_MC2_CTL: (u32, u32) = (0x408, 0x408);
-    const IA32_MC2_STATUS: (u32, u32) = (0x409, 0x409);
-    const IA32_MC2_ADDR: (u32, u32) = (0x40a, 0x40a);
-    const IA32_MC2_MISC: (u32, u32) = (0x40b, 0x40b);
-    const IA32_MC3_CTL: (u32, u32) = (0x40c, 0x40c);
-    const IA32_MC3_STATUS: (u32, u32) = (0x40d, 0x40d);
-    const IA32_MC3_ADDR1: (u32, u32) = (0x40e, 0x40e);
-    const IA32_MC3_MISC: (u32, u32) = (0x40f, 0x40f);
-    const IA32_MC4_CTL: (u32, u32) = (0x410, 0x410);
-    const IA32_MC4_STATUS: (u32, u32) = (0x411, 0x411);
-    const IA32_MC4_ADDR: (u32, u32) = (0x412, 0x412);
-    const IA32_MC4_MISC: (u32, u32) = (0x413, 0x413);
-    const IA32_MC5_CTL: (u32, u32) = (0x414, 0x414);
-    const IA32_MC5_STATUS: (u32, u32) = (0x415, 0x415);
-    const IA32_MC5_ADDR: (u32, u32) = (0x416, 0x416);
-    const IA32_MC5_MISC: (u32, u32) = (0x417, 0x417);
-    const IA32_MC6_CTL: (u32, u32) = (0x418, 0x418);
-
-    const IA32_MC6_STATUS: (u32, u32) = (0x419, 0x419);
-    const IA32_MC6_ADDR1: (u32, u32) = (0x41a, 0x41a);
-    const IA32_MC6_MISC: (u32, u32) = (0x41b, 0x41b);
-    const IA32_MC7_CTL: (u32, u32) = (0x41c, 0x41c);
-    const IA32_MC7_STATUS: (u32, u32) = (0x41d, 0x41d);
-    const IA32_MC7_ADDR: (u32, u32) = (0x41e, 0x41e);
-    const IA32_MC7_MISC: (u32, u32) = (0x41f, 0x41f);
-    const IA32_MC8_CTL: (u32, u32) = (0x420, 0x420);
-    const IA32_MC8_STATUS: (u32, u32) = (0x421, 0x421);
-    const IA32_MC8_ADDR: (u32, u32) = (0x422, 0x422);
-    const IA32_MC8_MISC: (u32, u32) = (0x423, 0x423);
-    const IA32_MC9_CTL: (u32, u32) = (0x424, 0x424);
-    const IA32_MC9_STATUS: (u32, u32) = (0x425, 0x425);
-    const IA32_MC9_ADDR: (u32, u32) = (0x426, 0x426);
-    const IA32_MC9_MISC: (u32, u32) = (0x427, 0x427);
-    const IA32_MC10_CTL: (u32, u32) = (0x428, 0x428);
-    const IA32_MC10_STATUS: (u32, u32) = (0x429, 0x429);
-    const IA32_MC10_ADDR: (u32, u32) = (0x42a, 0x42a);
-    const IA32_MC10_MISC: (u32, u32) = (0x42b, 0x42b);
-
-    const IA32_MC11_CTL: (u32, u32) = (0x42c, 0x42c);
-    const IA32_MC11_STATUS: (u32, u32) = (0x42d, 0x42d);
-    const IA32_MC11_ADDR: (u32, u32) = (0x42e, 0x42e);
-    const IA32_MC11_MISC: (u32, u32) = (0x42f, 0x42f);
-    const IA32_MC12_CTL: (u32, u32) = (0x430, 0x430);
-    const IA32_MC12_STATUS: (u32, u32) = (0x431, 0x431);
-    const IA32_MC12_ADDR: (u32, u32) = (0x432, 0x432);
-    const IA32_MC12_MISC: (u32, u32) = (0x433, 0x433);
-    const IA32_MC13_CTL: (u32, u32) = (0x434, 0x434);
-    const IA32_MC13_STATUS: (u32, u32) = (0x435, 0x435);
-    const IA32_MC13_ADDR: (u32, u32) = (0x436, 0x436);
-    const IA32_MC13_MISC: (u32, u32) = (0x437, 0x437);
-    const IA32_MC14_CTL: (u32, u32) = (0x438, 0x438);
-    const IA32_MC14_STATUS: (u32, u32) = (0x439, 0x439);
-    const IA32_MC14_ADDR: (u32, u32) = (0x43a, 0x43a);
-    const IA32_MC14_MISC: (u32, u32) = (0x43b, 0x43b);
-    const IA32_MC15_CTL: (u32, u32) = (0x43c, 0x43c);
-    const IA32_MC15_STATUS: (u32, u32) = (0x43d, 0x43d);
-
-    const IA32_MC15_ADDR: (u32, u32) = (0x43e, 0x43e);
-    const IA32_MC15_MISC: (u32, u32) = (0x43f, 0x43f);
-    const IA32_MC16_CTL: (u32, u32) = (0x440, 0x440);
-    const IA32_MC16_STATUS: (u32, u32) = (0x441, 0x441);
-    const IA32_MC16_ADDR: (u32, u32) = (0x442, 0x442);
-    const IA32_MC16_MISC: (u32, u32) = (0x443, 0x443);
-    const IA32_MC17_CTL: (u32, u32) = (0x444, 0x444);
-    const IA32_MC17_STATUS: (u32, u32) = (0x445, 0x445);
-    const IA32_MC17_ADDR: (u32, u32) = (0x446, 0x446);
-    const IA32_MC17_MISC: (u32, u32) = (0x447, 0x447);
-    const IA32_MC18_CTL: (u32, u32) = (0x448, 0x448);
-    const IA32_MC18_STATUS: (u32, u32) = (0x449, 0x449);
-    const IA32_MC18_ADDR: (u32, u32) = (0x44a, 0x44a);
-    const IA32_MC18_MISC: (u32, u32) = (0x44b, 0x44b);
-    const IA32_MC19_CTL: (u32, u32) = (0x44c, 0x44c);
-    const IA32_MC19_STATUS: (u32, u32) = (0x44d, 0x44d);
-    const IA32_MC19_ADDR: (u32, u32) = (0x44e, 0x44e);
-    const IA32_MC19_MISC: (u32, u32) = (0x44f, 0x44f);
-    const IA32_MC20_CTL: (u32, u32) = (0x450, 0x450);
-
-    const IA32_MC20_STATUS: (u32, u32) = (0x451, 0x451);
-    const IA32_MC20_ADDR: (u32, u32) = (0x452, 0x452);
-    const IA32_MC20_MISC: (u32, u32) = (0x453, 0x453);
-    const IA32_MC21_CTL: (u32, u32) = (0x454, 0x454);
-    const IA32_MC21_STATUS: (u32, u32) = (0x455, 0x455);
-    const IA32_MC21_ADDR: (u32, u32) = (0x456, 0x456);
-    const IA32_MC21_MISC: (u32, u32) = (0x457, 0x457);
-    const IA32_MC22_CTL: (u32, u32) = (0x458, 0x458);
-    const IA32_MC22_STATUS: (u32, u32) = (0x459, 0x459);
-    const IA32_MC22_ADDR: (u32, u32) = (0x45a, 0x45a);
-    const IA32_MC22_MISC: (u32, u32) = (0x45b, 0x45b);
-    const IA32_MC23_CTL: (u32, u32) = (0x45c, 0x45c);
-    const IA32_MC23_STATUS: (u32, u32) = (0x45d, 0x45d);
-    const IA32_MC23_ADDR: (u32, u32) = (0x45e, 0x45e);
-    const IA32_MC23_MISC: (u32, u32) = (0x45f, 0x45f);
-    const IA32_MC24_CTL: (u32, u32) = (0x460, 0x460);
-    const IA32_MC24_STATUS: (u32, u32) = (0x461, 0x461);
-    const IA32_MC24_ADDR: (u32, u32) = (0x462, 0x462);
-
-    const IA32_MC24_MISC: (u32, u32) = (0x463, 0x463);
-    const IA32_MC25_CTL: (u32, u32) = (0x464, 0x464);
-    const IA32_MC25_STATUS: (u32, u32) = (0x465, 0x465);
-    const IA32_MC25_ADDR: (u32, u32) = (0x466, 0x466);
-    const IA32_MC25_MISC: (u32, u32) = (0x467, 0x467);
-    const IA32_MC26_CTL: (u32, u32) = (0x468, 0x468);
-    const IA32_MC26_STATUS: (u32, u32) = (0x469, 0x469);
-    const IA32_MC26_ADDR: (u32, u32) = (0x46a, 0x46a);
-    const IA32_MC26_MISC: (u32, u32) = (0x46b, 0x46b);
-    const IA32_MC27_CTL: (u32, u32) = (0x46c, 0x46c);
-    const IA32_MC27_STATUS: (u32, u32) = (0x46d, 0x46d);
-    const IA32_MC27_ADDR: (u32, u32) = (0x46e, 0x46e);
-    const IA32_MC27_MISC: (u32, u32) = (0x46f, 0x46f);
-    const IA32_MC28_CTL: (u32, u32) = (0x470, 0x470);
-    const IA32_MC28_STATUS: (u32, u32) = (0x471, 0x471);
-    const IA32_MC28_ADDR: (u32, u32) = (0x472, 0x472);
-    const IA32_MC28_MISC: (u32, u32) = (0x473, 0x473);
-    const IA32_MC29_CTL: (u32, u32) = (0x474, 0x474);
-    const IA32_MC29_STATUS: (u32, u32) = (0x475, 0x475);
-
-    const IA32_MC29_ADDR: (u32, u32) = (0x476, 0x476);
-    const IA32_MC29_MISC: (u32, u32) = (0x477, 0x477);
-    const IA32_MC30_CTL: (u32, u32) = (0x478, 0x478);
-    const IA32_MC30_STATUS: (u32, u32) = (0x479, 0x479);
-    const IA32_MC30_ADDR: (u32, u32) = (0x47a, 0x47a);
-    const IA32_MC30_MISC: (u32, u32) = (0x47b, 0x47b);
-    const IA32_MC31_CTL: (u32, u32) = (0x47c, 0x47c);
-    const IA32_MC31_STATUS: (u32, u32) = (0x47d, 0x47d);
-    const IA32_MC31_ADDR: (u32, u32) = (0x47e, 0x47e);
-    const IA32_MC31_MISC: (u32, u32) = (0x47f, 0x47f);
 
     const IA32_A_PMC0: (u32, u32) = (0x4c1, 0x4c1);
     const IA32_A_PMC1: (u32, u32) = (0x4c2, 0x4c2);
@@ -1133,7 +1270,7 @@ mod forbidden_architectural_msrs {
     const IA32_UARCH_MISC_CTL: (u32, u32) = (0x1b01, 0x1b01);
     /// A list of ARCHITECTURAL MSR register addresses that are forbidden for all non-host CPU profiles and also not
     /// considered MSR-based FEATURE indices by KVM.
-    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 356] = [
+    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 226] = [
         IA32_P5_MC_ADDR,
         IA32_P5_MC_TYPE,
         // TODO: Not sure about IA32_P5_MC_ADDR & IA32_P5_MC_TYPE
@@ -1195,17 +1332,6 @@ mod forbidden_architectural_msrs {
         // TODO: Don't know about IA32_SYSENTER_CS, IA32_SYSENTER_ESP,
         // IA32_SYSENTER_EIP
         //
-
-        // TODO: Not sure if we can/should deny this MSR, but
-        // it doesn't really make sense to have it available in
-        // a virtualized environment
-        //
-        // If we keep it denied we should document that
-        // even for 06_01H one cannot rely on the existence of this MSR
-        IA32_MCG_CAP,
-        // TODO: Also not sure if we may deny this MSR
-        IA32_MCG_STATUS,
-        // TODO: Can we deny this?
         IA32_MCG_CTL,
         // TODO: 0x180- 0x185 is reserved, we should not list these MSRS at all
         /// Disabled via CPUID for all non-host CPU profiles
@@ -1263,134 +1389,6 @@ mod forbidden_architectural_msrs {
         // TODO: Not sure about this one, but seems to be related to performance monitoring which
         // should be disabled for non-host CPU profiles.
         IA32_PEBS_ENABLE,
-        IA32_MC0_CTL,
-        IA32_MC0_STATUS,
-        IA32_MC0_ADDR,
-        IA32_MC0_MISC,
-        IA32_MC1_CTL,
-        IA32_MC1_STATUS,
-        IA32_MC1_ADDR,
-        IA32_MC1_MISC,
-        IA32_MC2_CTL,
-        IA32_MC2_STATUS,
-        IA32_MC2_ADDR,
-        IA32_MC2_MISC,
-        IA32_MC3_CTL,
-        IA32_MC3_STATUS,
-        IA32_MC3_ADDR1,
-        IA32_MC3_MISC,
-        IA32_MC4_CTL,
-        IA32_MC4_STATUS,
-        IA32_MC4_ADDR,
-        IA32_MC4_MISC,
-        IA32_MC5_CTL,
-        IA32_MC5_STATUS,
-        IA32_MC5_ADDR,
-        IA32_MC5_MISC,
-        IA32_MC6_CTL,
-        IA32_MC6_STATUS,
-        IA32_MC6_ADDR1,
-        IA32_MC6_MISC,
-        IA32_MC7_CTL,
-        IA32_MC7_STATUS,
-        IA32_MC7_ADDR,
-        IA32_MC7_MISC,
-        IA32_MC8_CTL,
-        IA32_MC8_STATUS,
-        IA32_MC8_ADDR,
-        IA32_MC8_MISC,
-        IA32_MC9_CTL,
-        IA32_MC9_STATUS,
-        IA32_MC9_ADDR,
-        IA32_MC9_MISC,
-        IA32_MC10_CTL,
-        IA32_MC10_STATUS,
-        IA32_MC10_ADDR,
-        IA32_MC10_MISC,
-        IA32_MC11_CTL,
-        IA32_MC11_STATUS,
-        IA32_MC11_ADDR,
-        IA32_MC11_MISC,
-        IA32_MC12_CTL,
-        IA32_MC12_STATUS,
-        IA32_MC12_ADDR,
-        IA32_MC12_MISC,
-        IA32_MC13_CTL,
-        IA32_MC13_STATUS,
-        IA32_MC13_ADDR,
-        IA32_MC13_MISC,
-        IA32_MC14_CTL,
-        IA32_MC14_STATUS,
-        IA32_MC14_ADDR,
-        IA32_MC14_MISC,
-        IA32_MC15_CTL,
-        IA32_MC15_STATUS,
-        IA32_MC15_ADDR,
-        IA32_MC15_MISC,
-        IA32_MC16_CTL,
-        IA32_MC16_STATUS,
-        IA32_MC16_ADDR,
-        IA32_MC16_MISC,
-        IA32_MC17_CTL,
-        IA32_MC17_STATUS,
-        IA32_MC17_ADDR,
-        IA32_MC17_MISC,
-        IA32_MC18_CTL,
-        IA32_MC18_STATUS,
-        IA32_MC18_ADDR,
-        IA32_MC18_MISC,
-        IA32_MC19_CTL,
-        IA32_MC19_STATUS,
-        IA32_MC19_ADDR,
-        IA32_MC19_MISC,
-        IA32_MC20_CTL,
-        IA32_MC20_STATUS,
-        IA32_MC20_ADDR,
-        IA32_MC20_MISC,
-        IA32_MC21_CTL,
-        IA32_MC21_STATUS,
-        IA32_MC21_ADDR,
-        IA32_MC21_MISC,
-        IA32_MC22_CTL,
-        IA32_MC22_STATUS,
-        IA32_MC22_ADDR,
-        IA32_MC22_MISC,
-        IA32_MC23_CTL,
-        IA32_MC23_STATUS,
-        IA32_MC23_ADDR,
-        IA32_MC23_MISC,
-        IA32_MC24_CTL,
-        IA32_MC24_STATUS,
-        IA32_MC24_ADDR,
-        IA32_MC24_MISC,
-        IA32_MC25_CTL,
-        IA32_MC25_STATUS,
-        IA32_MC25_ADDR,
-        IA32_MC25_MISC,
-        IA32_MC26_CTL,
-        IA32_MC26_STATUS,
-        IA32_MC26_ADDR,
-        IA32_MC26_MISC,
-        IA32_MC27_CTL,
-        IA32_MC27_STATUS,
-        IA32_MC27_ADDR,
-        IA32_MC27_MISC,
-        IA32_MC28_CTL,
-        IA32_MC28_STATUS,
-        IA32_MC28_ADDR,
-        IA32_MC28_MISC,
-        IA32_MC29_CTL,
-        IA32_MC29_STATUS,
-        IA32_MC29_ADDR,
-        IA32_MC29_MISC,
-        IA32_MC30_CTL,
-        IA32_MC30_STATUS,
-        IA32_MC30_ADDR,
-        IA32_MC30_MISC,
-        IA32_MC31_CTL,
-        IA32_MC31_STATUS,
-        IA32_MC31_ADDR,
-        IA32_MC31_MISC,
         IA32_A_PMC0,
         IA32_A_PMC1,
         IA32_A_PMC2,
