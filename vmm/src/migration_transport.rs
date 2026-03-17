@@ -89,7 +89,10 @@ pub(crate) enum ReceiveListener {
 
 impl ReceiveListener {
     /// Block until a connection is accepted.
-    pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
+    pub(crate) fn accept(
+        &mut self,
+        main_connection: bool,
+    ) -> Result<SocketStream, MigratableError> {
         match self {
             ReceiveListener::Tcp(listener) => {
                 let (socket, _) = accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION)
@@ -97,7 +100,15 @@ impl ReceiveListener {
                     .map_err(MigratableError::MigrateReceive)?;
                 set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateReceive)?;
 
-                Ok(SocketStream::Tcp(socket))
+                let socket = SocketStream::Tcp(socket);
+                if main_connection {
+                    KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION, false)
+                        .map(SocketStream::KeepAlive)
+                        .context("Error creating keep-alive migration stream")
+                        .map_err(MigratableError::MigrateReceive)
+                } else {
+                    Ok(socket)
+                }
             }
             ReceiveListener::Unix(listener) => listener
                 .accept()
@@ -110,11 +121,20 @@ impl ReceiveListener {
                     .map_err(MigratableError::MigrateReceive)?;
                 set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateReceive)?;
 
-                TlsStream::new_server(socket, config)
+                let socket = TlsStream::new_server(socket, config)
                     .map(Box::new)
                     .map(SocketStream::Tls)
                     .context("Failed to accept TLS migration connection")
-                    .map_err(MigratableError::MigrateReceive)
+                    .map_err(MigratableError::MigrateReceive)?;
+
+                if main_connection {
+                    KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION, false)
+                        .map(SocketStream::KeepAlive)
+                        .context("Error creating keep-alive migration stream")
+                        .map_err(MigratableError::MigrateReceive)
+                } else {
+                    Ok(socket)
+                }
             }
         }
     }
@@ -129,7 +149,7 @@ impl ReceiveListener {
             .map_err(MigratableError::MigrateReceive)?
         {
             // The listener is readable; accept the connection.
-            Ok(Some(self.accept()?))
+            Ok(Some(self.accept(false)?))
         } else {
             // The abort event was signaled before any connection arrived.
             Ok(None)
@@ -233,9 +253,7 @@ impl AsFd for SocketStream {
             SocketStream::Unix(s) => s.as_fd(),
             SocketStream::Tcp(s) => s.as_fd(),
             SocketStream::Tls(s) => s.as_fd(),
-            SocketStream::KeepAlive(_) => {
-                unreachable!("KeepAliveStream is only used by the migration sender")
-            }
+            SocketStream::KeepAlive(s) => s.as_fd(),
         }
     }
 }
