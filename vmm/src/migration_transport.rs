@@ -41,15 +41,40 @@ use crate::{GuestMemoryMmap, VmMigrationConfig};
 /// receiver side.
 pub(crate) const MAX_MIGRATION_CONNECTIONS: u32 = 128;
 
-const RECEIVE_MIGRATION_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
-const SEND_MIGRATION_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+/// The time a writer may block on a socket until it throws an error.
+///
+/// Also the interval at which the [`KeepAliveStream`] sends keep alive messages.
+///
+/// # Relation with [`MIGRATION_READ_TIMEOUT_DURATION`]
+///
+/// This timeout has to be smaller than [`MIGRATION_READ_TIMEOUT_DURATION`],
+/// otherwise spurious timeouts may happen.
+const MIGRATION_WRITE_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
-fn set_migration_socket_timeouts(socket: &TcpStream, timeout: Duration) -> anyhow::Result<()> {
+/// The time a reader may block on a socket until it throws an error.
+///
+/// # Relation with [`MIGRATION_WRITE_TIMEOUT_DURATION`]
+///
+/// This timeout has to be larger than [`MIGRATION_WRITE_TIMEOUT_DURATION`],
+/// otherwise spurious timeouts may happen.
+const MIGRATION_READ_TIMEOUT_DURATION: Duration = {
+    let migration_read_timeout_duration = Duration::from_secs(10);
+
+    // This timeout has to be larger than [`MIGRATION_WRITE_TIMEOUT_DURATION`],
+    // otherwise spurious timeouts may happen.
+    assert!(
+        MIGRATION_WRITE_TIMEOUT_DURATION.as_millis() < migration_read_timeout_duration.as_millis(),
+        "MIGRATION_WRITE_TIMEOUT_DURATION must be smaller than MIGRATION_READ_TIMEOUT_DURATION",
+    );
+    migration_read_timeout_duration
+};
+
+fn set_migration_socket_timeouts(socket: &TcpStream) -> anyhow::Result<()> {
     socket
-        .set_read_timeout(Some(timeout))
+        .set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))
         .context("Error setting read timeout on TCP socket")?;
     socket
-        .set_write_timeout(Some(timeout))
+        .set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))
         .context("Error setting write timeout on TCP socket")?;
     Ok(())
 }
@@ -67,11 +92,10 @@ impl ReceiveListener {
     pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
         match self {
             ReceiveListener::Tcp(listener) => {
-                let (socket, _) = accept_with_timeout(listener, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
+                let (socket, _) = accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION)
                     .context("Failed to accept TCP migration connection")
                     .map_err(MigratableError::MigrateReceive)?;
-                set_migration_socket_timeouts(&socket, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
-                    .map_err(MigratableError::MigrateReceive)?;
+                set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateReceive)?;
 
                 Ok(SocketStream::Tcp(socket))
             }
@@ -81,11 +105,10 @@ impl ReceiveListener {
                 .context("Failed to accept Unix migration connection")
                 .map_err(MigratableError::MigrateReceive),
             ReceiveListener::Tls(listener, config) => {
-                let (socket, _) = accept_with_timeout(listener, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
+                let (socket, _) = accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION)
                     .context("Failed to accept TCP connection")
                     .map_err(MigratableError::MigrateReceive)?;
-                set_migration_socket_timeouts(&socket, RECEIVE_MIGRATION_SOCKET_TIMEOUT)
-                    .map_err(MigratableError::MigrateReceive)?;
+                set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateReceive)?;
 
                 TlsStream::new_server(socket, config)
                     .map(Box::new)
@@ -909,8 +932,7 @@ pub(crate) fn send_migration_socket(
         let socket = TcpStream::connect(address).map_err(|e| {
             MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
         })?;
-        set_migration_socket_timeouts(&socket, SEND_MIGRATION_SOCKET_TIMEOUT)
-            .map_err(MigratableError::MigrateSend)?;
+        set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateSend)?;
 
         if let Some(tls_dir) = tls_dir {
             let server_name = tcp_address_to_server_name(address)
@@ -944,7 +966,7 @@ pub(crate) fn send_migration_socket_with_keep_alive(
 ) -> Result<SocketStream, MigratableError> {
     match send_migration_socket(destination_url, tls_dir)? {
         socket @ (SocketStream::Tcp(_) | SocketStream::Tls(_)) => {
-            KeepAliveStream::new(socket, SEND_MIGRATION_SOCKET_TIMEOUT)
+            KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION)
                 .map(SocketStream::KeepAlive)
                 .context("Error creating keep-alive migration stream")
                 .map_err(MigratableError::MigrateSend)
