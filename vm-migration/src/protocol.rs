@@ -151,10 +151,12 @@ pub enum Command {
     MemoryFd = 7,
     /// Finalizes the migration without resuming the VM on the destination.
     /// Sent when the source VM was paused at migration time.
-    CompletePaused = 8,
+    CompletePaused = 9,
     /// Request a page to be faulted in. The page content can be sent
     /// through the response or simply written to the shared memory.
-    PageFault = 9,
+    PageFault = 10,
+    // TODO(keepalive): remove this command when gardenlinux-release-26-09-18 compatibility ends.
+    KeepAlive = 8,
 }
 
 /// Role announced as the first message on an additional migration connection.
@@ -305,12 +307,21 @@ impl Request {
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
         let mut buf = [0u8; size_of::<Request>()];
-        fd.read_exact(&mut buf)
-            .map_err(MigratableError::MigrateSocket)?;
 
-        Request::try_read_from_bytes(&buf).map_err(|_| {
-            MigratableError::MigrateReceive(anyhow!("received request with unknown command"))
-        })
+        loop {
+            fd.read_exact(&mut buf)
+                .map_err(MigratableError::MigrateSocket)?;
+            let request = Request::try_read_from_bytes(&buf).map_err(|_| {
+                MigratableError::MigrateReceive(anyhow!("received request with unknown command"))
+            })?;
+
+            // If we read a keep alive message, we throw it away and keep reading.
+            // TODO(keepalive): remove this branch when gardenlinux-release-26-09-18 compatibility ends.
+            if request.command() == Command::KeepAlive {
+                continue;
+            }
+            return Ok(request);
+        }
     }
 
     pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
@@ -370,12 +381,22 @@ impl Response {
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigratableError> {
         let mut buf = [0u8; size_of::<Response>()];
-        fd.read_exact(&mut buf)
-            .map_err(MigratableError::MigrateSocket)?;
 
-        Response::try_read_from_bytes(&buf).map_err(|_| {
-            MigratableError::MigrateReceive(anyhow!("received response with unknown status"))
-        })
+        loop {
+            fd.read_exact(&mut buf)
+                .map_err(MigratableError::MigrateSocket)?;
+
+            let response = Response::try_read_from_bytes(&buf).map_err(|_| {
+                MigratableError::MigrateReceive(anyhow!("received response with unknown status"))
+            })?;
+
+            // If we read a keep alive message, we throw it away and keep reading.
+            // TODO(keepalive): remove this branch when gardenlinux-release-26-09-18 compatibility ends.
+            if response.status() == Status::KeepAlive {
+                continue;
+            }
+            return Ok(response);
+        }
     }
 
     /// Return the response if its status is `Ok`.
