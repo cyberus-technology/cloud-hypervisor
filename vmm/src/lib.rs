@@ -344,9 +344,7 @@ impl AsFd for SocketStream {
             SocketStream::Unix(s) => s.as_fd(),
             SocketStream::Tcp(s) => s.as_fd(),
             SocketStream::Tls(s) => s.as_fd(),
-            SocketStream::KeepAlive(_) => unimplemented!(
-                "AsFd should not be used by a sender, and the KeepAliveStream should only be used by senders."
-            ),
+            SocketStream::KeepAlive(s) => s.as_fd(),
         }
     }
 }
