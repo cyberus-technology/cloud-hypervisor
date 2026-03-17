@@ -8,7 +8,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::{result, thread};
+use std::{mem, result, thread};
 
 use vm_memory::bitmap::BitmapSlice;
 use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
@@ -28,10 +28,10 @@ use crate::protocol::Response;
 // The messages that will be sent to the `KeepAliveWorker`.
 #[derive(Debug)]
 enum KeepAliveStreamMessage {
-    // Read `len` bytes from `stream`.
-    Read(usize /* len */),
-    // Write `buf` to `stream`.
-    Write(Vec<u8> /* buf */),
+    // Read `len` bytes into `buf` from `stream`.
+    Read { len: usize, buf: Vec<u8> },
+    // Write `buf[..len]` to `stream`.
+    Write { len: usize, buf: Vec<u8> },
     // Flush `stream`.
     Flush,
     // Stop listening for messages, i.e. stop the worker.
@@ -44,7 +44,7 @@ enum KeepAliveStreamAnswer {
     // Result of reading from `stream`.
     Read(io::Result<(Vec<u8>, usize)>),
     // Result of writing to `stream`.
-    Write(io::Result<usize>),
+    Write(io::Result<(Vec<u8>, usize)>),
     // Result of flushing `stream`.
     Flush(io::Result<()>),
 }
@@ -61,18 +61,22 @@ where
         Self { stream }
     }
 
-    fn read(&mut self, len: usize) -> io::Result<(Vec<u8>, usize)> {
-        let mut buf: Vec<u8> = vec![0u8; len];
-        let n = Read::read(&mut self.stream, &mut buf)?;
+    fn read(&mut self, mut buf: Vec<u8>, len: usize) -> io::Result<(Vec<u8>, usize)> {
+        if buf.len() < len {
+            buf.resize(len, 0);
+        }
+
+        let n = Read::read(&mut self.stream, &mut buf[..len])?;
         Ok((buf, n))
     }
 
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    fn write(&mut self, buf: Vec<u8>, len: usize) -> io::Result<(Vec<u8>, usize)> {
+        debug_assert!(len <= buf.len());
         // If only 6 of 16 response bytes are written, the caller's retry could
         // follow a keepalive: 6 response bytes, keepalive, then 10 bytes.
         // Finish this write before the timer can run again.
-        Write::write_all(&mut self.stream, buf)?;
-        Ok(buf.len())
+        Write::write_all(&mut self.stream, &buf[..len])?;
+        Ok((buf, len))
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -85,10 +89,15 @@ pub struct KeepAliveStream {
     thread: Option<JoinHandle<()>>,
     /// Duplicated file descriptor for `AsFd`.
     fd: OwnedFd,
+
     /// Used to send messages to the worker.
     message_tx: SyncSender<KeepAliveStreamMessage>,
     /// Used to receive answers from the worker.
     answer_rx: Receiver<KeepAliveStreamAnswer>,
+    /// Scratch buffer that gets moved to/from the worker for reads.
+    read_buf: Vec<u8>,
+    /// Scratch buffer that gets moved to/from the worker for writes.
+    write_buf: Vec<u8>,
 }
 
 impl KeepAliveStream {
@@ -110,9 +119,9 @@ impl KeepAliveStream {
                     // The idea is to always send a keep alive message when this times out.
                     match message_rx.recv_timeout(timeout) {
                         Ok(message) => match message {
-                            KeepAliveStreamMessage::Read(payload) => {
+                            KeepAliveStreamMessage::Read { len, buf } => {
                                 if answer_tx
-                                    .send(KeepAliveStreamAnswer::Read(worker.read(payload)))
+                                    .send(KeepAliveStreamAnswer::Read(worker.read(buf, len)))
                                     .is_err()
                                 {
                                     // We simply break the loop and thus stop the thread if anything bad happens.
@@ -120,9 +129,9 @@ impl KeepAliveStream {
                                     break;
                                 }
                             }
-                            KeepAliveStreamMessage::Write(payload) => {
+                            KeepAliveStreamMessage::Write { len, buf } => {
                                 if answer_tx
-                                    .send(KeepAliveStreamAnswer::Write(worker.write(&payload)))
+                                    .send(KeepAliveStreamAnswer::Write(worker.write(buf, len)))
                                     .is_err()
                                 {
                                     break;
@@ -152,6 +161,8 @@ impl KeepAliveStream {
             fd,
             message_tx,
             answer_rx,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
         })
     }
 }
@@ -172,17 +183,22 @@ impl AsFd for KeepAliveStream {
 }
 
 impl Read for KeepAliveStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn read(&mut self, out_buf: &mut [u8]) -> io::Result<usize> {
+        let len = out_buf.len();
+        // Move the buffer to avoid lifetime or ownership issues.
+        let read_buf = mem::take(&mut self.read_buf);
+
         self.message_tx
-            .send(KeepAliveStreamMessage::Read(buf.len()))
+            .send(KeepAliveStreamMessage::Read { len, buf: read_buf })
             .map_err(|e| {
                 io::Error::other(format!("Unable to send message to KeepAliveWorker: {e}"))
             })?;
 
         match self.answer_rx.recv() {
             Ok(KeepAliveStreamAnswer::Read(result)) => match result {
-                Ok((recv_buf, len)) => {
-                    buf[..len].copy_from_slice(&recv_buf[..len]);
+                Ok((buf, len)) => {
+                    self.read_buf = buf;
+                    out_buf[..len].copy_from_slice(&self.read_buf[..len]);
                     Ok(len)
                 }
                 Err(e) => Err(e),
@@ -198,15 +214,33 @@ impl Read for KeepAliveStream {
 }
 
 impl Write for KeepAliveStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    fn write(&mut self, in_buf: &[u8]) -> io::Result<usize> {
+        let len = in_buf.len();
+        if self.write_buf.len() < len {
+            self.write_buf.resize(len, 0);
+        }
+
+        self.write_buf[..len].copy_from_slice(in_buf);
+        // Move the buffer to avoid lifetime or ownership issues.
+        let write_buf = mem::take(&mut self.write_buf);
+
         self.message_tx
-            .send(KeepAliveStreamMessage::Write(Vec::from(buf)))
+            .send(KeepAliveStreamMessage::Write {
+                len,
+                buf: write_buf,
+            })
             .map_err(|e| {
                 io::Error::other(format!("Unable to send message to KeepAliveWorker: {e}"))
             })?;
 
         match self.answer_rx.recv() {
-            Ok(KeepAliveStreamAnswer::Write(result)) => result,
+            Ok(KeepAliveStreamAnswer::Write(result)) => match result {
+                Ok((buf, len)) => {
+                    self.write_buf = buf;
+                    Ok(len)
+                }
+                Err(e) => Err(e),
+            },
             Ok(a) => Err(io::Error::other(format!(
                 "Received unexpected answer: {a:?}. This is most likely a bug!",
             ))),
@@ -237,10 +271,14 @@ impl Write for KeepAliveStream {
 impl ReadVolatile for KeepAliveStream {
     fn read_volatile<B: BitmapSlice>(
         &mut self,
-        buf: &mut VolatileSlice<B>,
+        vs: &mut VolatileSlice<B>,
     ) -> result::Result<usize, VolatileMemoryError> {
+        let len = vs.len();
+        // Move the buffer to avoid lifetime or ownership issues.
+        let read_buf = mem::take(&mut self.read_buf);
+
         self.message_tx
-            .send(KeepAliveStreamMessage::Read(buf.len()))
+            .send(KeepAliveStreamMessage::Read { len, buf: read_buf })
             .map_err(|e| {
                 io::Error::other(format!("Unable to send message to KeepAliveWorker: {e}"))
             })
@@ -248,8 +286,9 @@ impl ReadVolatile for KeepAliveStream {
 
         match self.answer_rx.recv() {
             Ok(KeepAliveStreamAnswer::Read(result)) => match result {
-                Ok((recv_buf, len)) => {
-                    buf.copy_from(&recv_buf[..len]);
+                Ok((buf, len)) => {
+                    self.read_buf = buf;
+                    vs.copy_from(&self.read_buf[..len]);
                     Ok(len)
                 }
                 Err(e) => Err(VolatileMemoryError::IOError(e)),
@@ -267,21 +306,35 @@ impl ReadVolatile for KeepAliveStream {
 impl WriteVolatile for KeepAliveStream {
     fn write_volatile<B: BitmapSlice>(
         &mut self,
-        buf: &VolatileSlice<B>,
+        vs: &VolatileSlice<B>,
     ) -> result::Result<usize, VolatileMemoryError> {
-        let mut send_buf = vec![0u8; buf.len()];
-        buf.copy_to(&mut send_buf);
+        let len = vs.len();
+        if self.write_buf.len() < len {
+            self.write_buf.resize(len, 0);
+        }
+
+        let len = vs.copy_to(&mut self.write_buf[..len]);
+        // Move the buffer to avoid lifetime or ownership issues.
+        let write_buf = mem::take(&mut self.write_buf);
+
         self.message_tx
-            .send(KeepAliveStreamMessage::Write(send_buf))
+            .send(KeepAliveStreamMessage::Write {
+                len,
+                buf: write_buf,
+            })
             .map_err(|e| {
                 io::Error::other(format!("Unable to send message to KeepAliveWorker: {e}"))
             })
             .map_err(VolatileMemoryError::IOError)?;
 
         match self.answer_rx.recv() {
-            Ok(KeepAliveStreamAnswer::Write(result)) => {
-                result.map_err(VolatileMemoryError::IOError)
-            }
+            Ok(KeepAliveStreamAnswer::Write(result)) => match result {
+                Ok((buf, len)) => {
+                    self.write_buf = buf;
+                    Ok(len)
+                }
+                Err(e) => Err(VolatileMemoryError::IOError(e)),
+            },
             Ok(a) => Err(VolatileMemoryError::IOError(io::Error::other(format!(
                 "Received unexpected answer: {a:?}. This is most likely a bug!",
             )))),
