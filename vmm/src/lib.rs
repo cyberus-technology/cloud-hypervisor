@@ -1871,14 +1871,13 @@ impl Vmm {
         };
 
         // Set up the socket connection
-        let mut socket = if send_data_migration.connections.get() > 1 && !send_data_migration.local
-        {
-            migration_transport::send_migration_socket_with_keep_alive(
+        let mut socket = if send_data_migration.local {
+            migration_transport::send_migration_socket(
                 &send_data_migration.destination_url,
                 send_data_migration.tls_dir.as_deref(),
             )?
         } else {
-            migration_transport::send_migration_socket(
+            migration_transport::send_migration_socket_with_keep_alive(
                 &send_data_migration.destination_url,
                 send_data_migration.tls_dir.as_deref(),
             )?
