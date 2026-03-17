@@ -326,6 +326,8 @@ pub enum Status {
     Invalid,
     Ok,
     Error,
+    // TODO(keepalive): remove this status when gardenlinux-release-26-09-18 compatibility ends.
+    KeepAlive,
 }
 
 #[repr(C)]
@@ -351,6 +353,11 @@ impl Response {
 
     pub fn error() -> Self {
         Self::new(Status::Error, 0)
+    }
+
+    // TODO(keepalive): remove this constructor when gardenlinux-release-26-09-18 compatibility ends.
+    pub fn keep_alive() -> Self {
+        Self::new(Status::KeepAlive, 0)
     }
 
     pub fn status(&self) -> Status {
