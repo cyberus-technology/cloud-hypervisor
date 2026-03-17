@@ -199,8 +199,19 @@ impl Request {
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
         let mut request = Request::default();
-        fd.read_exact(Self::as_mut_slice(&mut request))
-            .map_err(MigratableError::MigrateSocket)?;
+
+        loop {
+            fd.read_exact(Self::as_mut_slice(&mut request))
+                .map_err(MigratableError::MigrateSocket)?;
+
+            // If we read a keep alive message, we throw it away and keep reading.
+            if request.command() == Command::KeepAlive {
+                request = Request::default();
+                continue;
+            }
+
+            break;
+        }
 
         Ok(request)
     }
