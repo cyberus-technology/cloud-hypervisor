@@ -2734,8 +2734,7 @@ impl Vmm {
             migrate_downtime_limit,
             postponed_lifecycle_event,
             return_if_cancelled_cb,
-            // Add to API in next commit, for now never skip zero pages.
-            false,
+            send_data_migration.skip_zero_pages,
         )?;
 
         info!("Entering downtime phase");

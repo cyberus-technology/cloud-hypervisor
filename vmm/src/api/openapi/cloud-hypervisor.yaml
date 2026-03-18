@@ -508,7 +508,7 @@ components:
           $ref: "#/components/schemas/VmConfig"
         state:
           type: string
-          enum: [Created, Running, Shutdown, Paused]
+          enum: [ Created, Running, Shutdown, Paused ]
         memory_actual_size:
           type: integer
           format: int64
@@ -967,7 +967,7 @@ components:
           default: true
         image_type:
           type: string
-          enum: [FixedVhd, Qcow2, Raw, Vhdx, Unknown]
+          enum: [ FixedVhd, Qcow2, Raw, Vhdx, Unknown ]
 
 
     NetConfig:
@@ -1108,7 +1108,7 @@ components:
           type: string
         mode:
           type: string
-          enum: ["Off", "Pty", "Tty", "File", "Socket", "Null"]
+          enum: [ "Off", "Pty", "Tty", "File", "Socket", "Null" ]
         iommu:
           type: boolean
           default: false
@@ -1122,7 +1122,7 @@ components:
           type: string
         mode:
           type: string
-          enum: ["Off", "Pty", "Tty", "File", "Null"]
+          enum: [ "Off", "Pty", "Tty", "File", "Null" ]
         iobase:
           type: integer
 
@@ -1332,6 +1332,8 @@ components:
           format: int64
           description: Total timeout for migration in milliseconds (0 = no limit)
           default: 0
+        skip_zero_pages:
+          type: boolean
 
     VmAddUserDevice:
       required:
