@@ -1332,6 +1332,8 @@ components:
           format: int64
           description: Total timeout for migration in milliseconds (0 = no limit)
           default: 0
+        skip-zero-pages:
+          type: boolean
 
     VmAddUserDevice:
       required:

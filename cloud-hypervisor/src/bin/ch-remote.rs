@@ -536,6 +536,11 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .get_one::<PathBuf>("tls-dir")
                     .cloned(),
                 wait_for_migration,
+                *matches
+                    .subcommand_matches("send-migration")
+                    .unwrap()
+                    .get_one::<bool>("skip-zero-pages")
+                    .unwrap(),
             );
 
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
@@ -1032,6 +1037,7 @@ fn receive_migration_data(url: String, tls_dir: Option<PathBuf>) -> String {
     serde_json::to_string(&receive_migration_data).unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_migration_data(
     url: String,
     local: bool,
@@ -1040,6 +1046,7 @@ fn send_migration_data(
     connections: NonZeroU32,
     tls_dir: Option<PathBuf>,
     keep_alive: bool,
+    skip_zero_pages: bool,
 ) -> String {
     let send_migration_data = vmm::api::VmSendMigrationData {
         destination_url: url,
@@ -1049,6 +1056,7 @@ fn send_migration_data(
         connections,
         tls_dir,
         keep_alive,
+        skip_zero_pages,
     };
 
     serde_json::to_string(&send_migration_data).unwrap()
@@ -1274,6 +1282,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
                     .long("local")
                     .num_args(0)
                     .action(ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("skip-zero-pages")
+                    .long("skip-zero-pages")
+                    .help("skip zero-filled pages when sending VM memory to the receiver")
+                    .num_args(0),
             )
             .arg(
                 Arg::new("tls-dir")
