@@ -2759,8 +2759,10 @@ impl Vmm {
         s.total_transferred_bytes += s.bytes_to_transmit;
         s.total_transferred_pages += s.pages_to_transmit;
 
+        let migration_duration = s.migration_start_time.elapsed();
         info!(
-            "Memory Migration finished: iter={},throttle={}%,size={}MiB,dirtyrate={}pps,bandwidth={:.2}MiBs,downtime(expected)={}ms",
+            "Memory Migration finished: took={}ms,iter={},throttle={}%,size={}MiB,dirtyrate={}pps,bandwidth={:.2}MiBs,downtime(expected)={}ms",
+            migration_duration.as_millis(),
             (s.iteration_duration - s.transmit_duration).as_millis(),
             vm.throttle_percent(),
             s.bytes_to_transmit.div_ceil(1024).div_ceil(1024),
