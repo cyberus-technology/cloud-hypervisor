@@ -886,6 +886,11 @@ fn main() {
 
     if cmd_arguments.get_flag("version") {
         println!("{} {}", env!("CARGO_BIN_NAME"), env!("BUILD_VERSION"));
+        println!(
+            "vm-migration protocol versions v{} and v{}",
+            vm_migration::protocol::PRIOR_PROTOCOL_VERSION,
+            vm_migration::protocol::CURRENT_PROTOCOL_VERSION
+        );
 
         if cmd_arguments.get_count("v") != 0 {
             println!("Enabled features: {:?}", vmm::feature_list());
