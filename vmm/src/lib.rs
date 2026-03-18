@@ -2233,7 +2233,11 @@ impl Vmm {
 
         match state {
             Established => match req.command() {
-                Command::Start => Ok(Started),
+                Command::Start => {
+                    let migration_protocol_version = req.sender_protocol_version()?;
+                    info!("Using migration protocol v{migration_protocol_version}");
+                    Ok(Started)
+                }
                 _ => invalid_command(),
             },
             Started => match req.command() {
@@ -2832,6 +2836,7 @@ impl Vmm {
         Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
             "Error starting migration (got bad response)"
         )))?;
+        info!("Using migration protocol v{CURRENT_PROTOCOL_VERSION}");
 
         return_if_cancelled_cb(&mut socket)?;
 

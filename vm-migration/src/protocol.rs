@@ -172,10 +172,6 @@ impl Request {
     }
 
     pub fn start() -> Self {
-        Self::new(Command::Start, 0)
-    }
-
-    pub fn start_with_version() -> Self {
         Self {
             command: Command::Start,
             command_headers: Self::encode_sender_version(CURRENT_PROTOCOL_VERSION),
@@ -224,6 +220,25 @@ impl Request {
     /// For `Start`, the first two bytes encode the sender protocol version.
     pub fn command_headers(&self) -> &[u8; 6] {
         &self.command_headers
+    }
+
+    /// Returns the sender protocol version from a `Start` request if it is supported.
+    pub fn sender_protocol_version(&self) -> Result<MigrationProtocolVersion, MigratableError> {
+        assert_eq!(
+            self.command(),
+            Command::Start,
+            "sender_protocol_version() must only be called for Start requests",
+        );
+
+        // The protocol version is stored in the first two header bytes, the remaining bytes are ignored.
+        let sender_version = u16::from_le_bytes([self.command_headers[0], self.command_headers[1]]);
+        if sender_version != PRIOR_PROTOCOL_VERSION && sender_version != CURRENT_PROTOCOL_VERSION {
+            return Err(MigratableError::MigrateReceive(anyhow!(
+                "Migration protocol version {sender_version} doesn't match supported versions: {PRIOR_PROTOCOL_VERSION}, {CURRENT_PROTOCOL_VERSION}"
+            )));
+        }
+
+        Ok(sender_version)
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
@@ -553,6 +568,16 @@ mod unit_tests {
             u16::from_le_bytes([request.command_headers()[0], request.command_headers()[1]]),
             1
         );
+    }
+    #[test]
+    fn test_sender_protocol_version_rejects_unsupported_version() {
+        let request = Request {
+            command: Command::Start,
+            command_headers: [2, 0, 0, 0, 0, 0],
+            length: 0,
+        };
+
+        request.sender_protocol_version().unwrap_err();
     }
 
     #[test]
