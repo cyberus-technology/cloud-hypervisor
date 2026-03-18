@@ -73,6 +73,18 @@
 //!    Source->>Destination: Complete
 //!    Destination-->>Source: OK
 //! ```
+//!
+//! ## Protocol Versioning
+//!
+//! `Start` carries the sender's migration protocol version.
+//! A zeroed version field is treated as legacy protocol `v0`.
+//!
+//! The destination validates that version and replies with a plain `OK` or
+//! `Error`.
+//!
+//! Only the current and immediately previous protocol versions are
+//! supported. Compatibility is one-way, from older protocol versions
+//! to newer ones.
 
 use std::io::{Read, Write};
 
@@ -124,15 +136,33 @@ pub enum Command {
     KeepAlive,
 }
 
+/// Migration protocol version used during the `Start` handshake.
+pub type MigrationProtocolVersion = u16;
+
+/// Newest migration protocol version sent by this implementation.
+pub const CURRENT_PROTOCOL_VERSION: MigrationProtocolVersion = 0;
+// TODO change to checked_sub once current version is > 0
+/// Oldest migration protocol version still accepted for backward compatibility.
+pub const PRIOR_PROTOCOL_VERSION: MigrationProtocolVersion =
+    CURRENT_PROTOCOL_VERSION.saturating_sub(1);
+
 #[repr(C)]
 #[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
 pub struct Request {
     command: Command,
-    padding: [u8; 6],
+    command_headers: [u8; 6],
     length: u64, // Length of payload for command excluding the Request struct
 }
 
 impl Request {
+    /// Encodes a sender protocol version into the `command_headers` bytes of a
+    /// `Start` request.
+    fn encode_sender_version(version: MigrationProtocolVersion) -> [u8; 6] {
+        let mut command_headers = [0; 6];
+        command_headers[..2].copy_from_slice(&version.to_le_bytes());
+        command_headers
+    }
+
     pub fn new(command: Command, length: u64) -> Self {
         Self {
             command,
@@ -143,6 +173,14 @@ impl Request {
 
     pub fn start() -> Self {
         Self::new(Command::Start, 0)
+    }
+
+    pub fn start_with_version() -> Self {
+        Self {
+            command: Command::Start,
+            command_headers: Self::encode_sender_version(CURRENT_PROTOCOL_VERSION),
+            length: 0,
+        }
     }
 
     pub fn state(length: u64) -> Self {
@@ -179,6 +217,13 @@ impl Request {
 
     pub fn length(&self) -> u64 {
         self.length
+    }
+
+    /// Returns the raw 6-byte command-specific header field.
+    ///
+    /// For `Start`, the first two bytes encode the sender protocol version.
+    pub fn command_headers(&self) -> &[u8; 6] {
+        &self.command_headers
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
@@ -494,7 +539,21 @@ impl MemoryRangeTable {
 
 #[cfg(test)]
 mod unit_tests {
-    use crate::protocol::{MemoryRange, MemoryRangeTable};
+    use crate::protocol::{Command, MemoryRange, MemoryRangeTable, Request};
+
+    #[test]
+    fn test_start_request_ignores_residual_command_headers_bytes() {
+        let request = Request {
+            command: Command::Start,
+            command_headers: [1, 0, 0xaa, 0xbb, 0xcc, 0xdd],
+            length: 0,
+        };
+
+        assert_eq!(
+            u16::from_le_bytes([request.command_headers()[0], request.command_headers()[1]]),
+            1
+        );
+    }
 
     #[test]
     fn test_memory_range_table_from_dirty_ranges_iter() {
