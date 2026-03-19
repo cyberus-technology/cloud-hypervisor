@@ -19,6 +19,7 @@ use std::mem::size_of;
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::{Duration, Instant};
 use std::{cmp, io, result, thread};
 
 use acpi_tables::sdt::Sdt;
@@ -756,30 +757,52 @@ impl VcpuState {
         }
     }
 
-    /// Blocks until the vCPU thread has acknowledged the signal. It retries to send
-    /// the signal every 10ms. Times out after 1000ms.
+    /// Blocks until the vCPU thread has acknowledged the signal.
+    ///
+    /// The signal is resent every 5ms until the vCPU thread acknowledges it.
+    /// A warning is emitted every 100ms while the acknowledgment is pending.
+    ///
+    /// The wait is bounded by a total timeout of 10 seconds. If the vCPU thread
+    /// does not acknowledge the signal within this time window,
+    /// [`Error::SignalAcknowledgeTimeout`] is returned.
     ///
     /// This is the counterpart of [`Self::signal_thread`].
     fn wait_until_signal_acknowledged(&self) -> Result<()> {
-        if let Some(_handle) = self.handle.as_ref() {
-            let mut count = 0;
-            loop {
-                if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-                // This is more effective than thread::yield_now() at
-                // avoiding a priority inversion with the vCPU thread
-                thread::sleep(std::time::Duration::from_millis(1));
-                count += 1;
-                if count >= 1000 {
-                    return Err(Error::SignalAcknowledgeTimeout);
-                } else if count % 10 == 0 {
-                    warn!("vCPU thread did not respond in {count}ms to signal - retrying");
-                    self.signal_thread();
-                }
-            }
+        if self.handle.is_none() {
+            return Ok(());
         }
-        Ok(())
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+        let retry_interval = Duration::from_millis(1);
+        let warn_interval = Duration::from_millis(100);
+
+        let mut next_warn = warn_interval;
+        loop {
+            if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            // Re-signal: it is cheap and idempotent.
+            self.signal_thread();
+
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::SignalAcknowledgeTimeout);
+            }
+
+            // Emit warning every 100ms
+            if elapsed >= next_warn {
+                warn!(
+                    "vCPU thread did not respond in {}ms to signal - retrying (timeout: {}s)",
+                    elapsed.as_millis(),
+                    timeout.as_secs(),
+                );
+                next_warn += warn_interval;
+            }
+
+            thread::sleep(retry_interval);
+        }
     }
 
     fn join_thread(&mut self) -> Result<()> {
