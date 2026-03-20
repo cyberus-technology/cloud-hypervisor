@@ -18,6 +18,7 @@ pub mod regs;
 #[cfg(feature = "tdx")]
 pub mod tdx;
 
+mod helpers;
 mod mpspec;
 mod mptable;
 mod smbios;
@@ -25,6 +26,7 @@ mod smbios;
 use std::arch::x86_64;
 use std::mem;
 
+use helpers::{deserialize_u32_hex, serialize_u32_hex};
 use hypervisor::arch::x86::{CPUID_FLAG_VALID_INDEX, CpuIdEntry};
 use hypervisor::{CpuVendor, HypervisorCpuError, HypervisorError};
 use linux_loader::loader::bootparam::{boot_params, setup_header};
