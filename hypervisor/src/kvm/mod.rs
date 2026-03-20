@@ -67,7 +67,8 @@ pub use x86_64::{CpuId, ExtendedControlRegisters, MsrEntries, VcpuKvmState};
 
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::{
-    CpuIdEntry, FpuState, LapicState, MsrEntry, NUM_IOAPIC_PINS, SpecialRegisters, XsaveState,
+    CpuIdEntry, FpuState, LapicState, MTRR_MSR_INDICES, MsrEntry, NUM_IOAPIC_PINS,
+    SpecialRegisters, XsaveState,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::{ClockData, MsrFilterRange};
@@ -1371,7 +1372,19 @@ impl hypervisor::Hypervisor for KvmHypervisor {
             "BUG: the length of the MSR Index LIST FAM wrapper does not coincide with
             the nmrs field value "
         );
-        Ok(list.as_slice().to_vec())
+        let mut msr_indices = list.as_slice().to_vec();
+
+        // KVM does not consistently include all guest-programmable MTRR MSRs in
+        // KVM_GET_MSR_INDEX_LIST, even though guest code can modify them during
+        // firmware and early boot. Add them to the vCPU MSR buffer so
+        // snapshot/restore preserves the guest's MTRR state.
+        msr_indices.extend(
+            MTRR_MSR_INDICES
+                .into_iter()
+                .filter(|idx| !list.as_slice().contains(idx)),
+        );
+
+        Ok(msr_indices)
     }
 
     #[cfg(target_arch = "aarch64")]
