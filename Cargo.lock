@@ -2805,7 +2805,9 @@ name = "vm-migration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arch",
  "itertools 0.14.0",
+ "libc",
  "rustls",
  "serde",
  "serde_json",

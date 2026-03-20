@@ -6,13 +6,18 @@ version = "0.1.0"
 
 [dependencies]
 anyhow = { workspace = true }
+arch = { path = "../arch" }
 itertools = { workspace = true }
+libc = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 vm-memory = { workspace = true, features = ["backend-atomic", "backend-mmap"] }
 zerocopy = { workspace = true, features = ["derive", "std"] }
+
+[dev-dependencies]
+vm-memory = { workspace = true, features = ["backend-bitmap"] }
 
 [lints]
 workspace = true

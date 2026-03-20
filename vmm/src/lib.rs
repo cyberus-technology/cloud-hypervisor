@@ -1438,8 +1438,8 @@ impl ReceiveMigrationState {
 #[derive(Debug)]
 enum SendMemoryThreadMessage {
     /// A chunk of memory that the thread should send to the receiving side of the live
-    /// migration.
-    Memory(MemoryRangeTable),
+    /// migration. The boolean indicates whether zero pages should be skipped.
+    Memory(MemoryRangeTable, bool),
     /// A synchronization point after each iteration of sending memory. That way the main
     /// thread knows when all memory is sent and acknowledged.
     Gate(Arc<Gate>),
@@ -1479,9 +1479,21 @@ fn vm_send_memory(
     guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     socket: &mut SocketStream,
     table: &MemoryRangeTable,
+    skip_zero_pages: bool,
 ) -> result::Result<(), MigratableError> {
     if table.regions().is_empty() {
         return Ok(());
+    }
+
+    // Allows us to conditionally replace the table reference.
+    let mut table = table;
+
+    let zero_page_removed_table;
+    if skip_zero_pages {
+        zero_page_removed_table = table.remove_zero_pages(guest_memory).map_err(|error| {
+            MigratableError::MigrateSend(anyhow!("Error during zero page scanning: {error:?}"))
+        })?;
+        table = &zero_page_removed_table;
     }
 
     Request::memory(table.length()).write_to(socket)?;
@@ -1581,13 +1593,13 @@ impl SendAdditionalConnections {
                     // TODO: Verify whether lock contention is negligible compared to network time.
                     let msg = recv.lock().unwrap().recv().unwrap();
                     match msg {
-                        SendMemoryThreadMessage::Memory(table) => {
+                        SendMemoryThreadMessage::Memory(table, skip_zero_pages) => {
                             if external_cancel.load(Ordering::Acquire) {
                                 // We drain all Memory messages and then wait for the Disconnect
                                 continue;
                             }
 
-                            match vm_send_memory(&guest_mem, &mut socket, &table) {
+                            match vm_send_memory(&guest_mem, &mut socket, &table, skip_zero_pages) {
                                 Ok(()) => {
                                     total_sent += table
                                         .ranges()
@@ -1699,6 +1711,7 @@ impl SendAdditionalConnections {
     fn send_memory(
         &self,
         table: &MemoryRangeTable,
+        skip_zero_pages: bool,
         socket: &mut SocketStream,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> std::result::Result<(), MigratableError> {
@@ -1712,7 +1725,7 @@ impl SendAdditionalConnections {
             for chunk in table.partition(Self::CHUNK_SIZE) {
                 return_if_cancelled_cb(socket)
                     .inspect_err(|_| info!("cancelling migration during memory iteration"))?;
-                vm_send_memory(&self.guest_memory, socket, &chunk)?;
+                vm_send_memory(&self.guest_memory, socket, &chunk, skip_zero_pages)?;
             }
             return Ok(());
         }
@@ -1720,7 +1733,7 @@ impl SendAdditionalConnections {
         // The chunk size is chosen to be big enough so that even very fast
         // links need some milliseconds to send it.
         'next_chunk: for chunk in table.partition(Self::CHUNK_SIZE) {
-            let mut chunk = SendMemoryThreadMessage::Memory(chunk);
+            let mut chunk = SendMemoryThreadMessage::Memory(chunk, skip_zero_pages);
             // The channel we put work into has a limited size. Thus it may happen that we have to
             // retry putting this chunk into it.
             'retry_chunk: loop {
@@ -2504,6 +2517,7 @@ impl Vmm {
         migrate_downtime_limit: Duration,
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
+        skip_zero_pages: bool,
     ) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut iteration_table;
         let total_memory_size_bytes = vm
@@ -2635,7 +2649,16 @@ impl Vmm {
 
             // Send the current dirty pages
             s.transmit_start_time = Instant::now();
-            mem_send.send_memory(&iteration_table, socket, return_if_cancelled_cb)?;
+            // Only skip zero pages on first iteration.
+            // If we skip dirty logged zero pages, we don't send newly zeroed pages to the
+            // destination.
+            let skip_zero_pages = s.iteration == 0 && skip_zero_pages;
+            mem_send.send_memory(
+                &iteration_table,
+                skip_zero_pages,
+                socket,
+                return_if_cancelled_cb,
+            )?;
             s.transmit_duration = s.transmit_start_time.elapsed();
 
             s.total_transferred_bytes += s.bytes_to_transmit;
@@ -2711,6 +2734,8 @@ impl Vmm {
             migrate_downtime_limit,
             postponed_lifecycle_event,
             return_if_cancelled_cb,
+            // Add to API in next commit, for now never skip zero pages.
+            false,
         )?;
 
         info!("Entering downtime phase");
@@ -2726,7 +2751,7 @@ impl Vmm {
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
         final_table.extend(iteration_table.clone());
-        mem_send.send_memory(&final_table, socket, return_if_cancelled_cb)?;
+        mem_send.send_memory(&final_table, false, socket, return_if_cancelled_cb)?;
 
         // Update statistics
         s.bytes_to_transmit = final_table.regions().iter().map(|range| range.length).sum();
