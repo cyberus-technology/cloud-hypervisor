@@ -104,6 +104,9 @@ pub enum MigratableError {
     #[error("Lifecycle operation skipped for disconnected component {0}")]
     DeviceDisconnected(String),
 
+    #[error("Failed to deserialize network data")]
+    DeserializeError(#[source] anyhow::Error),
+
     #[error("Error setting up a TLS-encrypted connection")]
     Tls(#[source] tls::TlsError),
 }
