@@ -404,9 +404,6 @@ mod permitted_architectural_msrs {
         const IA32_MC31_ADDR: u32 = 0x47e;
         const IA32_MC31_MISC: u32 = 0x47f;
 
-        const IA32_U_CET: u32 = 0x6a0;
-        const IA32_S_CET: u32 = 0x6a2;
-
         const IA32_TSC_DEADLINE: u32 = 0x6e0;
         const _IA32_TSC_DEADLINE_CPUID_CHECK: () =
             assert_not_denied_cpuid_feature::<24>(&Parameters {
@@ -464,7 +461,7 @@ mod permitted_architectural_msrs {
             register: CpuidReg::ECX,
         });
 
-        pub(super) const READ_WRITE_IA32_MSRS: [u32; 202] = [
+        pub(super) const READ_WRITE_IA32_MSRS: [u32; 200] = [
             IA32_TIME_STAMP_COUNTER,
             IA32_APIC_BASE,
             IA32_FEATURE_CONTROL,
@@ -641,8 +638,6 @@ mod permitted_architectural_msrs {
             IA32_MC31_STATUS,
             IA32_MC31_ADDR,
             IA32_MC31_MISC,
-            IA32_U_CET,
-            IA32_S_CET,
             IA32_TSC_DEADLINE,
             IA32_X2APIC_TPR,
             IA32_X2APIC_SIVR,
@@ -710,8 +705,8 @@ mod permitted_architectural_msrs {
     ///
     /// The MSRs listed here can be studied further in Table 2.2 in Section 2.1 of the Intel SDM
     /// Vol. 4 from October 2025
-    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 245] = const {
-        let mut permitted = [0u32; 245];
+    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 243] = const {
+        let mut permitted = [0u32; 243];
         let read_only_len = READ_ONLY_IA32_MSRS.len();
         let write_only_len = WRITE_ONLY_IA32_MSRS.len();
         let read_write_len = READ_WRITE_IA32_MSRS.len();
@@ -967,6 +962,11 @@ mod forbidden_architectural_msrs {
 
     // Disabled via CPUID for non-host CPU profiles
     const IA32_DS_AREA: (u32, u32) = (0x600, 0x600);
+
+    // U_CET and S_CET are disabled via CPUID
+    // TODO: Include compile time checks for that
+    const IA32_U_CET: (u32, u32) = (0x6a0, 0x6a0);
+    const IA32_S_CET: (u32, u32) = (0x6a2, 0x6a2);
 
     // TODO: IA32_TSC_DEADLINE should be available because the TSC_DEADLINE CPUID bit
     // is set by CHV unconditionally. The availability of this MSR probably needs to be
@@ -1270,7 +1270,7 @@ mod forbidden_architectural_msrs {
     const IA32_UARCH_MISC_CTL: (u32, u32) = (0x1b01, 0x1b01);
     /// A list of ARCHITECTURAL MSR register addresses that are forbidden for all non-host CPU profiles and also not
     /// considered MSR-based FEATURE indices by KVM.
-    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 226] = [
+    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 228] = [
         IA32_P5_MC_ADDR,
         IA32_P5_MC_TYPE,
         // TODO: Not sure about IA32_P5_MC_ADDR & IA32_P5_MC_TYPE
@@ -1422,6 +1422,8 @@ mod forbidden_architectural_msrs {
         IA32_RTIT_ADDR3_B,
         // Disabled via CPUID for non-host CPU profiles
         IA32_DS_AREA,
+        IA32_U_CET,
+        IA32_S_CET,
         // Disabled via CPUID for non-host CPU profiles
         IA32_PKRS,
         // Disabled via CPUID for non-host CPU profiles
