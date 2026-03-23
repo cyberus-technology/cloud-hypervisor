@@ -62,6 +62,9 @@ pub enum MigratableError {
     #[error("Failed to release a disk lock")]
     UnlockError(#[source] anyhow::Error),
 
+    #[error("Failed to deserialize network data")]
+    DeserializeError(#[source] anyhow::Error),
+
     #[error("TLS error")]
     Tls(#[from] tls::TlsError),
 }
