@@ -941,7 +941,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ZERO_CLEAR_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.7.1 Table 26-14 (Definitions of Primary VM-Exit Controls)",
                       bits_range: (26, 26),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                 },
                   ValueDefinition {
                       short:"ALLOWED_ZERO_CLEAR_UINV",
@@ -1082,7 +1082,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ONE_CLEAR_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.7.1 Table 26-14 (Definitions of Primary VM-Exit Controls)",
                       bits_range: (58, 58),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                 },
                   ValueDefinition {
                       short:"ALLOWED_ONE_CLEAR_UINV",
@@ -1215,7 +1215,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ZERO_LOAD_GUEST_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.8.1 Table 26-17. (Definitions of VM-Entry Controls)",
                       bits_range: (21, 21),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                   },
                   ValueDefinition {
                       short:"ALLOWED_ZERO_LOAD_PKRS",
@@ -1335,7 +1335,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ONE_LOAD_GUEST_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.8.1 Table 26-17. (Definitions of VM-Entry Controls)",
                       bits_range: (53, 53),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                   },
                   ValueDefinition {
                       short:"ALLOWED_ONE_LOAD_PKRS",
@@ -3126,7 +3126,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ZERO_CLEAR_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.7.1 Table 26-14 (Definitions of Primary VM-Exit Controls)",
                       bits_range: (26, 26),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                 },
                   ValueDefinition {
                       short:"ALLOWED_ZERO_CLEAR_UINV",
@@ -3266,7 +3266,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ONE_CLEAR_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.7.1 Table 26-14 (Definitions of Primary VM-Exit Controls)",
                       bits_range: (58, 58),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                 },
                   ValueDefinition {
                       short:"ALLOWED_ONE_CLEAR_UINV",
@@ -3398,7 +3398,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ZERO_LOAD_GUEST_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.8.1 Table 26-17. (Definitions of VM-Entry Controls)",
                       bits_range: (21, 21),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                   },
                   ValueDefinition {
                       short:"ALLOWED_ZERO_LOAD_PKRS",
@@ -3518,7 +3518,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       short:"ALLOWED_ONE_LOAD_GUEST_IA32_LBR_CTL",
                       description: "See Intel SDM Vol.3C Section 26.8.1 Table 26-17. (Definitions of VM-Entry Controls)",
                       bits_range: (53, 53),
-                      policy: ProfilePolicy::Inherit
+                      policy: ProfilePolicy::Static(0)
                   },
                   ValueDefinition {
                       short:"ALLOWED_ONE_LOAD_PKRS",
