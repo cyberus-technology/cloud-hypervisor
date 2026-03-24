@@ -1546,6 +1546,20 @@
       {
         "leaf": "0xd",
         "sub_leaf": {
+          "start": "0xd",
+          "end": "0xd"
+        },
+        "register": "EDX"
+      },
+      {
+        "replacements": "0x00000000",
+        "mask": "0x00000000"
+      }
+    ],
+    [
+      {
+        "leaf": "0xd",
+        "sub_leaf": {
           "start": "0xe",
           "end": "0xe"
         },
