@@ -39,7 +39,7 @@ use super::{
 /// a few of the short names and descriptions to be more inline with what is written in the
 /// aforementioned Intel manual. Finally we decided on a [`ProfilePolicy`] to be set for every
 /// single [`ValueDefinition`] and manually appended those.
-pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<176> = const {
+pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
     CpuidDefinitions([
         // =========================================================================================
         //                           Basic CPUID Information
@@ -2386,9 +2386,9 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<176> = const {
                 // MSR related
                 ValueDefinition {
                     short: "xcr0_ia32_xss",
-                    description: "XCR0.IA32_XSS (bit 8) used for IA32_XSS",
+                    description: "XCR0.IA32_XSS (bit 8) used for PT in IA32_XSS",
                     bits_range: (8, 8),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xcr0_pkru",
@@ -2568,7 +2568,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<176> = const {
                     short: "xss_pt",
                     description: "PT state, supported",
                     bits_range: (8, 8),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xcr0_bit9",
@@ -2758,7 +2758,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<176> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 10),
+                sub_leaf: RangeInclusive::new(5, 7),
                 register: CpuidReg::EAX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2771,7 +2771,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<176> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 10),
+                sub_leaf: RangeInclusive::new(5, 7),
                 register: CpuidReg::EBX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2784,7 +2784,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<176> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(5, 10),
+                sub_leaf: RangeInclusive::new(5, 7),
                 register: CpuidReg::ECX,
             },
             ValueDefinitions::new(&[
@@ -2808,7 +2808,112 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<176> = const {
                 },
             ]),
         ),
-        // We leave CET out of CPU profiles for the time being
+        // Disable PT for CPU profiles
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(8, 8),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-8-eax-pt-zero",
+                description: "This leaf has been zeroed out because PT state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(8, 8),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-8-ebx-pt-zero",
+                description: "This leaf has been zeroed out because PT state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(8, 8),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-8-ecx-pt-zero",
+                description: "This leaf has been zeroed out because PT state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(8, 8),
+                register: CpuidReg::EDX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-8-edx-pt-zero",
+                description: "This leaf has been zeroed out because PT state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(9, 10),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "xsave_sz",
+                description: "Size of save area for subleaf-N feature, in bytes",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Inherit,
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(9, 10),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "xsave_offset",
+                description: "Offset of save area for subleaf-N feature, in bytes",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Inherit,
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(9, 10),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[
+                ValueDefinition {
+                    short: "is_xss_bit",
+                    description: "Subleaf N describes an XSS bit, otherwise XCR0 bit",
+                    bits_range: (0, 0),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "compacted_xsave_64byte_aligned",
+                    description: "When compacted, subleaf-N feature XSAVE area is 64-byte aligned",
+                    bits_range: (1, 1),
+                    policy: ProfilePolicy::Inherit,
+                },
+                ValueDefinition {
+                    short: "xfd_faulting",
+                    description: "Indicates support for xfd faulting",
+                    bits_range: (2, 2),
+                    policy: ProfilePolicy::Inherit,
+                },
+            ]),
+        ), // We leave CET out of CPU profiles for the time being
         (
             Parameters {
                 leaf: 0xd,
