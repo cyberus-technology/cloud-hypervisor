@@ -39,7 +39,7 @@ use super::{
 /// a few of the short names and descriptions to be more inline with what is written in the
 /// aforementioned Intel manual. Finally we decided on a [`ProfilePolicy`] to be set for every
 /// single [`ValueDefinition`] and manually appended those.
-pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<168> = const {
+pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<172> = const {
     CpuidDefinitions([
         // =========================================================================================
         //                           Basic CPUID Information
@@ -2421,9 +2421,15 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<168> = const {
                     policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
+                    short: "xcr0_ia32_xss_LBR",
+                    description: "XCR0.IA32_XSS (bit 15) used for LBR in IA32_XSS",
+                    bits_range: (15, 15),
+                    policy: ProfilePolicy::Static(0),
+                },
+                ValueDefinition {
                     short: "xcr0_ia32_xss_bits_15_16",
                     description: "XCR0.IA32_XSS (bit 15 - 16) used for IA32_XSS",
-                    bits_range: (15, 16),
+                    bits_range: (16, 16),
                     policy: ProfilePolicy::Inherit,
                 },
                 // NOTE: AMX currently requires opt-in, even for the host CPU profile. We still inherit this value for profiles and modify this value at runtime if AMX is not enabled by the user.
@@ -2604,7 +2610,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<168> = const {
                     short: "xss_lbr",
                     description: "LBR state, supported",
                     bits_range: (15, 15),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xss_hwp",
@@ -2961,12 +2967,65 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<168> = const {
                 policy: ProfilePolicy::Static(0),
             }]),
         ),
+        // Disable LBR for CPU Profiles
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(15, 15),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-eax-lbr-zero",
+                description: "This leaf has been zeroed out because LBR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(15, 15),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-ebx-lbr-zero",
+                description: "This leaf has been zeroed out because LBR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(15, 15),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-ecx-lbr-zero",
+                description: "This leaf has been zeroed out because LBR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(15, 15),
+                register: CpuidReg::EDX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-edx-lbr-zero",
+                description: "This leaf has been zeroed out because LBR state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
         // NOTE: Sub-leaves 17 & 18 are AMX related and we will alter the adjustments corresponding to
         // the policy declared here at runtime for those values.
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(15, 63),
+                sub_leaf: RangeInclusive::new(16, 63),
                 register: CpuidReg::EAX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2979,7 +3038,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<168> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(15, 63),
+                sub_leaf: RangeInclusive::new(16, 63),
                 register: CpuidReg::EBX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2992,7 +3051,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<168> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(15, 63),
+                sub_leaf: RangeInclusive::new(16, 63),
                 register: CpuidReg::ECX,
             },
             ValueDefinitions::new(&[
