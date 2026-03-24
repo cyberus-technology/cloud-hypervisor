@@ -370,11 +370,13 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                     bits_range: (55,55),
                     policy: ProfilePolicy::Inherit
                 },
+                // This is only available for relatively recent kernels
+                // TODO: Revisit this policy
                 ValueDefinition {
                     short: "VM_ENTRY_HARDWARE_EXCEPTIONS",
                     description: "If 1, then software can use VM entry to deliver a hardware exception",
                     bits_range: (56, 56),
-                    policy: ProfilePolicy::Inherit
+                    policy: ProfilePolicy::Static(0)
                 }
         ])
             ),
