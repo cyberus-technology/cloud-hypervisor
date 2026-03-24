@@ -39,7 +39,7 @@ use super::{
 /// a few of the short names and descriptions to be more inline with what is written in the
 /// aforementioned Intel manual. Finally we decided on a [`ProfilePolicy`] to be set for every
 /// single [`ValueDefinition`] and manually appended those.
-pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
+pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<187> = const {
     CpuidDefinitions([
         // =========================================================================================
         //                           Basic CPUID Information
@@ -2397,10 +2397,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
                     policy: ProfilePolicy::Inherit,
                 },
                 ValueDefinition {
-                    short: "xcr0_ia32_xss_bits",
-                    description: "XCR0.IA32_XSS (bit 10) used for IA32_XSS",
+                    short: "xcr0_ia32_xss_pasid",
+                    description: "XCR0.IA32_XSS (bit 10) used for PASID in IA32_XSS",
                     bits_range: (10, 10),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xcr0_ia32_xss_cet",
@@ -2580,7 +2580,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
                     short: "xss_pasid",
                     description: "PASID state, supported",
                     bits_range: (10, 10),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xss_cet_u",
@@ -2864,7 +2864,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(9, 10),
+                sub_leaf: RangeInclusive::new(9, 9),
                 register: CpuidReg::EAX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2877,7 +2877,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(9, 10),
+                sub_leaf: RangeInclusive::new(9, 9),
                 register: CpuidReg::EBX,
             },
             ValueDefinitions::new(&[ValueDefinition {
@@ -2890,7 +2890,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
         (
             Parameters {
                 leaf: 0xd,
-                sub_leaf: RangeInclusive::new(9, 10),
+                sub_leaf: RangeInclusive::new(9, 9),
                 register: CpuidReg::ECX,
             },
             ValueDefinitions::new(&[
@@ -2913,7 +2913,61 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<183> = const {
                     policy: ProfilePolicy::Inherit,
                 },
             ]),
-        ), // We leave CET out of CPU profiles for the time being
+        ),
+        // Disable PASID for CPU profiles
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(10, 10),
+                register: CpuidReg::EAX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-10-eax-pasid-zero",
+                description: "This leaf has been zeroed out because PASID state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(10, 10),
+                register: CpuidReg::EBX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-10-ebx-pasid-zero",
+                description: "This leaf has been zeroed out because PASID state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(10, 10),
+                register: CpuidReg::ECX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-10-ecx-pasid-zero",
+                description: "This leaf has been zeroed out because PASID state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(10, 10),
+                register: CpuidReg::EDX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-10-edx-pasid-zero",
+                description: "This leaf has been zeroed out because PASID state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        // We leave CET out of CPU profiles for the time being
         (
             Parameters {
                 leaf: 0xd,
