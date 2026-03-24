@@ -39,7 +39,7 @@ use super::{
 /// a few of the short names and descriptions to be more inline with what is written in the
 /// aforementioned Intel manual. Finally we decided on a [`ProfilePolicy`] to be set for every
 /// single [`ValueDefinition`] and manually appended those.
-pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
+pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<168> = const {
     CpuidDefinitions([
         // =========================================================================================
         //                           Basic CPUID Information
@@ -2409,10 +2409,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
-                    short: "xcr0_ia32_xss_bits",
+                    short: "xcr0_ia32_xss_hdc",
                     description: "XCR0.IA32_XSS (bit 13) used for IA32_XSS",
                     bits_range: (13, 13),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xcr0_ia32_xss_UINTR",
@@ -2592,7 +2592,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     short: "xss_hdc",
                     description: "HDC state, supported",
                     bits_range: (13, 13),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "xss_uintr",
@@ -2855,6 +2855,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                 policy: ProfilePolicy::Static(0),
             }]),
         ),
+        // Disable HDC for CPU profiles
         (
             Parameters {
                 leaf: 0xd,
@@ -2862,10 +2863,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                 register: CpuidReg::EAX,
             },
             ValueDefinitions::new(&[ValueDefinition {
-                short: "xsave_sz",
-                description: "Size of save area for subleaf-N feature, in bytes",
+                short: "0xd-13-eax-edc-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
                 bits_range: (0, 31),
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             }]),
         ),
         (
@@ -2875,10 +2876,10 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                 register: CpuidReg::EBX,
             },
             ValueDefinitions::new(&[ValueDefinition {
-                short: "xsave_offset",
-                description: "Offset of save area for subleaf-N feature, in bytes",
+                short: "0xd-13-ebx-hdc-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
                 bits_range: (0, 31),
-                policy: ProfilePolicy::Inherit,
+                policy: ProfilePolicy::Static(0),
             }]),
         ),
         (
@@ -2887,26 +2888,25 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                 sub_leaf: RangeInclusive::new(13, 13),
                 register: CpuidReg::ECX,
             },
-            ValueDefinitions::new(&[
-                ValueDefinition {
-                    short: "is_xss_bit",
-                    description: "Subleaf N describes an XSS bit, otherwise XCR0 bit",
-                    bits_range: (0, 0),
-                    policy: ProfilePolicy::Inherit,
-                },
-                ValueDefinition {
-                    short: "compacted_xsave_64byte_aligned",
-                    description: "When compacted, subleaf-N feature XSAVE area is 64-byte aligned",
-                    bits_range: (1, 1),
-                    policy: ProfilePolicy::Inherit,
-                },
-                ValueDefinition {
-                    short: "xfd_faulting",
-                    description: "Indicates support for xfd faulting",
-                    bits_range: (2, 2),
-                    policy: ProfilePolicy::Inherit,
-                },
-            ]),
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-13-ecx-hdc-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
+        ),
+        (
+            Parameters {
+                leaf: 0xd,
+                sub_leaf: RangeInclusive::new(13, 13),
+                register: CpuidReg::EDX,
+            },
+            ValueDefinitions::new(&[ValueDefinition {
+                short: "0xd-13-edx-hdc-zero",
+                description: "This leaf has been zeroed out because CET state components are disabled",
+                bits_range: (0, 31),
+                policy: ProfilePolicy::Static(0),
+            }]),
         ),
         // We decided to disable UINTR for CPU profiles, hence we zero out these sub-leaves
         (
