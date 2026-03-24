@@ -429,13 +429,6 @@ mod permitted_architectural_msrs {
         const IA32_X2APIC_INIT_COUNT: u32 = 0x838;
         const IA32_X2APIC_DIV_CONF: u32 = 0x83e;
 
-        const IA32_XSS: u32 = 0xda0;
-        const _IA32_XSS_CPUID_CHECK: () = assert_not_denied_cpuid_feature::<3>(&Parameters {
-            leaf: 0xd,
-            sub_leaf: 1..=1,
-            register: CpuidReg::EAX,
-        });
-
         /// Extended Feature Enable
         const IA32_EFER: u32 = 0xc0000080;
 
@@ -461,7 +454,7 @@ mod permitted_architectural_msrs {
             register: CpuidReg::ECX,
         });
 
-        pub(super) const READ_WRITE_IA32_MSRS: [u32; 200] = [
+        pub(super) const READ_WRITE_IA32_MSRS: [u32; 199] = [
             IA32_TIME_STAMP_COUNTER,
             IA32_APIC_BASE,
             IA32_FEATURE_CONTROL,
@@ -652,7 +645,6 @@ mod permitted_architectural_msrs {
             IA32_X2APIC_LVT_ERROR,
             IA32_X2APIC_INIT_COUNT,
             IA32_X2APIC_DIV_CONF,
-            IA32_XSS,
             IA32_EFER,
             IA32_STAR,
             IA32_LSTAR,
@@ -705,8 +697,8 @@ mod permitted_architectural_msrs {
     ///
     /// The MSRs listed here can be studied further in Table 2.2 in Section 2.1 of the Intel SDM
     /// Vol. 4 from October 2025
-    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 243] = const {
-        let mut permitted = [0u32; 243];
+    pub(in crate::x86_64) const PERMITTED_IA32_MSRS: [u32; 242] = const {
+        let mut permitted = [0u32; 242];
         let read_only_len = READ_ONLY_IA32_MSRS.len();
         let write_only_len = WRITE_ONLY_IA32_MSRS.len();
         let read_write_len = READ_WRITE_IA32_MSRS.len();
@@ -1105,6 +1097,21 @@ mod forbidden_architectural_msrs {
     const IA32_COPY_PLATFORM_TO_LOCAL: (u32, u32) = (0xd92, 0xd92);
 
     const IA32_PASID: (u32, u32) = (0xd93, 0xd93);
+
+    /*
+    IA32_XSS is a bit problematic: Only never kernels will report it via
+    KVM_GET_MSR_INDEX_LIST, but CPUID 0xd.0x1.EAX[3] reports that this MSR
+    exists.
+
+    In order for CPU profiles generated with recent kernels to work with
+    deployments operating with older kernels, we decide to forbid this MSR
+    for now even though CPUID indicates that it is available to the guest.
+
+    We consider this OK because we have disabled every single IA32_XSS
+    related state component in the 0xd CPUID leaves, hence there is no
+    reason for the guest to want to use this.
+    */
+    const IA32_XSS: (u32, u32) = (0xda0, 0xda0);
     // Disabled via CPUID for non-host CPU profiles
     const IA32_PKG_HDC_CTL: (u32, u32) = (0xdb0, 0xdb0);
 
@@ -1270,7 +1277,7 @@ mod forbidden_architectural_msrs {
     const IA32_UARCH_MISC_CTL: (u32, u32) = (0x1b01, 0x1b01);
     /// A list of ARCHITECTURAL MSR register addresses that are forbidden for all non-host CPU profiles and also not
     /// considered MSR-based FEATURE indices by KVM.
-    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 228] = [
+    pub(in crate::x86_64) const FORBIDDEN_IA32_MSR_RANGES: [(u32, u32); 229] = [
         IA32_P5_MC_ADDR,
         IA32_P5_MC_TYPE,
         // TODO: Not sure about IA32_P5_MC_ADDR & IA32_P5_MC_TYPE
@@ -1520,6 +1527,7 @@ mod forbidden_architectural_msrs {
         // Disabled via CPUID for non-host CPU profiles
         IA32_COPY_PLATFORM_TO_LOCAL,
         IA32_PASID,
+        IA32_XSS,
         // Disabled via CPUID for non-host CPU profiles
         IA32_PKG_HDC_CTL,
         // Disabled via CPUID for non-host CPU profiles
