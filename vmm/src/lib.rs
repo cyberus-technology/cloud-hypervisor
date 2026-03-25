@@ -1467,12 +1467,9 @@ fn vm_send_memory(
     table.write_to(socket)?;
     // And then the memory itself
     send_memory_regions(guest_memory, table, socket)?;
-    Response::read_from(socket)?.ok_or_abandon(
-        socket,
-        MigratableError::MigrateSend(anyhow!(
-            "Error during dirty memory migration (got bad response)"
-        )),
-    )?;
+    Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+        "Error during dirty memory migration (got bad response)"
+    )))?;
 
     Ok(())
 }
@@ -2545,10 +2542,8 @@ impl Vmm {
             {
                 warn!("Migration timed out after {migration_timeout:?}");
                 Request::abandon().write_to(socket)?;
-                Response::read_from(socket)?.ok_or_abandon(
-                    socket,
-                    MigratableError::MigrateSend(anyhow!("Migration timed out")),
-                )?;
+                Response::read_from(socket)?
+                    .ok_or_error(MigratableError::MigrateSend(anyhow!("Migration timed out")))?;
             }
 
             // We always autoconverge.
@@ -2765,10 +2760,9 @@ impl Vmm {
 
         // Start the migration
         Request::start().write_to(&mut socket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error starting migration (got bad response)")),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error starting migration (got bad response)"
+        )))?;
 
         return_if_cancelled_cb(&mut socket)?;
 
@@ -2844,12 +2838,9 @@ impl Vmm {
         socket
             .write_all(&config_data)
             .map_err(MigratableError::MigrateSocket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!(
-                "Error during config migration (got bad response)"
-            )),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error during config migration (got bad response)"
+        )))?;
 
         return_if_cancelled_cb(&mut socket)?;
 
@@ -2901,12 +2892,9 @@ impl Vmm {
         socket
             .write_all(&snapshot_data)
             .map_err(MigratableError::MigrateSocket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!(
-                "Error during state migration (got bad response)"
-            )),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error during state migration (got bad response)"
+        )))?;
         // Complete the migration
         // At this step, the receiving VMM will acquire disk locks again.
 
@@ -2914,10 +2902,9 @@ impl Vmm {
         return_if_cancelled_cb(&mut socket)?;
 
         Request::complete().write_to(&mut socket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error completing migration (got bad response)")),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error completing migration (got bad response)"
+        )))?;
 
         // Record downtime
         s.downtime_duration = s.downtime_start_time.elapsed();
