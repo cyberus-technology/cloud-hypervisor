@@ -109,6 +109,16 @@ paths:
         405:
           description: The VM instance could not resume because it is not paused.
 
+  /vm.post-migration-announce:
+    put:
+      summary: Trigger post-migration announcements for a running VM instance.
+      operationId: postMigrationAnnounceVM
+      responses:
+        204:
+          description: The VM instance successfully triggered post-migration announcements.
+        500:
+          description: The VM instance could not trigger post-migration announcements because it is not running.
+
   /vm.shutdown:
     put:
       summary: Shut the VM instance down.
