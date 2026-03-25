@@ -3153,14 +3153,23 @@ impl Vmm {
 
         match migration_res {
             Ok(()) => {
-                self.vm = MaybeVmOwnership::None;
-                drop(vm);
-
                 {
                     let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
                     lock.as_mut()
                         .expect("live migration should be ongoing")
                         .mark_as_finished();
+                }
+
+                // Give VMM ownership to delete, i.e., gracefully clean up
+                // threads and free resources.
+                self.vm = MaybeVmOwnership::Vmm(vm);
+                match self.vm_delete() {
+                    Ok(()) => {
+                        info!("VM deleted after successful migration");
+                    }
+                    Err(e) => {
+                        error!("Failed to delete VM after successful migration: {e}");
+                    }
                 }
 
                 if migration_cfg.keep_alive {
@@ -3239,7 +3248,7 @@ impl Vmm {
                         warn!("Unknown VMM loop event: {event}");
                     }
                     EpollDispatch::Exit => {
-                        info!("VM exit event");
+                        info!("VMM exit event");
                         // Consume the event.
                         self.exit_evt.read().map_err(Error::EventFdRead)?;
                         self.vmm_shutdown().map_err(Error::VmmShutdown)?;
