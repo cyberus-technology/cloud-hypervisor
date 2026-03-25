@@ -79,7 +79,9 @@ use std::io::{Read, Write};
 use anyhow::anyhow;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes, little_endian};
+use zerocopy::{
+    Immutable, IntoBytes, KnownLayout, TryFromBytes, Unalign, Unaligned, little_endian,
+};
 
 use crate::MigratableError;
 use crate::bitpos_iterator::BitposIteratorExt;
@@ -125,9 +127,9 @@ pub enum Command {
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
+#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned)]
 pub struct Request {
-    command: Command,
+    command: Unalign<Command>,
     padding: [u8; 6],
     length: little_endian::U64, // Length of payload for command excluding the Request struct
 }
@@ -135,7 +137,7 @@ pub struct Request {
 impl Request {
     pub fn new(command: Command, length: u64) -> Self {
         Self {
-            command,
+            command: Unalign::new(command),
             length: length.into(),
             ..Default::default()
         }
@@ -174,7 +176,7 @@ impl Request {
     }
 
     pub fn command(&self) -> Command {
-        self.command
+        self.command.get()
     }
 
     pub fn length(&self) -> u64 {
@@ -182,21 +184,17 @@ impl Request {
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
-        /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
-        #[repr(C, align(2))]
-        struct RequestBuffer([u8; const { size_of::<Request>() }]);
         const _: () = const {
             // Check that the alignment of the buffer matches `Self`.
-            assert!(align_of::<RequestBuffer>() == align_of::<Request>());
+            assert!(align_of::<[u8; const { size_of::<Request>() }]>() == align_of::<Request>());
         };
-        let mut buffer = RequestBuffer([0; size_of::<Self>()]);
-        let RequestBuffer(request) = &mut buffer;
+        let mut request = [0; size_of::<Self>()];
 
         loop {
-            fd.read_exact(request)
+            fd.read_exact(&mut request)
                 .map_err(MigratableError::MigrateSocket)?;
 
-            let request = Self::try_mut_from_bytes(request)
+            let request = Self::try_mut_from_bytes(&mut request)
                 .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
 
             // If we read a keep alive message, we throw it away and keep reading.
@@ -225,9 +223,9 @@ pub enum Status {
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
+#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned)]
 pub struct Response {
-    status: Status,
+    status: Unalign<Status>,
     padding: [u8; 6],
     length: little_endian::U64, // Length of payload for command excluding the Response struct
 }
@@ -235,7 +233,7 @@ pub struct Response {
 impl Response {
     pub fn new(status: Status, length: u64) -> Self {
         Self {
-            status,
+            status: Unalign::new(status),
             length: length.into(),
             ..Default::default()
         }
@@ -254,7 +252,7 @@ impl Response {
     }
 
     pub fn status(&self) -> Status {
-        self.status
+        self.status.get()
     }
 
     pub fn length(&self) -> u64 {
@@ -262,21 +260,17 @@ impl Response {
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigratableError> {
-        /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
-        #[repr(C, align(2))]
-        struct ResponseBuffer([u8; const { size_of::<Response>() }]);
         const _: () = const {
             // Check that the alignment of the buffer matches `Self`.
-            assert!(align_of::<ResponseBuffer>() == align_of::<Response>());
+            assert!(align_of::<[u8; const { size_of::<Response>() }]>() == align_of::<Response>());
         };
-        let mut buffer = ResponseBuffer([0; size_of::<Self>()]);
-        let ResponseBuffer(response) = &mut buffer;
+        let mut response = [0; size_of::<Self>()];
 
         loop {
-            fd.read_exact(response)
+            fd.read_exact(&mut response)
                 .map_err(MigratableError::MigrateSocket)?;
 
-            let response = Self::try_mut_from_bytes(response)
+            let response = Self::try_mut_from_bytes(&mut response)
                 .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
 
             // If we read a keep alive message, we throw it away and keep reading.
@@ -296,7 +290,7 @@ impl Response {
     where
         T: Read + Write,
     {
-        if self.status != Status::Ok {
+        if self.status() != Status::Ok {
             Request::abandon().write_to(fd)?;
             Response::read_from(fd)?;
             return Err(error);
@@ -508,11 +502,7 @@ mod unit_tests {
 
     #[test]
     fn test_de_serialize_request() {
-        let request = Request {
-            command: Command::Start,
-            padding: [0; 6],
-            length: 1.into(),
-        };
+        let request = Request::new(Command::Start, 1);
         let bytes = [
             1, 0, // Command
             0, 0, 0, 0, 0, 0, // Padding
@@ -523,20 +513,17 @@ mod unit_tests {
         assert!(matches!(
             Request::try_ref_from_bytes(&bytes),
             Ok(Request {
-                command: Command::Start,
+                command,
                 padding: [0, 0, 0, 0, 0, 0],
                 length,
-            }) if length.get() == 1
+            }) if command.get() == Command::Start
+                && length.get() == 1
         ));
     }
 
     #[test]
     fn test_de_serialize_response() {
-        let response = Response {
-            status: Status::Ok,
-            padding: [0; 6],
-            length: 1.into(),
-        };
+        let response = Response::new(Status::Ok, 1);
         let bytes = [
             1, 0, // Status
             0, 0, 0, 0, 0, 0, // Padding
@@ -547,10 +534,11 @@ mod unit_tests {
         assert!(matches!(
             Response::try_ref_from_bytes(&bytes),
             Ok(Response {
-                status: Status::Ok,
+                status,
                 padding: [0, 0, 0, 0, 0, 0],
                 length,
-            }) if length.get() == 1
+            }) if status.get() == Status::Ok
+                && length.get() == 1
         ));
     }
 
