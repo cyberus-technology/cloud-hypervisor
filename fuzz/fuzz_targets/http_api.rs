@@ -312,6 +312,10 @@ impl RequestHandler for StubApiRequestHandler {
     fn vm_cancel_migration(&mut self) -> Result<(), MigratableError> {
         Ok(())
     }
+
+    fn vm_post_migration_announce(&mut self) -> Result<(), VmError> {
+        Ok(())
+    }
 }
 
 fn http_receiver_stub(exit_evt: EventFd, api_evt: EventFd, api_receiver: Receiver<ApiRequest>) {
