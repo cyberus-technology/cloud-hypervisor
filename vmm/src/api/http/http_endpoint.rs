@@ -54,8 +54,8 @@ use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, DeviceConfig, NetConfig, VmAddDevice, VmAddFs,
     VmAddGenericVhostUser, VmAddNet, VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot,
     VmCancelMigration, VmConfig, VmCounters, VmDelete, VmDiskMirrorCancel, VmDiskMirrorComplete,
-    VmDiskMirrorStart, VmDiskMirrorStatus, VmNmi, VmPause, VmPowerButton, VmReboot,
-    VmReceiveMigration, VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk,
+    VmDiskMirrorStart, VmDiskMirrorStatus, VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton,
+    VmReboot, VmReceiveMigration, VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk,
     VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::RestoreConfig;
@@ -473,6 +473,7 @@ vm_action_put_handler!(VmShutdown);
 vm_action_put_handler!(VmReboot);
 vm_action_put_handler!(VmPause);
 vm_action_put_handler!(VmResume);
+vm_action_put_handler!(VmPostMigrationAnnounce);
 vm_action_put_handler!(VmPowerButton);
 vm_action_put_handler!(VmNmi);
 vm_action_put_handler!(VmCancelMigration);

@@ -119,6 +119,7 @@ trait DBusApi1 {
     fn vm_receive_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_send_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_resume(&self) -> zbus::Result<()>;
+    fn vm_post_migration_announce(&self) -> zbus::Result<()>;
     fn vm_shutdown(&self) -> zbus::Result<()>;
     fn vm_snapshot(&self, vm_snapshot_config: &str) -> zbus::Result<()>;
 }
@@ -276,6 +277,11 @@ impl<'a> DBusApi1ProxyBlocking<'a> {
         self.vm_resume().map_err(Error::DBusApiClient)
     }
 
+    fn api_vm_post_migration_announce(&self) -> ApiResult {
+        self.vm_post_migration_announce()
+            .map_err(Error::DBusApiClient)
+    }
+
     fn api_vm_shutdown(&self) -> ApiResult {
         self.vm_shutdown().map_err(Error::DBusApiClient)
     }
@@ -308,6 +314,10 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
             .map_err(Error::HttpApiClient),
         Some("resume") => {
             simple_api_command(socket, "PUT", "resume", None).map_err(Error::HttpApiClient)
+        }
+        Some("post-migration-announce") => {
+            simple_api_command(socket, "PUT", "post-migration-announce", None)
+                .map_err(Error::HttpApiClient)
         }
         Some("power-button") => {
             simple_api_command(socket, "PUT", "power-button", None).map_err(Error::HttpApiClient)
@@ -585,6 +595,7 @@ fn dbus_api_do_command(matches: &ArgMatches, proxy: &DBusApi1ProxyBlocking<'_>) 
         Some("delete") => proxy.api_vm_delete(),
         Some("shutdown-vmm") => proxy.api_vmm_shutdown(),
         Some("resume") => proxy.api_vm_resume(),
+        Some("post-migration-announce") => proxy.api_vm_post_migration_announce(),
         Some("power-button") => proxy.api_vm_power_button(),
         Some("reboot") => proxy.api_vm_reboot(),
         Some("pause") => proxy.api_vm_pause(),
@@ -1106,6 +1117,7 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
         Command::new("nmi").about("Trigger NMI"),
         Command::new("pause").about("Pause the VM"),
         Command::new("ping").about("Ping the VMM to check for API server availability"),
+        Command::new("post-migration-announce").about("Announce completion of VM migration"),
         Command::new("power-button").about("Trigger a power button in the VM"),
         Command::new("reboot").about("Reboot the VM"),
         Command::new("receive-migration")

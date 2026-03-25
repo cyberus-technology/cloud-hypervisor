@@ -3513,6 +3513,15 @@ impl Vm {
         self.device_manager.lock().unwrap().cancel_block_mirrors();
     }
 
+    /// Triggers device announcements without changing the VM lifecycle.
+    pub fn post_migration_announce(&self) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .post_migration_announce()
+            .map_err(Error::DeviceManager)
+    }
+
     pub fn device_manager(&self) -> &Arc<Mutex<DeviceManager>> {
         &self.device_manager
     }

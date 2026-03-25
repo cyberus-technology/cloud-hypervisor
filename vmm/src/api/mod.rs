@@ -116,6 +116,10 @@ pub enum ApiError {
     #[error("The VM could not resume")]
     VmResume(#[source] VmError),
 
+    /// The VM post-migration announcement could not be sent.
+    #[error("The VM post-migration announcement failed")]
+    VmPostMigrationAnnounce(#[source] VmError),
+
     /// The VM could not shutdown.
     #[error("The VM could not shutdown")]
     VmShutdown(#[source] VmError),
@@ -980,6 +984,8 @@ pub trait RequestHandler {
     fn vm_pause(&mut self) -> Result<(), VmError>;
 
     fn vm_resume(&mut self) -> Result<(), VmError>;
+
+    fn vm_post_migration_announce(&mut self) -> Result<(), VmError>;
 
     fn vm_snapshot(&mut self, destination_url: &str) -> Result<(), VmError>;
 
@@ -2203,6 +2209,39 @@ impl ApiAction for VmResume {
             let response = vmm
                 .vm_resume()
                 .map_err(ApiError::VmResume)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmPostMigrationAnnounce;
+
+impl ApiAction for VmPostMigrationAnnounce {
+    type RequestBody = ();
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmPostMigrationAnnounce");
+
+            let response = vmm
+                .vm_post_migration_announce()
+                .map_err(ApiError::VmPostMigrationAnnounce)
                 .map(|_| ApiResponsePayload::Empty);
 
             response_sender

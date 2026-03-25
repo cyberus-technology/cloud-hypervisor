@@ -34,8 +34,9 @@ use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
     VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
     VmDelete, VmDiskMirrorCancel, VmDiskMirrorComplete, VmDiskMirrorStart, VmDiskMirrorStatus,
-    VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize,
-    VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
+    VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton, VmReboot, VmReceiveMigration,
+    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
+    VmShutdown, VmSnapshot,
 };
 use crate::config::ValidationError;
 use crate::device_manager::DeviceManagerError;
@@ -382,6 +383,10 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
     r.routes.insert(
         endpoint!("/vm.cancel-migration"),
         Box::new(VmActionHandler::new(&VmCancelMigration)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.post-migration-announce"),
+        Box::new(VmActionHandler::new(&VmPostMigrationAnnounce)),
     );
     r.routes.insert(
         endpoint!("/vm.shutdown"),

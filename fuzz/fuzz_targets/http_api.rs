@@ -105,6 +105,10 @@ impl RequestHandler for StubApiRequestHandler {
         Ok(())
     }
 
+    fn vm_post_migration_announce(&mut self) -> Result<(), VmError> {
+        Ok(())
+    }
+
     fn vm_snapshot(&mut self, _: &str) -> Result<(), VmError> {
         Ok(())
     }

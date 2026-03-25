@@ -242,6 +242,10 @@ pub enum DeviceManagerError {
     #[error("TCP mode is not supported for the virtio console")]
     UnsupportedTcpConsole,
 
+    /// Failed to trigger a device's post-migration announcements.
+    #[error("Failed to trigger post-migration announcements")]
+    PostMigrationAnnounce(#[source] io::Error),
+
     /// Cannot create virtio-rng device
     #[error("Cannot create virtio-rng device")]
     CreateVirtioRng(#[source] io::Error),
@@ -6459,6 +6463,19 @@ impl DeviceManager {
         self.find_block_device(device_id)?
             .cancel_mirror()
             .map_err(DeviceManagerError::BlockMirrorCancel)
+    }
+
+    /// Triggers announcements through each device's existing backend.
+    pub fn post_migration_announce(&self) -> DeviceManagerResult<()> {
+        for device in &self.virtio_devices {
+            device
+                .virtio_device
+                .lock()
+                .unwrap()
+                .post_migration_announce()
+                .map_err(DeviceManagerError::PostMigrationAnnounce)?;
+        }
+        Ok(())
     }
 
     /// Returns a list of devices for which a boot index was configured.

@@ -140,6 +140,18 @@ paths:
         409:
           description: The operation conflicts with the current state of the VM.
 
+  /vm.post-migration-announce:
+    put:
+      summary: Trigger post-migration announcements for a running VM instance.
+      operationId: postMigrationAnnounceVM
+      responses:
+        204:
+          description: The VM accepted the announcement request.
+        409:
+          description: The operation conflicts with the current state of the VM.
+        500:
+          description: The VM is not running or the announcement failed.
+
   /vm.shutdown:
     put:
       summary: Shut the VM instance down.

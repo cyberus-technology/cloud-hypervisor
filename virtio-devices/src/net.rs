@@ -860,6 +860,24 @@ impl VirtioDevice for Net {
         self.common.ack_features(value);
     }
 
+    fn post_migration_announce(&mut self) -> io::Result<()> {
+        let mut host_announce = VirtioNetHostAnnounceOps::new(
+            self.build_rarp_announce(),
+            self.taps.clone().into_boxed_slice(),
+        );
+        let _ = host_announce.send_announce();
+
+        let has_ctrl_worker = self.common.workers.is_some()
+            && self.common.feature_acked(VIRTIO_NET_F_CTRL_VQ.into())
+            && !self.common.queue_evts.len().is_multiple_of(2);
+        if has_ctrl_worker {
+            self.announce.pending.store(true, Ordering::Release);
+            self.announce.generation.fetch_add(1, Ordering::Release);
+            self.announce.evt.write(1)?;
+        }
+        Ok(())
+    }
+
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let mut config = self.config;
         config.status = self.guest_visible_status();

@@ -2664,6 +2664,19 @@ impl RequestHandler for Vmm {
         }
     }
 
+    fn vm_post_migration_announce(&mut self) -> result::Result<(), VmError> {
+        match self.vm {
+            VmOwnership::Owned(ref vm) => {
+                if vm.get_state() != VmState::Running {
+                    return Err(VmError::VmNotRunning);
+                }
+                vm.post_migration_announce()
+            }
+            VmOwnership::Migration { .. } => Err(VmError::VmMigrating),
+            VmOwnership::None => Err(VmError::VmNotRunning),
+        }
+    }
+
     fn vm_snapshot(&mut self, destination_url: &str) -> result::Result<(), VmError> {
         match self.vm {
             VmOwnership::Owned(ref mut vm) => {
@@ -3867,6 +3880,10 @@ mod tests {
         assert!(matches!(vmm.vm_resume(), Err(VmError::VmNotCreated)));
         assert!(matches!(vmm.vm_power_button(), Err(VmError::VmNotCreated)));
         assert!(matches!(vmm.vm_shutdown(), Err(VmError::VmNotCreated)));
+        assert!(matches!(
+            vmm.vm_post_migration_announce(),
+            Err(VmError::VmNotRunning)
+        ));
 
         vmm.vm_create(create_dummy_vm_config()).unwrap();
 
@@ -3874,6 +3891,10 @@ mod tests {
         assert!(matches!(vmm.vm_resume(), Err(VmError::VmNotRunning)));
         assert!(matches!(vmm.vm_power_button(), Err(VmError::VmNotRunning)));
         assert!(matches!(vmm.vm_shutdown(), Err(VmError::VmNotRunning)));
+        assert!(matches!(
+            vmm.vm_post_migration_announce(),
+            Err(VmError::VmNotRunning)
+        ));
     }
 
     #[test]
