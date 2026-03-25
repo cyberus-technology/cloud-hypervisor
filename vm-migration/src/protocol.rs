@@ -79,7 +79,7 @@ use std::io::{Read, Write};
 use anyhow::anyhow;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes, little_endian};
 
 use crate::MigratableError;
 use crate::bitpos_iterator::BitposIteratorExt;
@@ -113,15 +113,15 @@ use crate::bitpos_iterator::BitposIteratorExt;
 )]
 pub enum Command {
     #[default]
-    Invalid,
-    Start,
-    Config,
-    State,
-    Memory,
-    Complete,
-    Abandon,
-    MemoryFd,
-    KeepAlive,
+    Invalid = 0_u16.to_le(),
+    Start = 1_u16.to_le(),
+    Config = 2_u16.to_le(),
+    State = 3_u16.to_le(),
+    Memory = 4_u16.to_le(),
+    Complete = 5_u16.to_le(),
+    Abandon = 6_u16.to_le(),
+    MemoryFd = 7_u16.to_le(),
+    KeepAlive = 8_u16.to_le(),
 }
 
 #[repr(C)]
@@ -129,14 +129,14 @@ pub enum Command {
 pub struct Request {
     command: Command,
     padding: [u8; 6],
-    length: u64, // Length of payload for command excluding the Request struct
+    length: little_endian::U64, // Length of payload for command excluding the Request struct
 }
 
 impl Request {
     pub fn new(command: Command, length: u64) -> Self {
         Self {
             command,
-            length,
+            length: length.into(),
             ..Default::default()
         }
     }
@@ -178,12 +178,12 @@ impl Request {
     }
 
     pub fn length(&self) -> u64 {
-        self.length
+        self.length.get()
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
         /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
-        #[repr(C, align(8))]
+        #[repr(C, align(2))]
         struct RequestBuffer([u8; const { size_of::<Request>() }]);
         const _: () = const {
             // Check that the alignment of the buffer matches `Self`.
@@ -218,10 +218,10 @@ impl Request {
 #[derive(Copy, Clone, PartialEq, Eq, Default, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
 pub enum Status {
     #[default]
-    Invalid,
-    Ok,
-    Error,
-    KeepAlive,
+    Invalid = 0_u16.to_le(),
+    Ok = 1_u16.to_le(),
+    Error = 2_u16.to_le(),
+    KeepAlive = 3_u16.to_le(),
 }
 
 #[repr(C)]
@@ -229,14 +229,14 @@ pub enum Status {
 pub struct Response {
     status: Status,
     padding: [u8; 6],
-    length: u64, // Length of payload for command excluding the Response struct
+    length: little_endian::U64, // Length of payload for command excluding the Response struct
 }
 
 impl Response {
     pub fn new(status: Status, length: u64) -> Self {
         Self {
             status,
-            length,
+            length: length.into(),
             ..Default::default()
         }
     }
@@ -258,12 +258,12 @@ impl Response {
     }
 
     pub fn length(&self) -> u64 {
-        self.length
+        self.length.get()
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigratableError> {
         /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
-        #[repr(C, align(8))]
+        #[repr(C, align(2))]
         struct ResponseBuffer([u8; const { size_of::<Response>() }]);
         const _: () = const {
             // Check that the alignment of the buffer matches `Self`.
@@ -502,7 +502,57 @@ impl MemoryRangeTable {
 
 #[cfg(test)]
 mod unit_tests {
-    use crate::protocol::{MemoryRange, MemoryRangeTable};
+    use zerocopy::{IntoBytes, TryFromBytes};
+
+    use crate::protocol::{Command, MemoryRange, MemoryRangeTable, Request, Response, Status};
+
+    #[test]
+    fn test_de_serialize_request() {
+        let request = Request {
+            command: Command::Start,
+            padding: [0; 6],
+            length: 1.into(),
+        };
+        let bytes = [
+            1, 0, // Command
+            0, 0, 0, 0, 0, 0, // Padding
+            1, 0, 0, 0, 0, 0, 0, 0, // Length
+        ];
+
+        assert_eq!(request.as_bytes(), bytes);
+        assert!(matches!(
+            Request::try_ref_from_bytes(&bytes),
+            Ok(Request {
+                command: Command::Start,
+                padding: [0, 0, 0, 0, 0, 0],
+                length,
+            }) if length.get() == 1
+        ));
+    }
+
+    #[test]
+    fn test_de_serialize_response() {
+        let response = Response {
+            status: Status::Ok,
+            padding: [0; 6],
+            length: 1.into(),
+        };
+        let bytes = [
+            1, 0, // Status
+            0, 0, 0, 0, 0, 0, // Padding
+            1, 0, 0, 0, 0, 0, 0, 0, // Length
+        ];
+
+        assert_eq!(response.as_bytes(), bytes);
+        assert!(matches!(
+            Response::try_ref_from_bytes(&bytes),
+            Ok(Response {
+                status: Status::Ok,
+                padding: [0, 0, 0, 0, 0, 0],
+                length,
+            }) if length.get() == 1
+        ));
+    }
 
     #[test]
     fn test_memory_range_table_from_dirty_ranges_iter() {
