@@ -2861,6 +2861,8 @@ impl Vmm {
             )?;
         }
 
+        // Very last cancellation check. After this, we release the disk locks and we can't cancel
+        // anymore.
         return_if_cancelled_cb(&mut socket)?;
 
         // Update migration progress snapshot
@@ -2897,9 +2899,6 @@ impl Vmm {
         )))?;
         // Complete the migration
         // At this step, the receiving VMM will acquire disk locks again.
-
-        // Very last and final check:
-        return_if_cancelled_cb(&mut socket)?;
 
         Request::complete().write_to(&mut socket)?;
         Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
