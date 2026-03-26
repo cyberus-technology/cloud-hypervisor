@@ -5163,8 +5163,17 @@ impl DeviceManager {
         }
     }
 
-    // Calls the `[PostMigrationAnnouncer]`s of each device that has one, and
-    // schedules periodic announcements.
+    /// Helps the environment converge quickly after a live migration by
+    /// prompting devices to advertise the VM from its new host.
+    ///
+    /// This is mainly useful for networking: switches and peers can refresh
+    /// their view of where the guest now lives instead of waiting for normal
+    /// traffic to update MAC-to-port mappings on its own.
+    ///
+    /// The method gathers the [`PostMigrationAnnouncer`] implementations
+    /// exposed by virtio devices, runs one announcement synchronously for
+    /// minimum delay, and then schedules a few retries from a background
+    /// thread.
     pub fn post_migration_announce(&self) {
         let mut announcers: Vec<Box<dyn PostMigrationAnnouncer>> = self
             .virtio_devices
@@ -5172,9 +5181,16 @@ impl DeviceManager {
             .filter_map(|dev| dev.virtio_device.lock().unwrap().post_migration_announcer())
             .collect();
 
+        if announcers.is_empty() {
+            info!("No announcers");
+            return;
+        }
+
         // We do the first announcement synchronously, because we want the announcements
         // as soon as possible.
         announcers.iter_mut().for_each(|a| a.announce());
+        info!("Post migration announce (sync)");
+
         // For good measure we repeat the announcements. This increases the chance that
         // the announcements have the expected effect.
         const ROUNDS: u32 = 4;
@@ -5191,7 +5207,7 @@ impl DeviceManager {
     }
 }
 
-/// Starts a thread that periodically performs the post migration announcements.
+/// Starts a thread that periodically performs the post-migration announcements.
 fn schedule_post_migration_announcements(
     mut announcers: Vec<Box<dyn PostMigrationAnnouncer>>,
     rounds: u32,
@@ -5199,18 +5215,17 @@ fn schedule_post_migration_announcements(
     step_delay: Duration,
     max_delay: Duration,
 ) {
-    if announcers.is_empty() || rounds == 0 {
-        return;
-    }
-
     let _ = thread::Builder::new()
         .name("post-migration-announcers".to_string())
         .spawn(move || {
             for round in 0..rounds {
-                // The first announce is done synchronously, thus we sleep at the
-                // start of the loop.
+                info!("Post migration announce (async): {}/{}", round + 1, rounds);
+
+                // The first announcement already was done synchronously, thus
+                // we sleep at the start of the loop.
 
                 let delay = (initial_delay + step_delay.saturating_mul(round)).min(max_delay);
+                debug!("Sleeping {}ms", delay.as_millis());
                 thread::sleep(delay);
 
                 announcers.iter_mut().for_each(|a| a.announce());
@@ -5559,11 +5574,6 @@ impl Pausable for DeviceManager {
     }
 
     fn resume(&mut self) -> result::Result<(), MigratableError> {
-        // Before resuming the devices, we execute the post migration announcers of those that have one.
-        // NOTE: By contract announcements may be executed even if no migration took place hence we
-        // call this function regardless of the reason for resuming the VM.
-        self.post_migration_announce();
-
         for (_, device_node) in self.device_tree.lock().unwrap().iter() {
             if let Some(migratable) = &device_node.migratable {
                 migratable.lock().unwrap().resume()?;

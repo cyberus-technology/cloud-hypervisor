@@ -2235,6 +2235,10 @@ impl Vmm {
                     // vm_receive_state before, which creates the VM.
                     let vm = self.vm.vm_mut().unwrap();
 
+                    // Advertise new VM location to network switches.
+                    // The thread in background periodically sends multiple messages.
+                    vm.post_migration_announce();
+
                     // We are on the control-loop thread handling an API request, so
                     // there is no concurrent access from other VMM or migration
                     // threads. The VM is in the Paused state , which permits both
