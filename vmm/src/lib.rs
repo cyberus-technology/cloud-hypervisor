@@ -4349,26 +4349,24 @@ impl RequestHandler for Vmm {
         }
 
         // When spawning the thread fails, the VM keeps running normally.
-        let migration_worker = match MigrationWorker::spawn(
+        let migration_worker = MigrationWorker::spawn(
             vm,
             self.check_migration_evt.try_clone().unwrap(),
             send_data_migration,
             self.postponed_lifecycle_event.clone(),
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             self.hypervisor.clone(),
-        ) {
-            Ok(worker) => worker,
-            Err((vm, e)) => {
-                self.vm = MaybeVmOwnership::Vmm(vm);
+        )
+        .map_err(|(vm, e)| {
+            self.vm = MaybeVmOwnership::Vmm(vm);
 
-                let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
-                lock.as_mut()
-                    .expect("live migration should be ongoing")
-                    .mark_as_failed(&e);
+            let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+            lock.as_mut()
+                .expect("live migration should be ongoing")
+                .mark_as_failed(&e);
 
-                return Err(e);
-            }
-        };
+            e
+        })?;
         let old = self.migration_thread_handle.replace(migration_worker);
         // If this fails, we messed up the thread lifecycle management.
         debug_assert!(old.is_none());
