@@ -759,7 +759,7 @@ impl VcpuState {
 
     /// Blocks until the vCPU thread has acknowledged the signal.
     ///
-    /// The signal is resent every 5ms until the vCPU thread acknowledges it.
+    /// The signal is resent every ms until the vCPU thread acknowledges it.
     /// A warning is emitted every 100ms while the acknowledgment is pending.
     ///
     /// The wait is bounded by a total timeout of 10 seconds. If the vCPU thread
