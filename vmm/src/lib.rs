@@ -891,6 +891,7 @@ impl MigrationWorker {
         }
     }
 
+    #[expect(clippy::result_large_err)]
     fn spawn(
         vm: Vm,
         check_migration_evt: EventFd,
@@ -899,7 +900,7 @@ impl MigrationWorker {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
             dyn hypervisor::Hypervisor,
         >,
-    ) -> MigrationWorkerHandle {
+    ) -> result::Result<MigrationWorkerHandle, (Vm, MigratableError)> {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker = MigrationWorker {
             vm,
@@ -911,17 +912,37 @@ impl MigrationWorker {
             cancel: cancel.clone(),
         };
 
+        // Cumbersome but we need this to take a value from the worker when
+        // thread spawning failed. Ownership of the worker is either by the
+        // thread or this function.
+        let worker = Arc::new(Mutex::new(Some(worker)));
+        let thread_worker = worker.clone();
+
         let inner_handle = thread::Builder::new()
             .name("migration".into())
-            .spawn(move || worker.run())
-            // For upstreaming, we should simply continue and return an
-            // error when this fails. For our PoC, this is fine.
-            .unwrap();
+            .spawn(move || {
+                thread_worker
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("migration worker should only be taken once")
+                    .run()
+            })
+            .context("should spawn migration thread")
+            .map_err(|e| {
+                // Get the VM back from the worker.
+                let worker = worker
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("migration worker should remain available on spawn failure");
+                (worker.vm, MigratableError::MigrateSend(e))
+            })?;
 
-        MigrationWorkerHandle {
+        Ok(MigrationWorkerHandle {
             handle: Some(inner_handle),
             cancel,
-        }
+        })
     }
 }
 
@@ -4217,14 +4238,27 @@ impl RequestHandler for Vmm {
             ));
         }
 
-        let migration_worker = MigrationWorker::spawn(
+        // When spawning the thread fails, the VM keeps running normally.
+        let migration_worker = match MigrationWorker::spawn(
             vm,
             self.check_migration_evt.try_clone().unwrap(),
             send_data_migration,
             self.postponed_lifecycle_event.clone(),
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             self.hypervisor.clone(),
-        );
+        ) {
+            Ok(worker) => worker,
+            Err((vm, e)) => {
+                self.vm = MaybeVmOwnership::Vmm(vm);
+
+                let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+                lock.as_mut()
+                    .expect("live migration should be ongoing")
+                    .mark_as_failed(&e);
+
+                return Err(e);
+            }
+        };
         let old = self.migration_thread_handle.replace(migration_worker);
         // If this fails, we messed up the thread lifecycle management.
         debug_assert!(old.is_none());
