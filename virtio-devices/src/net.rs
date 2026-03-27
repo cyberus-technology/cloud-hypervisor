@@ -1089,17 +1089,57 @@ impl PostMigrationAnnouncer for VirtioNetPostMigrationAnnouncer {
 #[cfg(test)]
 mod unit_tests {
     use std::mem::size_of;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use seccompiler::SeccompAction;
-    use virtio_bindings::virtio_net::{VIRTIO_NET_F_STATUS, VIRTIO_NET_S_LINK_UP};
+    use virtio_bindings::virtio_net::{
+        VIRTIO_NET_F_GUEST_ANNOUNCE, VIRTIO_NET_F_STATUS, VIRTIO_NET_S_ANNOUNCE,
+        VIRTIO_NET_S_LINK_UP,
+    };
     use vmm_sys_util::eventfd::EventFd;
 
     use super::*;
+    use crate::device::{VirtioInterrupt, VirtioInterruptType};
 
-    fn test_net(acked_features: u64) -> Net {
+    struct TestInterrupt {
+        config_count: AtomicUsize,
+    }
+
+    impl TestInterrupt {
+        fn new() -> Self {
+            Self {
+                config_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl VirtioInterrupt for TestInterrupt {
+        fn trigger(
+            &self,
+            int_type: VirtioInterruptType,
+        ) -> std::result::Result<(), std::io::Error> {
+            if matches!(int_type, VirtioInterruptType::Config) {
+                self.config_count.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        }
+
+        fn set_notifier(
+            &self,
+            _int_type: u32,
+            _notifier: Option<EventFd>,
+            _vm: &dyn hypervisor::Vm,
+        ) -> std::io::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    fn test_net(acked_features: u64, interrupt_cb: Option<Arc<dyn VirtioInterrupt>>) -> Net {
         Net {
             common: VirtioCommon {
                 acked_features,
+                interrupt_cb,
                 ..Default::default()
             },
             id: "test-net".to_string(),
@@ -1137,8 +1177,69 @@ mod unit_tests {
 
     #[test]
     fn test_status_feature_reports_link_up() {
-        let net = test_net(1 << VIRTIO_NET_F_STATUS);
+        let net = test_net(1 << VIRTIO_NET_F_STATUS, None);
 
         assert_eq!(read_status(&net), VIRTIO_NET_S_LINK_UP as u16);
+    }
+
+    #[test]
+    fn test_post_migration_sets_announce_and_triggers_config() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(
+            (1 << VIRTIO_NET_F_GUEST_ANNOUNCE) | (1 << VIRTIO_NET_F_STATUS),
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+
+        net.post_migration_announcer().unwrap().announce();
+
+        assert!(net.announce_pending.load(Ordering::Acquire));
+        assert_ne!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_post_migration_without_feature_is_noop() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(0, Some(interrupt.clone() as Arc<dyn VirtioInterrupt>));
+
+        net.post_migration_announcer().unwrap().announce();
+
+        assert!(!net.announce_pending.load(Ordering::Acquire));
+        assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_post_migration_retries_retrigger_config_interrupt() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(
+            (1 << VIRTIO_NET_F_GUEST_ANNOUNCE) | (1 << VIRTIO_NET_F_STATUS),
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+        let mut announcer = net.post_migration_announcer().unwrap();
+
+        announcer.announce();
+        announcer.announce();
+
+        assert!(net.announce_pending.load(Ordering::Acquire));
+        assert_ne!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn test_reset_clears_pending_announce() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let mut net = test_net(
+            (1 << VIRTIO_NET_F_GUEST_ANNOUNCE) | (1 << VIRTIO_NET_F_STATUS),
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+
+        net.post_migration_announcer().unwrap().announce();
+        assert!(net.announce_pending.load(Ordering::Acquire));
+
+        net.reset();
+
+        assert!(!net.announce_pending.load(Ordering::Acquire));
+        assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
     }
 }
