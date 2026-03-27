@@ -405,8 +405,10 @@ impl MemoryRangeTable {
         bitmap
             .into_iter()
             .bit_positions()
+            // Compiler optimizes this away
+            .map(|v: usize| u64::try_from(v).unwrap())
             // Turn them into single-element ranges for coalesce.
-            .map(|b| b..(b + 1))
+            .map(|b: u64| b..(b + 1))
             // Merge adjacent ranges.
             .coalesce(|prev, curr| {
                 if prev.end == curr.start {
