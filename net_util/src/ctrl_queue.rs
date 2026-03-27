@@ -200,3 +200,67 @@ impl CtrlQueue {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use std::mem::size_of;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use virtio_bindings::virtio_net::{VIRTIO_NET_CTRL_ANNOUNCE, VIRTIO_NET_CTRL_ANNOUNCE_ACK};
+    use virtio_bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+    use vm_memory::{Bytes, GuestAddress};
+    use vm_virtio::queue::testing::VirtQueue as GuestQ;
+
+    use super::*;
+
+    #[test]
+    fn test_process_announce_ack() {
+        // The guest acknowledges the post-migration request on the control
+        // queue, which clears the pending announce state in the device model.
+        // This test builds the minimal virtqueue request for that command:
+        // one readable descriptor for the control header, followed by one
+        // writable descriptor where the device stores the command status.
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let guest_q = GuestQ::new(GuestAddress(0), &mem, 16);
+        let mut queue = guest_q.create_queue();
+
+        let ctrl_hdr = ControlHeader {
+            class: VIRTIO_NET_CTRL_ANNOUNCE as u8,
+            cmd: VIRTIO_NET_CTRL_ANNOUNCE_ACK as u8,
+        };
+        let ctrl_addr = GuestAddress(0x1000);
+        let status_addr = GuestAddress(0x1100);
+        mem.write_obj(ctrl_hdr, ctrl_addr).unwrap();
+
+        // Descriptor 0 contains the control header and points to descriptor 1.
+        guest_q.dtable[0].set(
+            ctrl_addr.0,
+            size_of::<ControlHeader>() as u32,
+            VRING_DESC_F_NEXT.try_into().unwrap(),
+            1,
+        );
+        // Descriptor 1 is the writable status byte returned by the device.
+        guest_q.dtable[1].set(status_addr.0, 1, VRING_DESC_F_WRITE.try_into().unwrap(), 0);
+
+        // Publish the two-descriptor request to the available ring so
+        // CtrlQueue::process() can pop and handle it.
+        guest_q.avail.ring[0].set(0);
+        guest_q.avail.idx.set(1);
+
+        // Start from the state reached after post_migration(): the guest still
+        // owes us an ANNOUNCE_ACK on the control queue.
+        let announce_pending = Arc::new(AtomicBool::new(true));
+        let mut ctrl_q = CtrlQueue::new(Vec::new(), Arc::clone(&announce_pending));
+
+        ctrl_q.process(&mem, &mut queue, None).unwrap();
+
+        // A successful ANNOUNCE_ACK clears the pending flag and reports
+        // VIRTIO_NET_OK in the guest-provided status buffer.
+        assert!(!announce_pending.load(Ordering::Acquire));
+        assert_eq!(
+            mem.read_obj::<u8>(status_addr).unwrap(),
+            VIRTIO_NET_OK as u8
+        );
+    }
+}
