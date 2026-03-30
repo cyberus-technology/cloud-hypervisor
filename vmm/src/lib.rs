@@ -2910,8 +2910,20 @@ impl Vmm {
 
         // We release the locks early to enable locking them on the destination host.
         // The VM is already stopped.
-        vm.release_disk_locks()
-            .map_err(|e| MigratableError::UnlockError(anyhow!("{e}")))?;
+        match vm.release_disk_locks() {
+            Ok(()) => {}
+            Err(vm::Error::LockingError(e)) => {
+                // Preserve the error chain
+                return Err(MigratableError::UnlockError(anyhow!(e)));
+            }
+            // Unlikely, as the function only returns the variant above
+            Err(e) => {
+                // Because the underlying error is not Sync, we can't preserve the
+                // chain of errors here. Therefore, we at least print the display
+                // and debug representations for max debug information.
+                return Err(MigratableError::UnlockError(anyhow!("{e}: {e:?}")));
+            }
+        }
 
         #[cfg(feature = "kvm")]
         // Prevent signal handler to access thread local storage when signals are received
