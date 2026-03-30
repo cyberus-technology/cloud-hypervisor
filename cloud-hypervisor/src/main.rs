@@ -696,6 +696,11 @@ fn start_vmm(cmd_arguments: &ArgMatches) -> Result<Option<String>, Error> {
         .map_err(Error::EventMonitorThread)?;
     }
 
+    info!(
+        "Cloud Hypervisor starting: build version: {}, date: {}",
+        env!("BUILD_VERSION"),
+        jiff::Zoned::now().strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
+    );
     event!("vmm", "starting");
 
     let vmm_thread_handle = vmm::start_vmm_thread(
