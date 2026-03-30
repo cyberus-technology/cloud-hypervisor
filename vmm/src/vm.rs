@@ -2818,6 +2818,10 @@ impl Vm {
             .try_lock_disks()
             .map_err(Error::LockingError)?;
 
+        // TODO for upstreaming probably relevant
+        // Advertise new VM location to network switches.
+        // self.post_migration_announce();
+
         // Now we can start all vCPUs from here.
         self.cpu_manager
             .lock()
@@ -2864,12 +2868,9 @@ impl Vm {
                 .context("Error sending memory fd")
                 .map_err(MigratableError::MigrateSend)?;
 
-            Response::read_from(socket)?.ok_or_abandon(
-                socket,
-                MigratableError::MigrateSend(anyhow!(
-                    "Error during memory fd migration (got bad response)"
-                )),
-            )?;
+            Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+                "Error during memory fd migration (got bad response)"
+            )))?;
         }
 
         Ok(())
@@ -3049,6 +3050,14 @@ impl Vm {
             .unwrap()
             .nmi()
             .map_err(|_| Error::ErrorNmi);
+    }
+
+    /// Calls [`DeviceManager::post_migration_announce`].
+    pub fn post_migration_announce(&self) {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .post_migration_announce();
     }
 }
 

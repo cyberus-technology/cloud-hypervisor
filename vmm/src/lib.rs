@@ -869,6 +869,7 @@ impl MigrationWorker {
     /// Perform the migration and communicate with the [`Vmm`] thread.
     fn run(mut self) -> MigrationThreadOut {
         debug!("migration thread is starting");
+        event!("vm", "migration-started");
 
         let res = Vmm::send_migration(
             &mut self.vm,
@@ -884,6 +885,7 @@ impl MigrationWorker {
         self.check_migration_evt.write(1).unwrap();
 
         debug!("migration thread is finished");
+        event!("vm", "migration-finished");
         MigrationThreadOut {
             vm: self.vm,
             migration_res: res,
@@ -891,6 +893,7 @@ impl MigrationWorker {
         }
     }
 
+    #[expect(clippy::result_large_err)]
     fn spawn(
         vm: Vm,
         check_migration_evt: EventFd,
@@ -899,7 +902,7 @@ impl MigrationWorker {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
             dyn hypervisor::Hypervisor,
         >,
-    ) -> MigrationWorkerHandle {
+    ) -> result::Result<MigrationWorkerHandle, (Vm, MigratableError)> {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker = MigrationWorker {
             vm,
@@ -911,17 +914,37 @@ impl MigrationWorker {
             cancel: cancel.clone(),
         };
 
+        // Cumbersome but we need this to take a value from the worker when
+        // thread spawning failed. Ownership of the worker is either by the
+        // thread or this function.
+        let worker = Arc::new(Mutex::new(Some(worker)));
+        let thread_worker = worker.clone();
+
         let inner_handle = thread::Builder::new()
             .name("migration".into())
-            .spawn(move || worker.run())
-            // For upstreaming, we should simply continue and return an
-            // error when this fails. For our PoC, this is fine.
-            .unwrap();
+            .spawn(move || {
+                thread_worker
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("migration worker should only be taken once")
+                    .run()
+            })
+            .context("should spawn migration thread")
+            .map_err(|e| {
+                // Get the VM back from the worker.
+                let worker = worker
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("migration worker should remain available on spawn failure");
+                (worker.vm, MigratableError::MigrateSend(e))
+            })?;
 
-        MigrationWorkerHandle {
+        Ok(MigrationWorkerHandle {
             handle: Some(inner_handle),
             cancel,
-        }
+        })
     }
 }
 
@@ -1467,12 +1490,9 @@ fn vm_send_memory(
     table.write_to(socket)?;
     // And then the memory itself
     send_memory_regions(guest_memory, table, socket)?;
-    Response::read_from(socket)?.ok_or_abandon(
-        socket,
-        MigratableError::MigrateSend(anyhow!(
-            "Error during dirty memory migration (got bad response)"
-        )),
-    )?;
+    Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+        "Error during dirty memory migration (got bad response)"
+    )))?;
 
     Ok(())
 }
@@ -2217,6 +2237,10 @@ impl Vmm {
                     // vm_receive_state before, which creates the VM.
                     let vm = self.vm.vm_mut().unwrap();
 
+                    // Advertise new VM location to network switches.
+                    // The thread in background periodically sends multiple messages.
+                    vm.post_migration_announce();
+
                     // We are on the control-loop thread handling an API request, so
                     // there is no concurrent access from other VMM or migration
                     // threads. The VM is in the Paused state , which permits both
@@ -2545,10 +2569,8 @@ impl Vmm {
             {
                 warn!("Migration timed out after {migration_timeout:?}");
                 Request::abandon().write_to(socket)?;
-                Response::read_from(socket)?.ok_or_abandon(
-                    socket,
-                    MigratableError::MigrateSend(anyhow!("Migration timed out")),
-                )?;
+                Response::read_from(socket)?
+                    .ok_or_error(MigratableError::MigrateSend(anyhow!("Migration timed out")))?;
             }
 
             // We always autoconverge.
@@ -2632,6 +2654,14 @@ impl Vmm {
 
             s.iteration_duration = s.iteration_start_time.elapsed();
             log_migration_progress(s, vm);
+
+            // Enables management software (e.g., libvirt) to easily track forward progress.
+            event!(
+                "vm",
+                "migration-memory-iteration",
+                "id",
+                format!("{}", s.iteration)
+            );
 
             // Increment iteration counter
             s.iteration += 1;
@@ -2765,10 +2795,9 @@ impl Vmm {
 
         // Start the migration
         Request::start().write_to(&mut socket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error starting migration (got bad response)")),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error starting migration (got bad response)"
+        )))?;
 
         return_if_cancelled_cb(&mut socket)?;
 
@@ -2844,12 +2873,9 @@ impl Vmm {
         socket
             .write_all(&config_data)
             .map_err(MigratableError::MigrateSocket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!(
-                "Error during config migration (got bad response)"
-            )),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error during config migration (got bad response)"
+        )))?;
 
         return_if_cancelled_cb(&mut socket)?;
 
@@ -2870,6 +2896,8 @@ impl Vmm {
             )?;
         }
 
+        // Very last cancellation check. After this, we release the disk locks and we can't cancel
+        // anymore.
         return_if_cancelled_cb(&mut socket)?;
 
         // Update migration progress snapshot
@@ -2901,23 +2929,16 @@ impl Vmm {
         socket
             .write_all(&snapshot_data)
             .map_err(MigratableError::MigrateSocket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!(
-                "Error during state migration (got bad response)"
-            )),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error during state migration (got bad response)"
+        )))?;
         // Complete the migration
         // At this step, the receiving VMM will acquire disk locks again.
 
-        // Very last and final check:
-        return_if_cancelled_cb(&mut socket)?;
-
         Request::complete().write_to(&mut socket)?;
-        Response::read_from(&mut socket)?.ok_or_abandon(
-            &mut socket,
-            MigratableError::MigrateSend(anyhow!("Error completing migration (got bad response)")),
-        )?;
+        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+            "Error completing migration (got bad response)"
+        )))?;
 
         // Record downtime
         s.downtime_duration = s.downtime_start_time.elapsed();
@@ -3154,6 +3175,7 @@ impl Vmm {
             }
             Err(MigratableError::Cancelled) => {
                 error!("Migration cancelled");
+                event!("vm", "migration-cancelled");
                 try_resume_vm(vm);
 
                 // Update migration progress snapshot
@@ -3166,6 +3188,7 @@ impl Vmm {
             }
             Err(e) => {
                 error!("Migration failed: {e}");
+                event!("vm", "migration-failed");
                 try_resume_vm(vm);
 
                 // Update migration progress snapshot
@@ -3444,6 +3467,21 @@ impl RequestHandler for Vmm {
     fn vm_resume(&mut self) -> result::Result<(), VmError> {
         match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => vm.resume().map_err(VmError::Resume),
+            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating)?,
+            MaybeVmOwnership::None => Err(VmError::VmNotRunning)?,
+        }
+    }
+
+    fn vm_post_migration_announce(&mut self) -> result::Result<(), VmError> {
+        match self.vm {
+            MaybeVmOwnership::Vmm(ref vm) => {
+                if vm.get_state() != VmState::Running {
+                    return Err(VmError::VmNotRunning);
+                }
+
+                vm.post_migration_announce();
+                Ok(())
+            }
             MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating)?,
             MaybeVmOwnership::None => Err(VmError::VmNotRunning)?,
         }
@@ -4102,6 +4140,8 @@ impl RequestHandler for Vmm {
                 MigratableError::MigrateReceive(e)
             })?;
 
+        event!("vm", "migration-receive-started");
+
         let mut state = ReceiveMigrationState::Established;
 
         let res: result::Result<ReceiveMigrationState, MigratableError> = loop {
@@ -4138,6 +4178,7 @@ impl RequestHandler for Vmm {
         };
 
         if matches!(res, Err(_) | Ok(ReceiveMigrationState::Aborted)) {
+            event!("vm", "migration-receive-failed");
             self.vm = MaybeVmOwnership::None;
             self.vm_config = None;
             match res {
@@ -4150,6 +4191,7 @@ impl RequestHandler for Vmm {
             }
         }
 
+        event!("vm", "migration-receive-finished");
         Ok(())
     }
 
@@ -4231,14 +4273,27 @@ impl RequestHandler for Vmm {
             ));
         }
 
-        let migration_worker = MigrationWorker::spawn(
+        // When spawning the thread fails, the VM keeps running normally.
+        let migration_worker = match MigrationWorker::spawn(
             vm,
             self.check_migration_evt.try_clone().unwrap(),
             send_data_migration,
             self.postponed_lifecycle_event.clone(),
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             self.hypervisor.clone(),
-        );
+        ) {
+            Ok(worker) => worker,
+            Err((vm, e)) => {
+                self.vm = MaybeVmOwnership::Vmm(vm);
+
+                let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+                lock.as_mut()
+                    .expect("live migration should be ongoing")
+                    .mark_as_failed(&e);
+
+                return Err(e);
+            }
+        };
         let old = self.migration_thread_handle.replace(migration_worker);
         // If this fails, we messed up the thread lifecycle management.
         debug_assert!(old.is_none());
