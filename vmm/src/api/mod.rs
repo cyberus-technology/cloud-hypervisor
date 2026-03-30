@@ -193,8 +193,8 @@ pub enum ApiError {
     #[error("The vsock device could not be added to the VM")]
     VmAddVsock(#[source] VmError),
 
-    /// Error starting migration receiver
-    #[error("Error starting migration receiver")]
+    /// Error receiving migration
+    #[error("Error receiving migration")]
     VmReceiveMigration(#[source] MigratableError),
 
     /// Error starting migration sender

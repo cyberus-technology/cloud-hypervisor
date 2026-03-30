@@ -871,15 +871,28 @@ impl MigrationWorker {
         debug!("migration thread is starting");
         event!("vm", "migration-started");
 
-        let res = Vmm::send_migration(
-            &mut self.vm,
-            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-            self.hypervisor.as_ref(),
-            &self.config,
-            self.postponed_lifecycle_event.as_ref(),
-            self.cancel.clone(),
-        )
-        .inspect_err(|e| error!("migrate error: {e}"));
+        let main_socket = send_migration_socket(&self.config, true);
+        let res = main_socket.and_then(|mut socket| {
+            Vmm::send_migration(
+                &mut self.vm,
+                #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+                self.hypervisor.as_ref(),
+                &self.config,
+                self.postponed_lifecycle_event.as_ref(),
+                self.cancel.clone(),
+                &mut socket,
+            )
+            // Notify the other side that migration was aborted.
+            .inspect_err(|_| {
+                // This message works at any stage of the migration, including precopy with
+                // multiple connections.
+                //
+                // We ignore failures here so the VMM can continue.
+                let _ = Request::abandon().write_to(&mut socket).inspect_err(|e| {
+                    warn!("Failed to notify migration destination about failed migration: {e}");
+                });
+            })
+        });
 
         // Notify VMM thread to get migration result by joining this thread.
         self.check_migration_evt.write(1).unwrap();
@@ -2778,11 +2791,12 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
         cancel: Arc<AtomicBool>,
+        socket: &mut SocketStream,
     ) -> result::Result<(), MigratableError> {
-        let return_if_cancelled_cb = move |socket: &mut SocketStream| {
+        let return_if_cancelled_cb = move |sock: &mut SocketStream| {
             if cancel.load(Ordering::Acquire) {
                 info!("Cancelling migration now");
-                Request::abandon().write_to(socket)?;
+                Request::abandon().write_to(sock)?;
                 Err(MigratableError::Cancelled)
             } else {
                 Ok(())
@@ -2790,16 +2804,13 @@ impl Vmm {
         };
         let mut s = MigrationStateInternal::new();
 
-        // Set up the socket connection
-        let mut socket = send_migration_socket(send_data_migration, true)?;
-
         // Start the migration
-        Request::start().write_to(&mut socket)?;
-        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+        Request::start().write_to(socket)?;
+        Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
             "Error starting migration (got bad response)"
         )))?;
 
-        return_if_cancelled_cb(&mut socket)?;
+        return_if_cancelled_cb(socket)?;
 
         // Send config
         let vm_config = vm.get_config();
@@ -2839,10 +2850,10 @@ impl Vmm {
             .map_err(MigratableError::MigrateSend)?
         };
 
-        return_if_cancelled_cb(&mut socket)?;
+        return_if_cancelled_cb(socket)?;
 
         if send_data_migration.local {
-            match &mut socket {
+            match socket {
                 SocketStream::Unix(unix_socket) => {
                     let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
                     lock.as_mut()
@@ -2860,7 +2871,7 @@ impl Vmm {
             }
         }
 
-        return_if_cancelled_cb(&mut socket)?;
+        return_if_cancelled_cb(socket)?;
 
         let vm_migration_config = VmMigrationConfig {
             vm_config,
@@ -2869,15 +2880,15 @@ impl Vmm {
             memory_manager_data: vm.memory_manager_data(),
         };
         let config_data = serde_json::to_vec(&vm_migration_config).unwrap();
-        Request::config(config_data.len() as u64).write_to(&mut socket)?;
+        Request::config(config_data.len() as u64).write_to(socket)?;
         socket
             .write_all(&config_data)
             .map_err(MigratableError::MigrateSocket)?;
-        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+        Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
             "Error during config migration (got bad response)"
         )))?;
 
-        return_if_cancelled_cb(&mut socket)?;
+        return_if_cancelled_cb(socket)?;
 
         // Let every Migratable object know about the migration being started.
         vm.start_migration()?;
@@ -2888,7 +2899,7 @@ impl Vmm {
         } else {
             Self::do_memory_migration(
                 vm,
-                &mut socket,
+                socket,
                 &mut s,
                 send_data_migration,
                 postponed_lifecycle_event,
@@ -2898,7 +2909,7 @@ impl Vmm {
 
         // Very last cancellation check. After this, we release the disk locks and we can't cancel
         // anymore.
-        return_if_cancelled_cb(&mut socket)?;
+        return_if_cancelled_cb(socket)?;
 
         // Update migration progress snapshot
         {
@@ -2925,18 +2936,18 @@ impl Vmm {
         vm.set_post_migration_lifecycle_event(*postponed_lifecycle_event.lock().unwrap());
         let vm_snapshot = vm.snapshot()?;
         let snapshot_data = serde_json::to_vec(&vm_snapshot).unwrap();
-        Request::state(snapshot_data.len() as u64).write_to(&mut socket)?;
+        Request::state(snapshot_data.len() as u64).write_to(socket)?;
         socket
             .write_all(&snapshot_data)
             .map_err(MigratableError::MigrateSocket)?;
-        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+        Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
             "Error during state migration (got bad response)"
         )))?;
         // Complete the migration
         // At this step, the receiving VMM will acquire disk locks again.
 
-        Request::complete().write_to(&mut socket)?;
-        Response::read_from(&mut socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+        Request::complete().write_to(socket)?;
+        Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
             "Error completing migration (got bad response)"
         )))?;
 
