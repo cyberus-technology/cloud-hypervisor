@@ -1,21 +1,21 @@
 // Copyright 2019 Intel Corporation. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{result, thread};
 
-use log::{error, info};
+use log::{error, info, warn};
 use net_util::{CtrlQueue, MacAddr, VirtioNetConfig, build_net_config_space};
 use seccompiler::SeccompAction;
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 use vhost::vhost_user::{FrontendReqHandler, VhostUserFrontend, VhostUserFrontendReqHandler};
 use virtio_bindings::virtio_net::{
-    VIRTIO_NET_F_CSUM, VIRTIO_NET_F_CTRL_VQ, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_ECN,
-    VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_GUEST_UFO,
-    VIRTIO_NET_F_HOST_ECN, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_TSO6, VIRTIO_NET_F_HOST_UFO,
-    VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF, VIRTIO_NET_F_MTU, VIRTIO_NET_F_STATUS,
-    VIRTIO_NET_S_LINK_UP,
+    VIRTIO_NET_F_CSUM, VIRTIO_NET_F_CTRL_VQ, VIRTIO_NET_F_GUEST_ANNOUNCE, VIRTIO_NET_F_GUEST_CSUM,
+    VIRTIO_NET_F_GUEST_ECN, VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6,
+    VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_ECN, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_TSO6,
+    VIRTIO_NET_F_HOST_UFO, VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF, VIRTIO_NET_F_MTU,
+    VIRTIO_NET_F_STATUS, VIRTIO_NET_S_ANNOUNCE, VIRTIO_NET_S_LINK_UP,
 };
 use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::QueueT;
@@ -29,8 +29,8 @@ use crate::thread_helper::spawn_virtio_thread;
 use crate::vhost_user::vu_common_ctrl::{VhostUserConfig, VhostUserHandle};
 use crate::vhost_user::{DEFAULT_VIRTIO_FEATURES, Error, Result, VhostUserCommon, VhostUserState};
 use crate::{
-    ActivateResult, GuestMemoryMmap, GuestRegionMmap, NetCtrlEpollHandler,
-    VIRTIO_F_ACCESS_PLATFORM, VirtioCommon, VirtioDevice, VirtioDeviceType,
+    ActivateResult, GuestMemoryMmap, GuestRegionMmap, NetCtrlEpollHandler, PostMigrationAnnouncer,
+    VIRTIO_F_ACCESS_PLATFORM, VirtioCommon, VirtioDevice, VirtioDeviceType, VirtioInterrupt,
 };
 
 const DEFAULT_QUEUE_NUMBER: usize = 2;
@@ -44,6 +44,9 @@ pub struct Net {
     vu_common: VhostUserCommon,
     id: String,
     config: VirtioNetConfig,
+    /// Tracks whether the guest still needs to acknowledge a post-migration
+    /// announce request through the control queue.
+    announce_pending: Arc<AtomicBool>,
     guest_memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     ctrl_queue_epoll_thread: Option<thread::JoinHandle<()>>,
     seccomp_action: SeccompAction,
@@ -52,6 +55,23 @@ pub struct Net {
 }
 
 impl Net {
+    /// Derive the guest-visible feature set from the backend-negotiated
+    /// features plus frontend-only bits that Cloud Hypervisor implements
+    /// locally, such as `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS`, and
+    /// `VIRTIO_NET_F_GUEST_ANNOUNCE`.
+    fn frontend_avail_features(backend_acked_features: u64) -> u64 {
+        let mut guest_avail_features = backend_acked_features | (1 << VIRTIO_NET_F_MAC);
+
+        // Guest announce is implemented by the frontend through config
+        // changes and the locally handled control queue.
+        if guest_avail_features & (1 << VIRTIO_NET_F_CTRL_VQ) != 0 {
+            guest_avail_features |= 1 << VIRTIO_NET_F_STATUS;
+            guest_avail_features |= 1 << VIRTIO_NET_F_GUEST_ANNOUNCE;
+        }
+
+        guest_avail_features
+    }
+
     /// Create a new vhost-user-net device
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -84,6 +104,7 @@ impl Net {
             acked_protocol_features,
             vu_num_queues,
             config,
+            announce_pending,
             paused,
             vring_bases,
         ) = if let Some(state) = state {
@@ -91,8 +112,10 @@ impl Net {
 
             // The backend acknowledged features must not contain frontend-only
             // bits since we don't expect the backend to handle them.
-            let backend_acked_features =
-                state.acked_features & !((1 << VIRTIO_NET_F_MAC) | (1 << VIRTIO_NET_F_STATUS));
+            let backend_acked_features = state.acked_features
+                & !((1 << VIRTIO_NET_F_MAC)
+                    | (1 << VIRTIO_NET_F_STATUS)
+                    | (1 << VIRTIO_NET_F_GUEST_ANNOUNCE));
 
             vu.set_protocol_features_vhost_user(
                 backend_acked_features,
@@ -107,12 +130,15 @@ impl Net {
                 num_queues += 1;
             }
 
+            let announce_pending = (state.config.status & (VIRTIO_NET_S_ANNOUNCE as u16)) != 0;
+
             (
                 state.avail_features,
                 state.acked_features,
                 state.acked_protocol_features,
                 state.vu_num_queues,
                 state.config,
+                announce_pending,
                 true,
                 state.vring_bases,
             )
@@ -120,6 +146,7 @@ impl Net {
             // Filling device and vring features VMM supports.
             let mut avail_features = (1 << VIRTIO_NET_F_MRG_RXBUF)
                 | (1 << VIRTIO_NET_F_CTRL_VQ)
+                | (1 << VIRTIO_NET_F_GUEST_ANNOUNCE)
                 | DEFAULT_VIRTIO_FEATURES;
 
             if mtu.is_some() {
@@ -154,7 +181,7 @@ impl Net {
                 | VhostUserProtocolFeatures::LOG_SHMFD
                 | VhostUserProtocolFeatures::DEVICE_STATE;
 
-            let (mut acked_features, acked_protocol_features) =
+            let (acked_features, acked_protocol_features) =
                 vu.negotiate_features_vhost_user(avail_features, avail_protocol_features)?;
 
             let backend_num_queues =
@@ -180,12 +207,12 @@ impl Net {
                 num_queues += 1;
             }
 
-            // Make sure frontend-owned config-space features stay exposed to
-            // the guest, even if they are not negotiated with the backend.
-            acked_features |= (1 << VIRTIO_NET_F_MAC) | (1 << VIRTIO_NET_F_STATUS);
+            // Build the feature set that gets exposed to the guest. Some frontend available
+            // features are dependent on the features the backend supports.
+            let guest_avail_features = Self::frontend_avail_features(acked_features);
 
             (
-                acked_features,
+                guest_avail_features,
                 // If part of the available features that have been acked,
                 // the PROTOCOL_FEATURES bit must be already set through
                 // the VIRTIO acked features as we know the guest would
@@ -194,6 +221,7 @@ impl Net {
                 acked_protocol_features,
                 vu_num_queues,
                 config,
+                false,
                 false,
                 None,
             )
@@ -221,6 +249,7 @@ impl Net {
                 ..Default::default()
             },
             config,
+            announce_pending: Arc::new(AtomicBool::new(announce_pending)),
             guest_memory: None,
             ctrl_queue_epoll_thread: None,
             seccomp_action,
@@ -230,7 +259,7 @@ impl Net {
     }
 
     fn state(&self) -> std::result::Result<State, MigratableError> {
-        self.vu_common.state(self.config)
+        self.vu_common.state(self.config_with_status())
     }
 
     /// Return the guest-visible virtio-net config, recomputing `status` from the
@@ -248,6 +277,10 @@ impl Net {
             .feature_acked(VIRTIO_NET_F_STATUS.into())
         {
             config.status |= VIRTIO_NET_S_LINK_UP as u16;
+
+            if self.announce_pending.load(Ordering::Acquire) {
+                config.status |= VIRTIO_NET_S_ANNOUNCE as u16;
+            }
         }
 
         config
@@ -326,7 +359,7 @@ impl VirtioDevice for Net {
                 mem: mem.clone(),
                 kill_evt,
                 pause_evt,
-                ctrl_q: CtrlQueue::new(Vec::new()),
+                ctrl_q: CtrlQueue::new(Vec::new(), Arc::clone(&self.announce_pending)),
                 queue: ctrl_queue,
                 queue_evt: ctrl_queue_evt,
                 access_platform: None,
@@ -358,9 +391,11 @@ impl VirtioDevice for Net {
         let backend_req_handler: Option<FrontendReqHandler<BackendReqHandler>> = None;
 
         // The backend acknowledged features must not contain frontend-only
-        // bits since we don't expect the backend to handle them.
+        // features since we don't expect the backend to handle them.
         let backend_acked_features = self.vu_common.virtio_common.acked_features
-            & !((1 << VIRTIO_NET_F_MAC) | (1 << VIRTIO_NET_F_STATUS));
+            & !((1 << VIRTIO_NET_F_MAC)
+                | (1 << VIRTIO_NET_F_STATUS)
+                | (1 << VIRTIO_NET_F_GUEST_ANNOUNCE));
 
         // Run a dedicated thread for handling potential reconnections with
         // the backend.
@@ -397,10 +432,15 @@ impl VirtioDevice for Net {
 
     fn reset(&mut self) {
         self.vu_common.reset(&self.id);
+        self.announce_pending.store(false, Ordering::Release);
     }
 
     fn shutdown(&mut self) {
         self.vu_common.shutdown();
+    }
+
+    fn post_migration_announcer(&self) -> Option<Box<dyn PostMigrationAnnouncer>> {
+        Some(Box::new(VhostUserNetPostMigrationAnnouncer::new(self)))
     }
 
     fn add_memory_region(
@@ -465,6 +505,54 @@ impl Migratable for Net {
     }
 }
 
+/// Announces this vhost-user-net device on the network.
+/// Most fields are cloned references to device state so retry rounds can run
+/// without borrowing the device itself.
+pub struct VhostUserNetPostMigrationAnnouncer {
+    id: String,
+    /// Remembers whether this device negotiated the guest-visible announce path.
+    guest_announce_negotiated: bool,
+    announce_pending: Arc<AtomicBool>,
+    interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
+}
+
+impl VhostUserNetPostMigrationAnnouncer {
+    pub fn new(dev: &Net) -> Self {
+        Self {
+            id: dev.id.clone(),
+            guest_announce_negotiated: dev
+                .vu_common
+                .virtio_common
+                .feature_acked(VIRTIO_NET_F_GUEST_ANNOUNCE.into()),
+            announce_pending: Arc::clone(&dev.announce_pending),
+            interrupt_cb: dev.vu_common.virtio_common.interrupt_cb.clone(),
+        }
+    }
+}
+
+impl PostMigrationAnnouncer for VhostUserNetPostMigrationAnnouncer {
+    // Vhost-user-net relies on the guest-visible announce path: mark the
+    // request pending and re-trigger the config interrupt while this retry
+    // session remains valid.
+    fn announce(&mut self) {
+        if self.guest_announce_negotiated
+            && let Some(interrupt_cb) = &self.interrupt_cb
+        {
+            self.announce_pending.store(true, Ordering::Release);
+
+            interrupt_cb
+                .trigger(crate::VirtioInterruptType::Config)
+                .inspect_err(|e| {
+                    warn!(
+                        "Unable to send interrupt for virtio-net device {}: {e}",
+                        self.id
+                    );
+                })
+                .ok();
+        }
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
     use std::mem::size_of;
@@ -486,6 +574,7 @@ mod unit_tests {
             },
             id: "test-vu-net".to_string(),
             config: VirtioNetConfig::default(),
+            announce_pending: Arc::new(AtomicBool::new(false)),
             guest_memory: None,
             ctrl_queue_epoll_thread: None,
             seccomp_action: SeccompAction::Allow,
