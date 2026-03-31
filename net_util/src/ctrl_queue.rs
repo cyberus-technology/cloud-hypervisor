@@ -2,12 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use log::{error, info, warn};
 use thiserror::Error;
 use virtio_bindings::virtio_net::{
-    VIRTIO_NET_CTRL_GUEST_OFFLOADS, VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET, VIRTIO_NET_CTRL_MQ,
-    VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MIN,
-    VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, VIRTIO_NET_ERR, VIRTIO_NET_OK,
+    VIRTIO_NET_CTRL_ANNOUNCE, VIRTIO_NET_CTRL_ANNOUNCE_ACK, VIRTIO_NET_CTRL_GUEST_OFFLOADS,
+    VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET, VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX,
+    VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MIN, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, VIRTIO_NET_ERR,
+    VIRTIO_NET_OK,
 };
 use virtio_queue::{Queue, QueueT};
 use vm_memory::{ByteValued, Bytes, GuestMemoryError};
@@ -55,11 +59,17 @@ unsafe impl ByteValued for ControlHeader {}
 
 pub struct CtrlQueue {
     pub taps: Vec<Tap>,
+    /// Tracks whether the guest still needs to acknowledge a post-migration
+    /// announce request through the control queue.
+    pub announce_pending: Arc<AtomicBool>,
 }
 
 impl CtrlQueue {
-    pub fn new(taps: Vec<Tap>) -> Self {
-        CtrlQueue { taps }
+    pub fn new(taps: Vec<Tap>, announce_pending: Arc<AtomicBool>) -> Self {
+        CtrlQueue {
+            taps,
+            announce_pending,
+        }
     }
 
     pub fn process(
@@ -141,6 +151,18 @@ impl CtrlQueue {
                         ctrl_desc.len() + data_desc.len() + status_desc.len(),
                         status_desc,
                     )
+                }
+                VIRTIO_NET_CTRL_ANNOUNCE => {
+                    let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
+                    let ok = if u32::from(ctrl_hdr.cmd) == VIRTIO_NET_CTRL_ANNOUNCE_ACK {
+                        self.announce_pending.store(false, Ordering::Release);
+                        true
+                    } else {
+                        warn!("Unsupported command: {}", ctrl_hdr.cmd);
+                        false
+                    };
+
+                    (ok, ctrl_desc.len() + status_desc.len(), status_desc)
                 }
                 _ => {
                     let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;

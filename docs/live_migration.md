@@ -130,6 +130,10 @@ src $ ch-remote --api-socket=/tmp/api send-migration unix:/tmp/sock
 
 When the above commands completed, the VM should be successfully
 migrated to the destination machine without interrupting the workload.
+Cloud Hypervisor sends out RARP packages after the migration, to
+announce the new location of the VM to the network. For `virtio-net`
+devices, Cloud Hypervisor asks guests that negotiated
+`VIRTIO_NET_F_GUEST_ANNOUNCE` to also re-announce themselves.
 
 ### TCP Socket Migration
 
@@ -186,6 +190,10 @@ After completing the above commands, the source VM will be migrated to
 the destination host and continue running there. The source VM instance
 will terminate normally. All ongoing processes and connections within
 the VM should remain intact after the migration.
+Cloud Hypervisor sends out RARP packages after the migration, to
+announce the new location of the VM to the network. For `virtio-net`
+devices, Cloud Hypervisor asks guests that negotiated
+`VIRTIO_NET_F_GUEST_ANNOUNCE` to also re-announce themselves.
 
 #### Migration Parameters
 
