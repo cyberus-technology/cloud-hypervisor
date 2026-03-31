@@ -424,10 +424,14 @@ pub struct Net {
 #[derive(Serialize, Deserialize)]
 /// Serialized snapshot of the device state. The fields are copied from the
 /// live device when snapshotting and restored back into a new device instance.
+///
+/// Fields not present in previous versions are tagged with `#[serde(default)]`
+/// to allow deserialization if the field is not present.
 pub struct NetState {
     pub avail_features: u64,
     pub acked_features: u64,
     pub config: VirtioNetConfig,
+    #[serde(default)]
     pub announce_pending: bool,
     pub queue_size: Vec<u16>,
 }
@@ -1225,5 +1229,25 @@ mod unit_tests {
 
         assert!(!net.announce_pending.load(Ordering::Acquire));
         assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+    }
+
+    #[test]
+    fn test_net_state_deserialize_without_announce_pending_defaults_to_false() {
+        // Older snapshots do not contain announce_pending. Restoring them on a
+        // newer binary must treat the missing field as "no announce pending".
+        let state = NetState {
+            avail_features: 1,
+            acked_features: 2,
+            config: VirtioNetConfig::default(),
+            announce_pending: true,
+            queue_size: vec![256, 256],
+        };
+        let mut value = serde_json::to_value(state).unwrap();
+
+        value.as_object_mut().unwrap().remove("announce_pending");
+
+        let restored: NetState = serde_json::from_value(value).unwrap();
+
+        assert!(!restored.announce_pending);
     }
 }
