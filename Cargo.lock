@@ -2736,6 +2736,7 @@ dependencies = [
  "rate_limiter",
  "seccompiler",
  "serde",
+ "serde_json",
  "serde_with",
  "serial_buffer",
  "thiserror 2.0.18",
