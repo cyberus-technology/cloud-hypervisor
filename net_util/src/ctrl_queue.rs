@@ -136,11 +136,7 @@ impl CtrlQueue {
                         true
                     };
 
-                    (
-                        ok,
-                        ctrl_desc.len() + data_desc.len() + status_desc.len(),
-                        status_desc,
-                    )
+                    (ok, status_desc.len(), status_desc)
                 }
                 VIRTIO_NET_CTRL_GUEST_OFFLOADS => {
                     let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
@@ -169,11 +165,7 @@ impl CtrlQueue {
                         false
                     };
 
-                    (
-                        ok,
-                        ctrl_desc.len() + data_desc.len() + status_desc.len(),
-                        status_desc,
-                    )
+                    (ok, status_desc.len(), status_desc)
                 }
                 VIRTIO_NET_CTRL_ANNOUNCE => {
                     let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
@@ -188,7 +180,7 @@ impl CtrlQueue {
                     (ok, ctrl_desc.len() + status_desc.len(), status_desc)
                 }
                 _ => {
-                    let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
+                    let _data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
                     let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
                     let ok = if is_tolerated_ctrl_command(ctrl_hdr) {
                         debug!("Ignoring unsupported but tolerated control command {ctrl_hdr:?}");
@@ -197,11 +189,7 @@ impl CtrlQueue {
                         warn!("Unsupported command {ctrl_hdr:?}");
                         false
                     };
-                    (
-                        ok,
-                        ctrl_desc.len() + data_desc.len() + status_desc.len(),
-                        status_desc,
-                    )
+                    (ok, status_desc.len(), status_desc)
                 }
             };
 
