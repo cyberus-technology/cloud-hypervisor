@@ -79,21 +79,18 @@ impl CtrlQueue {
                         .translate_gva(access_platform, ctrl_desc.len() as usize),
                 )
                 .map_err(Error::GuestMemory)?;
-            let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
-
-            let data_desc_addr = data_desc
-                .addr()
-                .translate_gva(access_platform, data_desc.len() as usize);
-
-            let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
-
-            let ok = match u32::from(ctrl_hdr.class) {
+            let (ok, used_len, status_desc) = match u32::from(ctrl_hdr.class) {
                 VIRTIO_NET_CTRL_MQ => {
+                    let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
+                    let data_desc_addr = data_desc
+                        .addr()
+                        .translate_gva(access_platform, data_desc.len() as usize);
+                    let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
                     let queue_pairs = desc_chain
                         .memory()
                         .read_obj::<u16>(data_desc_addr)
                         .map_err(Error::GuestMemory)?;
-                    if u32::from(ctrl_hdr.cmd) != VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET {
+                    let ok = if u32::from(ctrl_hdr.cmd) != VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET {
                         warn!("Unsupported command: {}", ctrl_hdr.cmd);
                         false
                     } else if (queue_pairs < VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MIN as u16)
@@ -104,14 +101,25 @@ impl CtrlQueue {
                     } else {
                         info!("Number of MQ pairs requested: {queue_pairs}");
                         true
-                    }
+                    };
+
+                    (
+                        ok,
+                        ctrl_desc.len() + data_desc.len() + status_desc.len(),
+                        status_desc,
+                    )
                 }
                 VIRTIO_NET_CTRL_GUEST_OFFLOADS => {
+                    let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
+                    let data_desc_addr = data_desc
+                        .addr()
+                        .translate_gva(access_platform, data_desc.len() as usize);
+                    let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
                     let features = desc_chain
                         .memory()
                         .read_obj::<u64>(data_desc_addr)
                         .map_err(Error::GuestMemory)?;
-                    if u32::from(ctrl_hdr.cmd) == VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET {
+                    let ok = if u32::from(ctrl_hdr.cmd) == VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET {
                         let mut ok = true;
                         for tap in self.taps.iter_mut() {
                             info!("Reprogramming tap offload with features: {features}");
@@ -126,11 +134,23 @@ impl CtrlQueue {
                     } else {
                         warn!("Unsupported command: {}", ctrl_hdr.cmd);
                         false
-                    }
+                    };
+
+                    (
+                        ok,
+                        ctrl_desc.len() + data_desc.len() + status_desc.len(),
+                        status_desc,
+                    )
                 }
                 _ => {
+                    let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
+                    let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
                     warn!("Unsupported command {ctrl_hdr:?}");
-                    false
+                    (
+                        false,
+                        ctrl_desc.len() + data_desc.len() + status_desc.len(),
+                        status_desc,
+                    )
                 }
             };
 
@@ -143,10 +163,8 @@ impl CtrlQueue {
                         .translate_gva(access_platform, status_desc.len() as usize),
                 )
                 .map_err(Error::GuestMemory)?;
-            let len = ctrl_desc.len() + data_desc.len() + status_desc.len();
-
             queue
-                .add_used(desc_chain.memory(), desc_chain.head_index(), len)
+                .add_used(desc_chain.memory(), desc_chain.head_index(), used_len)
                 .map_err(Error::QueueAddUsed)?;
 
             if !queue
