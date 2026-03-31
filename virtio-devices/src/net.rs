@@ -423,7 +423,91 @@ pub struct NetState {
 // in the Linux kernel's UAPI headers.
 const ETH_FRAME_LEN: usize = 60;
 
+/// Constructor-time copy of the fields needed to initialize the live device
+/// state, derived either from a restored NetState or from fresh defaults.
+struct NetConstructorState {
+    avail_features: u64,
+    acked_features: u64,
+    config: VirtioNetConfig,
+    queue_sizes: Vec<u16>,
+    paused: bool,
+}
+
 impl Net {
+    /// Restores a [`NetConstructorState`] from the provided [`NetState`].
+    fn restored_constructor_state(id: &str, state: NetState) -> NetConstructorState {
+        info!("Restoring virtio-net {id}");
+
+        NetConstructorState {
+            avail_features: state.avail_features,
+            acked_features: state.acked_features,
+            config: state.config,
+            queue_sizes: state.queue_size,
+            paused: true,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Creates a new [`NetConstructorState`].
+    fn fresh_constructor_state(
+        guest_mac: Option<MacAddr>,
+        access_platform_enabled: bool,
+        mtu: Option<u16>,
+        num_queues: usize,
+        queue_size: u16,
+        offload_tso: bool,
+        offload_ufo: bool,
+        offload_csum: bool,
+    ) -> NetConstructorState {
+        let mut avail_features = (1 << VIRTIO_RING_F_EVENT_IDX) | (1 << VIRTIO_F_VERSION_1);
+
+        if mtu.is_some() {
+            avail_features |= 1 << VIRTIO_NET_F_MTU;
+        }
+
+        if access_platform_enabled {
+            avail_features |= 1u64 << VIRTIO_F_ACCESS_PLATFORM;
+        }
+
+        // Configure TSO/UFO features when hardware checksum offload is enabled.
+        if offload_csum {
+            avail_features |= (1 << VIRTIO_NET_F_CSUM)
+                | (1 << VIRTIO_NET_F_GUEST_CSUM)
+                | (1 << VIRTIO_NET_F_CTRL_GUEST_OFFLOADS);
+
+            if offload_tso {
+                avail_features |= (1 << VIRTIO_NET_F_HOST_ECN)
+                    | (1 << VIRTIO_NET_F_HOST_TSO4)
+                    | (1 << VIRTIO_NET_F_HOST_TSO6)
+                    | (1 << VIRTIO_NET_F_GUEST_ECN)
+                    | (1 << VIRTIO_NET_F_GUEST_TSO4)
+                    | (1 << VIRTIO_NET_F_GUEST_TSO6);
+            }
+
+            if offload_ufo {
+                avail_features |= (1 << VIRTIO_NET_F_HOST_UFO) | (1 << VIRTIO_NET_F_GUEST_UFO);
+            }
+        }
+
+        avail_features |= 1 << VIRTIO_NET_F_CTRL_VQ;
+        let queue_num = num_queues + 1;
+
+        let mut config = VirtioNetConfig::default();
+        if let Some(mac) = guest_mac {
+            build_net_config_space(&mut config, mac, num_queues, mtu, &mut avail_features);
+        } else {
+            build_net_config_space_with_mq(&mut config, num_queues, mtu, &mut avail_features);
+        }
+
+        NetConstructorState {
+            avail_features,
+            acked_features: 0,
+            config,
+            queue_sizes: vec![queue_size; queue_num],
+            paused: false,
+        }
+    }
+
     /// Create a new virtio network device with the given TAP interface.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_tap(
@@ -452,81 +536,35 @@ impl Net {
             }
         };
 
-        let (avail_features, acked_features, config, queue_sizes, paused) = if let Some(state) =
-            state
-        {
-            info!("Restoring virtio-net {id}");
-            (
-                state.avail_features,
-                state.acked_features,
-                state.config,
-                state.queue_size,
-                true,
-            )
+        let constructor_state = if let Some(state) = state {
+            Self::restored_constructor_state(&id, state)
         } else {
-            let mut avail_features = (1 << VIRTIO_RING_F_EVENT_IDX) | (1 << VIRTIO_F_VERSION_1);
-
-            if mtu.is_some() {
-                avail_features |= 1 << VIRTIO_NET_F_MTU;
-            }
-
-            if access_platform_enabled {
-                avail_features |= 1u64 << VIRTIO_F_ACCESS_PLATFORM;
-            }
-
-            // Configure TSO/UFO features when hardware checksum offload is enabled.
-            if offload_csum {
-                avail_features |= (1 << VIRTIO_NET_F_CSUM)
-                    | (1 << VIRTIO_NET_F_GUEST_CSUM)
-                    | (1 << VIRTIO_NET_F_CTRL_GUEST_OFFLOADS);
-
-                if offload_tso {
-                    avail_features |= (1 << VIRTIO_NET_F_HOST_ECN)
-                        | (1 << VIRTIO_NET_F_HOST_TSO4)
-                        | (1 << VIRTIO_NET_F_HOST_TSO6)
-                        | (1 << VIRTIO_NET_F_GUEST_ECN)
-                        | (1 << VIRTIO_NET_F_GUEST_TSO4)
-                        | (1 << VIRTIO_NET_F_GUEST_TSO6);
-                }
-
-                if offload_ufo {
-                    avail_features |= (1 << VIRTIO_NET_F_HOST_UFO) | (1 << VIRTIO_NET_F_GUEST_UFO);
-                }
-            }
-
-            avail_features |= 1 << VIRTIO_NET_F_CTRL_VQ;
-            let queue_num = num_queues + 1;
-
-            let mut config = VirtioNetConfig::default();
-            if let Some(mac) = guest_mac {
-                build_net_config_space(&mut config, mac, num_queues, mtu, &mut avail_features);
-            } else {
-                build_net_config_space_with_mq(&mut config, num_queues, mtu, &mut avail_features);
-            }
-
-            (
-                avail_features,
-                0,
-                config,
-                vec![queue_size; queue_num],
-                false,
+            Self::fresh_constructor_state(
+                guest_mac,
+                access_platform_enabled,
+                mtu,
+                num_queues,
+                queue_size,
+                offload_tso,
+                offload_ufo,
+                offload_csum,
             )
         };
 
         Ok(Net {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Net as u32,
-                avail_features,
-                acked_features,
-                queue_sizes,
+                avail_features: constructor_state.avail_features,
+                acked_features: constructor_state.acked_features,
+                queue_sizes: constructor_state.queue_sizes,
                 paused_sync: Some(Arc::new(Barrier::new((num_queues / 2) + 1))),
                 min_queues: 2,
-                paused: Arc::new(AtomicBool::new(paused)),
+                paused: Arc::new(AtomicBool::new(constructor_state.paused)),
                 ..Default::default()
             },
             id,
             taps,
-            config,
+            config: constructor_state.config,
             ctrl_queue_epoll_thread: None,
             counters: NetCounters::default(),
             seccomp_action,
