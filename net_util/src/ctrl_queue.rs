@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use log::{debug, error, info, warn};
 use thiserror::Error;
 use virtio_bindings::virtio_net::{
@@ -72,18 +75,23 @@ fn is_tolerated_ctrl_command(ctrl_hdr: ControlHeader) -> bool {
             u32::from(ctrl_hdr.cmd),
             VIRTIO_NET_CTRL_VLAN_ADD | VIRTIO_NET_CTRL_VLAN_DEL
         ),
-        VIRTIO_NET_CTRL_ANNOUNCE => u32::from(ctrl_hdr.cmd) == VIRTIO_NET_CTRL_ANNOUNCE_ACK,
         _ => false,
     }
 }
 
 pub struct CtrlQueue {
     pub taps: Vec<Tap>,
+    /// Tracks whether the guest still needs to acknowledge a post-migration
+    /// announce request through the control queue.
+    pub announce_pending: Arc<AtomicBool>,
 }
 
 impl CtrlQueue {
-    pub fn new(taps: Vec<Tap>) -> Self {
-        CtrlQueue { taps }
+    pub fn new(taps: Vec<Tap>, announce_pending: Arc<AtomicBool>) -> Self {
+        CtrlQueue {
+            taps,
+            announce_pending,
+        }
     }
 
     pub fn process(
@@ -154,6 +162,18 @@ impl CtrlQueue {
                                 .ok();
                         }
                         ok
+                    } else {
+                        warn!("Unsupported command: {}", ctrl_hdr.cmd);
+                        false
+                    };
+
+                    (ok, status_desc)
+                }
+                VIRTIO_NET_CTRL_ANNOUNCE => {
+                    let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
+                    let ok = if u32::from(ctrl_hdr.cmd) == VIRTIO_NET_CTRL_ANNOUNCE_ACK {
+                        self.announce_pending.store(false, Ordering::Release);
+                        true
                     } else {
                         warn!("Unsupported command: {}", ctrl_hdr.cmd);
                         false

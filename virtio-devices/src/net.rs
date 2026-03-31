@@ -402,6 +402,9 @@ pub struct Net {
     id: String,
     taps: Vec<Tap>,
     config: VirtioNetConfig,
+    /// Tracks whether the guest still needs to acknowledge a post-migration
+    /// announce request through the control queue.
+    announce_pending: Arc<AtomicBool>,
     ctrl_queue_epoll_thread: Option<thread::JoinHandle<()>>,
     counters: NetCounters,
     seccomp_action: SeccompAction,
@@ -411,10 +414,13 @@ pub struct Net {
 }
 
 #[derive(Serialize, Deserialize)]
+/// Serialized snapshot of the device state. The fields are copied from the
+/// live device when snapshotting and restored back into a new device instance.
 pub struct NetState {
     pub avail_features: u64,
     pub acked_features: u64,
     pub config: VirtioNetConfig,
+    pub announce_pending: bool,
     pub queue_size: Vec<u16>,
 }
 
@@ -429,6 +435,7 @@ struct NetConstructorState {
     avail_features: u64,
     acked_features: u64,
     config: VirtioNetConfig,
+    announce_pending: bool,
     queue_sizes: Vec<u16>,
     paused: bool,
 }
@@ -442,6 +449,7 @@ impl Net {
             avail_features: state.avail_features,
             acked_features: state.acked_features,
             config: state.config,
+            announce_pending: state.announce_pending,
             queue_sizes: state.queue_size,
             paused: true,
         }
@@ -491,6 +499,7 @@ impl Net {
 
         avail_features |= 1 << VIRTIO_NET_F_CTRL_VQ;
         avail_features |= 1 << VIRTIO_NET_F_STATUS;
+        avail_features |= 1 << VIRTIO_NET_F_GUEST_ANNOUNCE;
         let queue_num = num_queues + 1;
 
         let mut config = VirtioNetConfig::default();
@@ -504,6 +513,7 @@ impl Net {
             avail_features,
             acked_features: 0,
             config,
+            announce_pending: false,
             queue_sizes: vec![queue_size; queue_num],
             paused: false,
         }
@@ -566,6 +576,7 @@ impl Net {
             id,
             taps,
             config: constructor_state.config,
+            announce_pending: Arc::new(AtomicBool::new(constructor_state.announce_pending)),
             ctrl_queue_epoll_thread: None,
             counters: NetCounters::default(),
             seccomp_action,
@@ -684,6 +695,7 @@ impl Net {
             avail_features: self.common.avail_features,
             acked_features: self.common.acked_features,
             config: self.config,
+            announce_pending: self.announce_pending.load(Ordering::Acquire),
             queue_size: self.common.queue_sizes.clone(),
         }
     }
@@ -699,6 +711,10 @@ impl Net {
 
         if self.common.feature_acked(VIRTIO_NET_F_STATUS.into()) {
             config.status |= VIRTIO_NET_S_LINK_UP as u16;
+
+            if self.announce_pending.load(Ordering::Acquire) {
+                config.status |= VIRTIO_NET_S_ANNOUNCE as u16;
+            }
         }
 
         config
@@ -825,7 +841,7 @@ impl VirtioDevice for Net {
                 mem: mem.clone(),
                 kill_evt,
                 pause_evt,
-                ctrl_q: CtrlQueue::new(self.taps.clone()),
+                ctrl_q: CtrlQueue::new(self.taps.clone(), Arc::clone(&self.announce_pending)),
                 queue: ctrl_queue,
                 queue_evt: ctrl_queue_evt,
                 access_platform: self.common.access_platform(),
@@ -936,6 +952,7 @@ impl VirtioDevice for Net {
 
     fn reset(&mut self) {
         self.common.reset();
+        self.announce_pending.store(false, Ordering::Release);
         event!("virtio-device", "reset", "id", &self.id);
     }
 
@@ -971,10 +988,7 @@ impl VirtioDevice for Net {
     }
 
     fn post_migration_announcer(&self) -> Option<Box<dyn PostMigrationAnnouncer>> {
-        Some(Box::new(TapRarpAnnouncer::new(
-            self.build_rarp_announce(),
-            self.taps.clone(),
-        )))
+        Some(Box::new(VirtioNetPostMigrationAnnouncer::new(self)))
     }
 }
 
@@ -1005,25 +1019,42 @@ impl Snapshottable for Net {
 impl Transportable for Net {}
 impl Migratable for Net {}
 
-/// Sends RARP packets on a virtio-net device, to update the MAC to port
-/// mappings of switches in the network. This reduces the time until network
-/// packets reliably arrive at the network device.
-pub struct TapRarpAnnouncer {
-    announce: [u8; ETH_FRAME_LEN], // Buffer for the raw RARP packet.
-    taps: Vec<Tap>,                // The TAP devices to the the packets on.
+/// Announces this virtio-net device on the network.
+/// Most fields are cloned references to device state so retry rounds can run
+/// without borrowing the device itself.
+pub struct VirtioNetPostMigrationAnnouncer {
+    id: String,
+    /// Remembers whether this device negotiated the guest-visible announce path.
+    guest_announce_negotiated: bool,
+    announce_pending: Arc<AtomicBool>,
+    interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
+    /// Prebuilt host-side RARP payload used for immediate post-migration
+    /// announcement retries.
+    rarp_announce: [u8; ETH_FRAME_LEN],
+    taps: Vec<Tap>,
 }
 
-impl TapRarpAnnouncer {
-    pub fn new(announce: [u8; 60], taps: Vec<Tap>) -> Self {
-        Self { announce, taps }
+impl VirtioNetPostMigrationAnnouncer {
+    pub fn new(dev: &Net) -> Self {
+        Self {
+            id: dev.id.clone(),
+            guest_announce_negotiated: dev.common.feature_acked(VIRTIO_NET_F_GUEST_ANNOUNCE.into()),
+            announce_pending: Arc::clone(&dev.announce_pending),
+            interrupt_cb: dev.common.interrupt_cb.clone(),
+            rarp_announce: dev.build_rarp_announce(),
+            taps: dev.taps.clone(),
+        }
     }
 }
 
-impl PostMigrationAnnouncer for TapRarpAnnouncer {
+impl PostMigrationAnnouncer for VirtioNetPostMigrationAnnouncer {
+    // Send a host-side RARP immediately so the network can converge before the
+    // guest runs again, and then also ask the guest to re-announce itself when
+    // GUEST_ANNOUNCE was negotiated.
     fn announce(&mut self) {
-        // We have to add a virtio-net header to the announce.
-        let mut buf = vec![0u8; vnet_hdr_len() + self.announce.len()];
-        buf[vnet_hdr_len()..].copy_from_slice(&self.announce);
+        // We have to add a virtio-net header to the RARP announce.
+        let mut buf = vec![0u8; vnet_hdr_len() + self.rarp_announce.len()];
+        buf[vnet_hdr_len()..].copy_from_slice(&self.rarp_announce);
 
         for tap in &self.taps {
             // SAFETY: `buf.as_ptr()` is valid for `buf.len()` bytes and remains
@@ -1035,6 +1066,22 @@ impl PostMigrationAnnouncer for TapRarpAnnouncer {
                     buf.len(),
                 )
             };
+        }
+
+        if self.guest_announce_negotiated
+            && let Some(interrupt_cb) = &self.interrupt_cb
+        {
+            self.announce_pending.store(true, Ordering::Release);
+
+            interrupt_cb
+                .trigger(VirtioInterruptType::Config)
+                .inspect_err(|e| {
+                    warn!(
+                        "Unable to send interrupt for virtio-net device {}: {e}",
+                        self.id
+                    );
+                })
+                .ok();
         }
     }
 }
@@ -1058,6 +1105,7 @@ mod unit_tests {
             id: "test-net".to_string(),
             taps: Vec::new(),
             config: VirtioNetConfig::default(),
+            announce_pending: Arc::new(AtomicBool::new(false)),
             ctrl_queue_epoll_thread: None,
             counters: NetCounters::default(),
             seccomp_action: SeccompAction::Allow,
