@@ -761,6 +761,27 @@ impl Net {
 
         buf
     }
+
+    /// Re-notify the guest about a restored pending ANNOUNCE request once the
+    /// transport has installed an interrupt callback during activation.
+    fn notify_pending_guest_announce(&self) {
+        if self.announce_pending.load(Ordering::Acquire)
+            && self
+                .common
+                .feature_acked(VIRTIO_NET_F_GUEST_ANNOUNCE.into())
+            && let Some(interrupt_cb) = &self.common.interrupt_cb
+        {
+            interrupt_cb
+                .trigger(VirtioInterruptType::Config)
+                .inspect_err(|e| {
+                    warn!(
+                        "Unable to resend pending announce interrupt for virtio-net device {}: {e}",
+                        self.id
+                    );
+                })
+                .ok();
+        }
+    }
 }
 
 impl Drop for Net {
@@ -949,6 +970,7 @@ impl VirtioDevice for Net {
         }
 
         self.common.epoll_threads = Some(epoll_threads);
+        self.notify_pending_guest_announce();
 
         event!("virtio-device", "activated", "id", &self.id);
         Ok(())
@@ -1211,6 +1233,22 @@ mod unit_tests {
         assert!(!net.announce_pending.load(Ordering::Acquire));
         assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
         assert_eq!(interrupt.config_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_restored_pending_announce_retriggers_config_interrupt() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(
+            (1 << VIRTIO_NET_F_GUEST_ANNOUNCE) | (1 << VIRTIO_NET_F_STATUS),
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+        net.announce_pending.store(true, Ordering::Release);
+
+        net.notify_pending_guest_announce();
+
+        assert!(net.announce_pending.load(Ordering::Acquire));
+        assert_ne!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
     }
 
     #[test]
