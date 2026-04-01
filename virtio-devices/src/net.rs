@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::{result, thread};
 
@@ -414,6 +414,9 @@ pub struct Net {
     /// Tracks whether the guest still needs to acknowledge a post-migration
     /// announce request through the control queue.
     announce_pending: Arc<AtomicBool>,
+    /// Generation counter used to invalidate active announcers created before a
+    /// reset or device teardown, so they stop sending notifications.
+    announce_generation: Arc<AtomicU64>,
     ctrl_queue_epoll_thread: Option<thread::JoinHandle<()>>,
     counters: NetCounters,
     seccomp_action: SeccompAction,
@@ -579,6 +582,7 @@ impl Net {
             taps,
             config: constructor_state.config,
             announce_pending: Arc::new(AtomicBool::new(constructor_state.announce_pending)),
+            announce_generation: Arc::new(AtomicU64::new(0)),
             ctrl_queue_epoll_thread: None,
             counters: NetCounters::default(),
             seccomp_action,
@@ -783,6 +787,8 @@ impl Net {
 
 impl Drop for Net {
     fn drop(&mut self) {
+        self.announce_generation.fetch_add(1, Ordering::AcqRel);
+
         // Get a comma-separated list of the interface names of the tap devices
         // associated with this network device.
         let ifnames_str = self
@@ -976,6 +982,7 @@ impl VirtioDevice for Net {
 
     fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         self.announce_pending.store(false, Ordering::Release);
+        self.announce_generation.fetch_add(1, Ordering::AcqRel);
         let result = self.common.reset();
         event!("virtio-device", "reset", "id", &self.id);
         result
@@ -1048,6 +1055,10 @@ pub struct VirtioNetPostMigrationAnnouncer {
     /// Remembers whether this device negotiated the guest-visible announce path.
     guest_announce_negotiated: bool,
     announce_pending: Arc<AtomicBool>,
+    announce_generation: Arc<AtomicU64>,
+    /// Captures the announce generation at creation time to invalidate stale
+    /// retry sessions after reset or teardown.
+    generation: u64,
     interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
     /// Prebuilt host-side RARP payload used for immediate post-migration
     /// announcement retries.
@@ -1061,6 +1072,8 @@ impl VirtioNetPostMigrationAnnouncer {
             id: dev.id.clone(),
             guest_announce_negotiated: dev.common.feature_acked(VIRTIO_NET_F_GUEST_ANNOUNCE.into()),
             announce_pending: Arc::clone(&dev.announce_pending),
+            announce_generation: Arc::clone(&dev.announce_generation),
+            generation: dev.announce_generation.load(Ordering::Acquire),
             interrupt_cb: dev.common.interrupt_cb.clone(),
             rarp_announce: dev.build_rarp_announce(),
             taps: dev.taps.clone(),
@@ -1073,7 +1086,12 @@ impl PostMigrationAnnouncer for VirtioNetPostMigrationAnnouncer {
     // guest runs again, and then also ask the guest to re-announce itself when
     // GUEST_ANNOUNCE was negotiated.
     fn announce(&mut self) {
-        // We have to add a virtio-net header to the RARP announce.
+        // If the announce generations don't match, we don't send any announcements.
+        if self.announce_generation.load(Ordering::Acquire) != self.generation {
+            return;
+        }
+
+        // We have to add a virtio-net header to the announce.
         let mut buf = vec![0u8; vnet_hdr_len() + self.rarp_announce.len()];
         buf[vnet_hdr_len()..].copy_from_slice(&self.rarp_announce);
 
@@ -1158,6 +1176,7 @@ mod unit_tests {
             taps: Vec::new(),
             config: VirtioNetConfig::default(),
             announce_pending: Arc::new(AtomicBool::new(false)),
+            announce_generation: Arc::new(AtomicU64::new(0)),
             ctrl_queue_epoll_thread: None,
             counters: NetCounters::default(),
             seccomp_action: SeccompAction::Allow,
@@ -1267,6 +1286,47 @@ mod unit_tests {
 
         assert!(!net.announce_pending.load(Ordering::Acquire));
         assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+    }
+
+    #[test]
+    fn test_reset_invalidates_old_announcer() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let mut net = test_net(
+            1 << VIRTIO_NET_F_GUEST_ANNOUNCE,
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+        let mut announcer = net.post_migration_announcer().unwrap();
+
+        announcer.announce();
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+
+        let _ = net.reset();
+        announcer.announce();
+
+        assert!(!net.announce_pending.load(Ordering::Acquire));
+        assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_drop_invalidates_old_announcer() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let mut announcer = {
+            let net = test_net(
+                1 << VIRTIO_NET_F_GUEST_ANNOUNCE,
+                Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+            );
+            let mut announcer = net.post_migration_announcer().unwrap();
+
+            announcer.announce();
+            assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+
+            announcer
+        };
+
+        announcer.announce();
+
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
     }
 
     #[test]
