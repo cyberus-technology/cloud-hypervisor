@@ -490,6 +490,7 @@ impl Net {
         }
 
         avail_features |= 1 << VIRTIO_NET_F_CTRL_VQ;
+        avail_features |= 1 << VIRTIO_NET_F_STATUS;
         let queue_num = num_queues + 1;
 
         let mut config = VirtioNetConfig::default();
@@ -687,6 +688,22 @@ impl Net {
         }
     }
 
+    /// Return the guest-visible virtio-net config, recomputing `status` from the
+    /// current state of the device.
+    fn config_with_status(&self) -> VirtioNetConfig {
+        let mut config = self.config;
+
+        // We want to recompute the guest-visible status field from the current state of
+        // the device. We clear this field first to avoid showing stale data.
+        config.status = 0;
+
+        if self.common.feature_acked(VIRTIO_NET_F_STATUS.into()) {
+            config.status |= VIRTIO_NET_S_LINK_UP as u16;
+        }
+
+        config
+    }
+
     #[cfg(fuzzing)]
     pub fn wait_for_epoll_threads(&mut self) {
         self.common.wait_for_epoll_threads();
@@ -773,7 +790,8 @@ impl VirtioDevice for Net {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        self.read_config_from_slice(self.config.as_slice(), offset, data);
+        let config = self.config_with_status();
+        self.read_config_from_slice(config.as_slice(), offset, data);
     }
 
     fn activate(&mut self, context: crate::device::ActivationContext) -> ActivateResult {
@@ -1018,5 +1036,61 @@ impl PostMigrationAnnouncer for TapRarpAnnouncer {
                 )
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use std::mem::size_of;
+
+    use seccompiler::SeccompAction;
+    use virtio_bindings::virtio_net::{VIRTIO_NET_F_STATUS, VIRTIO_NET_S_LINK_UP};
+    use vmm_sys_util::eventfd::EventFd;
+
+    use super::*;
+
+    fn test_net(acked_features: u64) -> Net {
+        Net {
+            common: VirtioCommon {
+                acked_features,
+                ..Default::default()
+            },
+            id: "test-net".to_string(),
+            taps: Vec::new(),
+            config: VirtioNetConfig::default(),
+            ctrl_queue_epoll_thread: None,
+            counters: NetCounters::default(),
+            seccomp_action: SeccompAction::Allow,
+            rate_limiter_config: None,
+            exit_evt: EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            device_status: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    const STATUS_OFFSET: usize = std::mem::offset_of!(VirtioNetConfig, status);
+    fn read_status(device: &Net) -> u16 {
+        let mut data = vec![0; size_of::<VirtioNetConfig>()];
+        device.read_config(0, &mut data);
+
+        u16::from_le_bytes(
+            data[STATUS_OFFSET..STATUS_OFFSET + size_of::<u16>()]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_fresh_constructor_state_exposes_status() {
+        let state =
+            Net::fresh_constructor_state(None, false, Some(MIN_MTU), 2, 256, false, false, false);
+
+        assert_ne!(state.avail_features & (1 << VIRTIO_NET_F_STATUS), 0);
+    }
+
+    #[test]
+    fn test_status_feature_reports_link_up() {
+        let net = test_net(1 << VIRTIO_NET_F_STATUS);
+
+        assert_eq!(read_status(&net), VIRTIO_NET_S_LINK_UP as u16);
     }
 }
