@@ -2964,7 +2964,7 @@ impl Vmm {
         s.migration_duration = s.migration_start_time.elapsed();
 
         info!(
-            "Migration complete: downtime:{:}ms,total:{:1}s,iterations:{}",
+            "Migration complete: downtime(actual):{}ms,total:{:1}s,iterations:{}",
             s.downtime_duration.as_millis(),
             s.migration_duration.as_secs_f64(),
             s.iteration,
