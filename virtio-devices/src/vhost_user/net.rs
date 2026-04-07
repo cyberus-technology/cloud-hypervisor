@@ -16,7 +16,8 @@ use virtio_bindings::virtio_net::{
     VIRTIO_NET_F_CSUM, VIRTIO_NET_F_CTRL_VQ, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_ECN,
     VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_GUEST_UFO,
     VIRTIO_NET_F_HOST_ECN, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_TSO6, VIRTIO_NET_F_HOST_UFO,
-    VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF, VIRTIO_NET_F_MTU,
+    VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF, VIRTIO_NET_F_MTU, VIRTIO_NET_F_STATUS,
+    VIRTIO_NET_S_LINK_UP,
 };
 use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::{Queue, QueueT};
@@ -93,10 +94,10 @@ impl Net {
         ) = if let Some(state) = state {
             info!("Restoring vhost-user-net {id}");
 
-            // The backend acknowledged features must not contain
-            // VIRTIO_NET_F_MAC since we don't expect the backend
-            // to handle it.
-            let backend_acked_features = state.acked_features & !(1 << VIRTIO_NET_F_MAC);
+            // The backend acknowledged features must not contain frontend-only
+            // bits since we don't expect the backend to handle them.
+            let backend_acked_features =
+                state.acked_features & !((1 << VIRTIO_NET_F_MAC) | (1 << VIRTIO_NET_F_STATUS));
 
             vu.set_protocol_features_vhost_user(
                 backend_acked_features,
@@ -180,9 +181,9 @@ impl Net {
                 num_queues += 1;
             }
 
-            // Make sure the virtio feature to set the MAC address is exposed to
-            // the guest, even if it hasn't been negotiated with the backend.
-            acked_features |= 1 << VIRTIO_NET_F_MAC;
+            // Make sure frontend-owned config-space features stay exposed to
+            // the guest, even if they are not negotiated with the backend.
+            acked_features |= (1 << VIRTIO_NET_F_MAC) | (1 << VIRTIO_NET_F_STATUS);
 
             (
                 acked_features,
@@ -237,6 +238,22 @@ impl Net {
             vu_num_queues: self.vu_common.vu_num_queues,
         }
     }
+
+    /// Return the guest-visible virtio-net config, recomputing `status` from the
+    /// current state of the device.
+    fn config_with_status(&self) -> VirtioNetConfig {
+        let mut config = self.config;
+
+        // We want to recompute the guest-visible status field from the current state of
+        // the device. We clear this field first to avoid showing stale data.
+        config.status = 0;
+
+        if self.common.feature_acked(VIRTIO_NET_F_STATUS.into()) {
+            config.status |= VIRTIO_NET_S_LINK_UP as u16;
+        }
+
+        config
+    }
 }
 
 impl Drop for Net {
@@ -285,7 +302,8 @@ impl VirtioDevice for Net {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        self.read_config_from_slice(self.config.as_slice(), offset, data);
+        let config = self.config_with_status();
+        self.read_config_from_slice(config.as_slice(), offset, data);
     }
 
     fn activate(
@@ -340,9 +358,10 @@ impl VirtioDevice for Net {
 
         let backend_req_handler: Option<FrontendReqHandler<BackendReqHandler>> = None;
 
-        // The backend acknowledged features must not contain VIRTIO_NET_F_MAC
-        // since we don't expect the backend to handle it.
-        let backend_acked_features = self.common.acked_features & !(1 << VIRTIO_NET_F_MAC);
+        // The backend acknowledged features must not contain frontend-only
+        // bits since we don't expect the backend to handle them.
+        let backend_acked_features =
+            self.common.acked_features & !((1 << VIRTIO_NET_F_MAC) | (1 << VIRTIO_NET_F_STATUS));
 
         // Run a dedicated thread for handling potential reconnections with
         // the backend.
@@ -463,5 +482,53 @@ impl Migratable for Net {
     fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
         self.vu_common
             .complete_migration(self.common.kill_evt.take())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use std::mem::size_of;
+
+    use seccompiler::SeccompAction;
+    use virtio_bindings::virtio_net::{VIRTIO_NET_F_STATUS, VIRTIO_NET_S_LINK_UP};
+    use vmm_sys_util::eventfd::EventFd;
+
+    use super::*;
+
+    fn test_net(acked_features: u64) -> Net {
+        Net {
+            common: VirtioCommon {
+                acked_features,
+                ..Default::default()
+            },
+            vu_common: VhostUserCommon::default(),
+            id: "test-vu-net".to_string(),
+            config: VirtioNetConfig::default(),
+            guest_memory: None,
+            ctrl_queue_epoll_thread: None,
+            epoll_thread: None,
+            seccomp_action: SeccompAction::Allow,
+            exit_evt: EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            iommu: false,
+        }
+    }
+
+    const STATUS_OFFSET: usize = std::mem::offset_of!(VirtioNetConfig, status);
+    fn read_status(device: &Net) -> u16 {
+        let mut data = vec![0; size_of::<VirtioNetConfig>()];
+        device.read_config(0, &mut data);
+
+        u16::from_le_bytes(
+            data[STATUS_OFFSET..STATUS_OFFSET + size_of::<u16>()]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_status_feature_reports_link_up() {
+        let net = test_net(1 << VIRTIO_NET_F_STATUS);
+
+        assert_eq!(read_status(&net), VIRTIO_NET_S_LINK_UP as u16);
     }
 }
