@@ -300,16 +300,25 @@ impl From<u64> for EpollDispatch {
 // TODO make this a member of Vmm?
 static MIGRATION_PROGRESS_SNAPSHOT: Mutex<Option<MigrationProgress>> = Mutex::new(None);
 
-// The time a writer may block on a socket until it throws an error.
-// Also the interval at which the [`KeepAliveStream`] sends keep alive messages.
-// This timeout has to be smaller than [`MIGRATION_READ_TIMEOUT_DURATION`],
-// otherwise spurious timeouts may happen.
+/// The time a writer may block on a socket until it throws an error.
+///
+/// Also the interval at which the [`KeepAliveStream`] sends keep alive messages.
+/// This timeout has to be smaller than [`MIGRATION_READ_TIMEOUT_DURATION`],
+/// otherwise spurious timeouts may happen.
 const MIGRATION_WRITE_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
 /// The time a reader may block on a socket until it throws an error.
+///
 /// This timeout has to be larger than [`MIGRATION_WRITE_TIMEOUT_DURATION`],
 /// otherwise spurious timeouts may happen.
 const MIGRATION_READ_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+
+const _: () = {
+    assert!(
+        MIGRATION_WRITE_TIMEOUT_DURATION.as_millis() < MIGRATION_READ_TIMEOUT_DURATION.as_millis(),
+        "MIGRATION_WRITE_TIMEOUT_DURATION must be smaller than MIGRATION_READ_TIMEOUT_DURATION",
+    );
+};
 
 enum SocketStream {
     Unix(UnixStream),
