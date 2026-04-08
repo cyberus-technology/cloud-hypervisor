@@ -328,6 +328,15 @@ const MIGRATION_READ_TIMEOUT_DURATION: Duration = {
     migration_read_timeout_duration
 };
 
+/// The timeout of the migration-receiver.
+///
+/// We set this to a relatively high number to ease local development with
+/// `ch-remote`. For production, this has no negative impacts as the management
+/// software has full control over the Cloud Hypervisor process and will kill
+/// the process on terminated migration. The timeout is used as a fallback
+/// if the management software doesn't kill the process correctly.
+const MIGRATION_ACCEPT_TIMEOUT_DURATION: Duration = Duration::from_secs(60);
+
 enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
@@ -1134,8 +1143,12 @@ impl ReceiveListener {
         match self {
             ReceiveListener::Tcp(listener) => {
                 let socket = {
+                    info!(
+                        "Waiting for incoming migration (timeout {}s) ...",
+                        MIGRATION_ACCEPT_TIMEOUT_DURATION.as_secs()
+                    );
                     let socket =
-                        Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION)?;
+                        Self::accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)?;
 
                     socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
                     socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
@@ -1169,8 +1182,12 @@ impl ReceiveListener {
             }
             ReceiveListener::Tls(listener, conn) => {
                 let socket = {
+                    info!(
+                        "Waiting for incoming migration (timeout {}s) ...",
+                        MIGRATION_ACCEPT_TIMEOUT_DURATION.as_secs()
+                    );
                     let socket =
-                        Self::accept_with_timeout(listener, MIGRATION_READ_TIMEOUT_DURATION)?;
+                        Self::accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)?;
                     socket.set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))?;
                     socket.set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))?;
                     conn.wrap(socket)
