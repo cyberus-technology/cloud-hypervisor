@@ -40,7 +40,14 @@ use crate::{GuestMemoryMmap, VmMigrationConfig};
 /// receiver side.
 pub(crate) const MAX_MIGRATION_CONNECTIONS: u32 = 128;
 
-const MIGRATION_ACCEPT_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+/// The timeout of the migration-receiver.
+///
+/// We set this to a relatively high number to ease local development with
+/// `ch-remote`. For production, this has no negative impacts as the management
+/// software has full control over the Cloud Hypervisor process and will kill
+/// the process on terminated migration. The timeout is used as a fallback
+/// if the management software doesn't kill the process correctly.
+const MIGRATION_ACCEPT_TIMEOUT_DURATION: Duration = Duration::from_secs(60);
 
 /// Transport-agnostic listener used to receive connections.
 #[derive(Debug)]
@@ -55,6 +62,10 @@ impl ReceiveListener {
     pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
         match self {
             ReceiveListener::Tcp(listener) => {
+                info!(
+                    "Waiting for incoming migration via TCP (timeout {}s) ...",
+                    MIGRATION_ACCEPT_TIMEOUT_DURATION.as_secs()
+                );
                 let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
                     .context("Failed to accept TCP migration connection")
                     .map_err(MigratableError::MigrateReceive)?;
@@ -66,6 +77,10 @@ impl ReceiveListener {
                 .context("Failed to accept Unix migration connection")
                 .map_err(MigratableError::MigrateReceive),
             ReceiveListener::Tls(listener, config) => {
+                info!(
+                    "Waiting for incoming migration via TCP/TLS (timeout {}s) ...",
+                    MIGRATION_ACCEPT_TIMEOUT_DURATION.as_secs()
+                );
                 let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
                     .context("Failed to accept TCP connection")
                     .map_err(MigratableError::MigrateReceive)?;
