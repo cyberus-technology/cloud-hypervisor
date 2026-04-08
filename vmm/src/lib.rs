@@ -3263,11 +3263,9 @@ impl RequestHandler for Vmm {
         // Accept the connection and get the socket
         let mut socket = listener
             .accept(true)
-            .context("Failed to accept migration connection")
-            .map_err(|e| {
-                warn!("{e}");
-                MigratableError::MigrateReceive(e)
-            })?;
+            .inspect_err(|e| warn!("{e}"))
+            .context("Failed to accept incoming migration")
+            .map_err(MigratableError::MigrateReceive)?;
 
         event!("vm", "migration-receive-started");
 
