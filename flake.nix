@@ -65,6 +65,9 @@
               inherit (pkgs.cloud-hypervisor) meta;
               inherit src;
               craneLib = craneLib';
+
+              # Query the repo revision to pass the cloud-hypervisor to be printed in the version string.
+              chExtraVersion = self.dirtyRev or self.rev or "unknown-revision";
             };
           in
           {
