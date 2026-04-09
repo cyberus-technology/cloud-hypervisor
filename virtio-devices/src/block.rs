@@ -57,6 +57,9 @@ const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 const COMPLETION_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
 // New 'wake up' event from the rate limiter
 const RATE_LIMITER_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
+// One-shot queue handler event used after a VM restore to wake the
+// handler so it can drain restored requests once vCPUs resume.
+const RESUME_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 4;
 
 // latency scale, for reduce precision loss in calculate.
 const LATENCY_SCALE: u64 = 10000;
@@ -155,12 +158,17 @@ struct BlockEpollHandler {
     writeback: Arc<AtomicBool>,
     counters: BlockCounters,
     queue_evt: EventFd,
+    /// Event used after a VM restore to wake this queue handler so it can
+    /// drain restored requests once vCPUs resume.
+    resume_evt: EventFd,
     inflight_requests: VecDeque<(u16, Request)>,
     rate_limiter: Option<RateLimiterGroupHandle>,
     access_platform: Option<Arc<dyn AccessPlatform>>,
     host_cpus: Option<Vec<usize>>,
     acked_features: u64,
     disable_sector0_writes: bool,
+    /// Whether this queue handler still needs its one-shot drain of restored requests.
+    needs_restored_queue_drain: bool,
 }
 
 fn has_feature(features: u64, feature_flag: u64) -> bool {
@@ -558,6 +566,44 @@ impl BlockEpollHandler {
         }
     }
 
+    /// Drains pending requests once after a VM restore and vCPU resume if the queue is non-empty.
+    fn drain_restored_queue(&mut self) -> result::Result<(), EpollHelperError> {
+        if !self.needs_restored_queue_drain {
+            return Ok(());
+        }
+
+        // `Block::resume_after_vcpus()` triggers this one-shot drain once the
+        // guest is running again.
+
+        let mem = self.mem.memory();
+        let used_idx = self
+            .queue
+            .used_idx(mem.deref(), Ordering::Acquire)
+            .map_err(EpollHelperError::QueueRingIndex)?;
+        let avail_idx = self
+            .queue
+            .avail_idx(mem.deref(), Ordering::Acquire)
+            .map_err(EpollHelperError::QueueRingIndex)?;
+        // Queue indices are wrapping u16 counters.
+        let pending = (avail_idx - used_idx).0;
+
+        // After restore the queue can already contain pending work. Drain it
+        // once on resume, because no new kick may arrive.
+        if pending != 0 {
+            let rate_limit_reached = self.rate_limiter.as_ref().is_some_and(|r| r.is_blocked());
+
+            // If restore-time draining is rate-limited here, the RATE_LIMITER_EVENT path will
+            // call `process_queue_submit_and_signal()` once the limiter unblocks.
+            if !rate_limit_reached {
+                self.process_queue_submit_and_signal()?;
+            }
+        }
+
+        self.needs_restored_queue_drain = false;
+
+        Ok(())
+    }
+
     fn run(
         &mut self,
         paused: &AtomicBool,
@@ -569,6 +615,7 @@ impl BlockEpollHandler {
         if let Some(rate_limiter) = &self.rate_limiter {
             helper.add_event(rate_limiter.as_raw_fd(), RATE_LIMITER_EVENT)?;
         }
+        helper.add_event(self.resume_evt.as_raw_fd(), RESUME_EVENT)?;
         self.set_queue_thread_affinity();
         helper.run(paused, paused_sync, self)?;
 
@@ -636,6 +683,13 @@ impl EpollHelperHandler for BlockEpollHandler {
                     )));
                 }
             }
+            RESUME_EVENT => {
+                self.resume_evt.read().map_err(|e| {
+                    EpollHelperError::HandleEvent(anyhow!("Failed to get resume event: {e:?}"))
+                })?;
+
+                self.drain_restored_queue()?;
+            }
             _ => {
                 return Err(EpollHelperError::HandleEvent(anyhow!(
                     "Unexpected event: {ev_type}"
@@ -662,6 +716,10 @@ pub struct Block {
     serial: Vec<u8>,
     queue_affinity: BTreeMap<u16, Vec<usize>>,
     disable_sector0_writes: bool,
+    /// Whether this device still needs to wake queue handlers after vCPUs resume from VM restore.
+    needs_restore_wakeup: bool,
+    /// Per-queue events used after a VM restore to wake blk queue handlers once.
+    resume_evts: Vec<EventFd>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -693,7 +751,7 @@ impl Block {
         sparse: bool,
         disable_sector0_writes: bool,
     ) -> io::Result<Self> {
-        let (disk_nsectors, avail_features, acked_features, config, paused) =
+        let (disk_nsectors, avail_features, acked_features, config, paused, needs_restore_wakeup) =
             if let Some(state) = state {
                 info!("Restoring virtio-block {id}");
                 (
@@ -701,6 +759,7 @@ impl Block {
                     state.avail_features,
                     state.acked_features,
                     state.config,
+                    true,
                     true,
                 )
             } else {
@@ -791,7 +850,7 @@ impl Block {
                     config.num_queues = num_queues as u16;
                 }
 
-                (disk_nsectors, avail_features, 0, config, false)
+                (disk_nsectors, avail_features, 0, config, false, false)
             };
 
         let serial = serial.map_or_else(|| build_serial(&disk_path), Vec::from);
@@ -820,6 +879,8 @@ impl Block {
             serial,
             queue_affinity,
             disable_sector0_writes,
+            needs_restore_wakeup,
+            resume_evts: Vec::new(),
         })
     }
 
@@ -1035,6 +1096,16 @@ impl VirtioDevice for Block {
         self.update_writeback();
 
         let mut epoll_threads = Vec::new();
+
+        if self.resume_evts.is_empty() {
+            warn!(
+                "Clearing {} stale blk resume event handles before activation",
+                self.resume_evts.len()
+            );
+        }
+        debug_assert!(self.resume_evts.is_empty());
+        self.resume_evts.clear();
+
         let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
 
         for i in 0..queues.len() {
@@ -1043,6 +1114,10 @@ impl VirtioDevice for Block {
 
             let queue_size = queue.size();
             let (kill_evt, pause_evt) = self.common.dup_eventfds();
+            let resume_evt = EventFd::new(libc::EFD_NONBLOCK).map_err(|e| {
+                error!("failed creating resume EventFd: {e}");
+                ActivateError::BadActivate
+            })?;
             let queue_idx = i as u16;
 
             let mut handler = BlockEpollHandler {
@@ -1064,6 +1139,10 @@ impl VirtioDevice for Block {
                 writeback: self.writeback.clone(),
                 counters: self.counters.clone(),
                 queue_evt,
+                resume_evt: resume_evt.try_clone().map_err(|e| {
+                    error!("failed cloning resume EventFd: {e}");
+                    ActivateError::BadActivate
+                })?,
                 // Analysis during boot shows around ~40 maximum requests
                 // This gives head room for systems with slower I/O without
                 // compromising the cost of the reallocation or memory overhead
@@ -1078,7 +1157,9 @@ impl VirtioDevice for Block {
                 host_cpus: self.queue_affinity.get(&queue_idx).cloned(),
                 acked_features: self.common.acked_features,
                 disable_sector0_writes: self.disable_sector0_writes,
+                needs_restored_queue_drain: self.needs_restore_wakeup,
             };
+            self.resume_evts.push(resume_evt);
 
             let paused = self.common.paused.clone();
             let paused_sync = self.common.paused_sync.clone();
@@ -1100,6 +1181,7 @@ impl VirtioDevice for Block {
     }
 
     fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
+        self.resume_evts.clear();
         let result = self.common.reset();
         event!("virtio-device", "reset", "id", &self.id);
         result
@@ -1150,6 +1232,27 @@ impl VirtioDevice for Block {
         );
 
         Some(counters)
+    }
+
+    /// Signals restored blk queue handlers through `RESUME_EVENT` after
+    /// vCPUs resume so requests pending before the snapshot are not left
+    /// waiting for a new guest kick.
+    fn resume_after_vcpus(&mut self) -> std::result::Result<(), MigratableError> {
+        if !self.needs_restore_wakeup {
+            return Ok(());
+        }
+
+        for resume_evt in &self.resume_evts {
+            resume_evt.write(1).map_err(|e| {
+                MigratableError::Resume(anyhow!(
+                    "Could not notify restored blk worker after vCPU resume: {e}"
+                ))
+            })?;
+        }
+
+        self.needs_restore_wakeup = false;
+
+        Ok(())
     }
 
     fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
