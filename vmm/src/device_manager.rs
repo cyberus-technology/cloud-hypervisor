@@ -5214,6 +5214,22 @@ impl DeviceManager {
             MAX_DELAY,
         );
     }
+
+    /// Runs the post-vCPU-resume callback for virtio devices.
+    ///
+    /// This is needed for resume flows where device workers are resumed before
+    /// vCPUs. Devices can use this hook for follow-up work that may notify the
+    /// guest and therefore must only happen once vCPUs are running again.
+    ///
+    /// This method must be called only after `CpuManager::resume()` has
+    /// completed. Devices that do not need post-vCPU-resume handling ignore it
+    /// through the default no-op implementation.
+    pub fn post_vcpu_resume_hooks(&mut self) -> result::Result<(), MigratableError> {
+        for handle in self.virtio_devices.iter() {
+            handle.virtio_device.lock().unwrap().resume_after_vcpus()?;
+        }
+        Ok(())
+    }
 }
 
 /// Starts a thread that periodically performs the post-migration announcements.
