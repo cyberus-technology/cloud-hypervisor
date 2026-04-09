@@ -631,7 +631,7 @@ pub struct CpuManager {
     reset_evt: EventFd,
     #[cfg(feature = "guest_debug")]
     vm_debug_evt: EventFd,
-    vcpu_states: Vec<VcpuState>,
+    vcpu_states: Arc<Mutex<Vec<VcpuState>>>,
     selected_cpu: u32,
     vcpus: Vec<Arc<Mutex<Vcpu>>>,
     seccomp_action: SeccompAction,
@@ -658,6 +658,7 @@ impl BusDevice for CpuManager {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
         // The Linux kernel, quite reasonably, doesn't zero the memory it gives us.
         data.fill(0);
+        let vcpu_states = self.vcpu_states.lock().unwrap();
 
         match offset {
             CPU_SELECTION_OFFSET => {
@@ -667,7 +668,7 @@ impl BusDevice for CpuManager {
             }
             CPU_STATUS_OFFSET => {
                 if self.selected_cpu < self.max_vcpus() {
-                    let state = &self.vcpu_states[usize::try_from(self.selected_cpu).unwrap()];
+                    let state = &vcpu_states[usize::try_from(self.selected_cpu).unwrap()];
                     if state.active() {
                         data[0] |= 1 << CPU_ENABLE_FLAG;
                     }
@@ -696,23 +697,28 @@ impl BusDevice for CpuManager {
             }
             CPU_STATUS_OFFSET => {
                 if self.selected_cpu < self.max_vcpus() {
-                    let state = &mut self.vcpu_states[usize::try_from(self.selected_cpu).unwrap()];
-                    // The ACPI code writes back a 1 to acknowledge the insertion
-                    if (data[0] & (1 << CPU_INSERTING_FLAG) == 1 << CPU_INSERTING_FLAG)
-                        && state.inserting
-                    {
-                        state.inserting = false;
-                    }
-                    // Ditto for removal
-                    if (data[0] & (1 << CPU_REMOVING_FLAG) == 1 << CPU_REMOVING_FLAG)
-                        && state.removing
-                    {
-                        state.removing = false;
-                    }
-                    // Trigger removal of vCPU
-                    if data[0] & (1 << CPU_EJECT_FLAG) == 1 << CPU_EJECT_FLAG
-                        && let Err(e) = self.remove_vcpu(self.selected_cpu)
-                    {
+                    let eject = {
+                        // This structure is not shared with the vCPU thread, therefore, holding the
+                        // lock for the entire function doesn't cause any deadlock.
+                        let mut vcpu_states = self.vcpu_states.lock().unwrap();
+                        let state = &mut vcpu_states[usize::try_from(self.selected_cpu).unwrap()];
+
+                        if (data[0] & (1 << CPU_INSERTING_FLAG) == 1 << CPU_INSERTING_FLAG)
+                            && state.inserting
+                        {
+                            state.inserting = false;
+                        }
+
+                        if (data[0] & (1 << CPU_REMOVING_FLAG) == 1 << CPU_REMOVING_FLAG)
+                            && state.removing
+                        {
+                            state.removing = false;
+                        }
+
+                        data[0] & (1 << CPU_EJECT_FLAG) == 1 << CPU_EJECT_FLAG
+                    };
+
+                    if eject && let Err(e) = self.remove_vcpu(self.selected_cpu) {
                         error!("Error removing vCPU: {e:?}");
                     }
                 } else {
@@ -846,6 +852,7 @@ impl CpuManager {
         let max_vcpus = usize::try_from(config.max_vcpus).unwrap();
         let mut vcpu_states = Vec::with_capacity(max_vcpus);
         vcpu_states.resize_with(max_vcpus, VcpuState::default);
+        let vcpu_states = Arc::new(Mutex::new(vcpu_states));
         let hypervisor_type = hypervisor.hypervisor_type();
         #[cfg(target_arch = "x86_64")]
         let cpu_vendor = hypervisor.get_cpu_vendor();
@@ -1191,14 +1198,14 @@ impl CpuManager {
         let vcpus_pause_signalled = self.vcpus_pause_signalled.clone();
         let vcpus_kick_signalled = self.vcpus_kick_signalled.clone();
 
-        let vcpu_kill = self.vcpu_states[usize::try_from(vcpu_id).unwrap()]
-            .kill
-            .clone();
-        let vcpu_run_interrupted = self.vcpu_states[usize::try_from(vcpu_id).unwrap()]
+        let mut vcpu_states = self.vcpu_states.lock().unwrap();
+
+        let vcpu_kill = vcpu_states[usize::try_from(vcpu_id).unwrap()].kill.clone();
+        let vcpu_run_interrupted = vcpu_states[usize::try_from(vcpu_id).unwrap()]
             .vcpu_run_interrupted
             .clone();
         let panic_vcpu_run_interrupted = vcpu_run_interrupted.clone();
-        let vcpu_paused = self.vcpu_states[usize::try_from(vcpu_id).unwrap()]
+        let vcpu_paused = vcpu_states[usize::try_from(vcpu_id).unwrap()]
             .paused
             .clone();
 
@@ -1473,8 +1480,8 @@ impl CpuManager {
 
         // On hot plug calls into this function entry_point is None. It is for
         // those hotplug CPU additions that we need to set the inserting flag.
-        self.vcpu_states[usize::try_from(vcpu_id).unwrap()].handle = handle;
-        self.vcpu_states[usize::try_from(vcpu_id).unwrap()].inserting = inserting;
+        vcpu_states[usize::try_from(vcpu_id).unwrap()].handle = handle;
+        vcpu_states[usize::try_from(vcpu_id).unwrap()].inserting = inserting;
 
         Ok(())
     }
@@ -1518,17 +1525,19 @@ impl CpuManager {
     }
 
     fn mark_vcpus_for_removal(&mut self, desired_vcpus: u32) {
+        let mut vcpu_states = self.vcpu_states.lock().unwrap();
+
         // Mark vCPUs for removal, actual removal happens on ejection
         for cpu_id in desired_vcpus..self.present_vcpus() {
-            self.vcpu_states[usize::try_from(cpu_id).unwrap()].removing = true;
-            self.vcpu_states[usize::try_from(cpu_id).unwrap()]
+            vcpu_states[usize::try_from(cpu_id).unwrap()].removing = true;
+            vcpu_states[usize::try_from(cpu_id).unwrap()]
                 .pending_removal
                 .store(true, Ordering::SeqCst);
         }
     }
 
     pub fn check_pending_removed_vcpu(&mut self) -> bool {
-        for state in self.vcpu_states.iter() {
+        for state in self.vcpu_states.lock().unwrap().iter() {
             if state.active() && state.pending_removal.load(Ordering::SeqCst) {
                 return true;
             }
@@ -1538,7 +1547,8 @@ impl CpuManager {
 
     fn remove_vcpu(&mut self, cpu_id: u32) -> Result<()> {
         info!("Removing vCPU: cpu_id = {cpu_id}");
-        let state = &mut self.vcpu_states[usize::try_from(cpu_id).unwrap()];
+        let mut vcpu_states = self.vcpu_states.lock().unwrap();
+        let state = &mut vcpu_states[usize::try_from(cpu_id).unwrap()];
         state.kill.store(true, Ordering::SeqCst);
         state.signal_thread();
         state.wait_until_signal_acknowledged()?;
@@ -1634,12 +1644,15 @@ impl CpuManager {
     /// For the vCPU threads this will interrupt the KVM_RUN ioctl() allowing
     /// the loop to check the shared state booleans.
     fn signal_vcpus(&mut self) -> Result<()> {
+        // Holding the lock for the whole operation is correct:
+        let vcpu_states = self.vcpu_states.lock().unwrap();
+
         // Splitting this into two loops reduced the time to pause many vCPUs
         // massively. Example: 254 vCPUs. >254ms -> ~4ms.
-        for state in self.vcpu_states.iter() {
+        for state in vcpu_states.iter() {
             state.signal_thread();
         }
-        for state in self.vcpu_states.iter() {
+        for state in vcpu_states.iter() {
             state.wait_until_signal_acknowledged()?;
         }
 
@@ -1654,14 +1667,14 @@ impl CpuManager {
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
 
         // Unpark all the VCPU threads.
-        for state in self.vcpu_states.iter() {
+        for state in self.vcpu_states.lock().unwrap().iter() {
             state.unpark_thread();
         }
 
         self.signal_vcpus()?;
 
         // Wait for all the threads to finish. This removes the state from the vector.
-        for mut state in self.vcpu_states.drain(..) {
+        for mut state in self.vcpu_states.lock().unwrap().drain(..) {
             state.join_thread()?;
         }
 
@@ -1696,6 +1709,8 @@ impl CpuManager {
 
     fn present_vcpus(&self) -> u32 {
         self.vcpu_states
+            .lock()
+            .unwrap()
             .iter()
             .fold(0, |acc, state| acc + state.active() as u32)
     }
@@ -2658,7 +2673,7 @@ impl Pausable for CpuManager {
 
         // The vCPU thread will change its paused state before parking, wait here for each
         // activated vCPU change their state to ensure they have parked.
-        for state in self.vcpu_states.iter() {
+        for state in self.vcpu_states.lock().unwrap().iter() {
             if state.active() {
                 // wait for vCPU to update state
                 while !state.paused.load(Ordering::SeqCst) {
@@ -2676,16 +2691,18 @@ impl Pausable for CpuManager {
         // their run vCPU loop.
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
 
+        let vcpu_states = self.vcpu_states.lock().unwrap();
+
         // Unpark all the vCPU threads.
         // Step 1/2: signal each thread
         {
-            for state in self.vcpu_states.iter() {
+            for state in vcpu_states.iter() {
                 state.unpark_thread();
             }
         }
         // Step 2/2: wait for state ACK
         {
-            for state in self.vcpu_states.iter() {
+            for state in vcpu_states.iter() {
                 // wait for vCPU to update state
                 while state.paused.load(Ordering::SeqCst) {
                     // To avoid a priority inversion with the vCPU thread
