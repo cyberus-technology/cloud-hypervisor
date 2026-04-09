@@ -118,7 +118,7 @@ use vm_virtio::{AccessPlatform, VirtioDeviceType};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::console_devices::{ConsoleDeviceError, ConsoleInfo, ConsoleOutput};
-use crate::cpu::{CPU_MANAGER_ACPI_SIZE, CpuManager};
+use crate::cpu::{AcpiCpuHotplugController, CPU_MANAGER_ACPI_SIZE, CpuManager};
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::{LegacyUserspaceInterruptManager, MsiInterruptManager};
 use crate::memory_manager::{Error as MemoryManagerError, MEMORY_MANAGER_ACPI_SIZE, MemoryManager};
@@ -994,6 +994,10 @@ pub struct DeviceManager {
     // CPU Manager
     cpu_manager: Arc<Mutex<CpuManager>>,
 
+    /// Owned version needed to keep the bus device alive (the bus only holds
+    /// a weak reference).
+    _acpi_cpu_hotplug_controller: Arc<Mutex<AcpiCpuHotplugController>>,
+
     // The virtio devices on the system
     virtio_devices: VecDeque<MetaVirtioDevice>,
 
@@ -1283,6 +1287,10 @@ impl DeviceManager {
             )?);
         }
 
+        let acpi_cpu_hotplug_controller =
+            AcpiCpuHotplugController::new(&cpu_manager.lock().unwrap());
+        let acpi_cpu_hotplug_controller = Arc::new(Mutex::new(acpi_cpu_hotplug_controller));
+
         if dynamic {
             let acpi_address = address_manager
                 .allocator
@@ -1294,7 +1302,7 @@ impl DeviceManager {
             address_manager
                 .mmio_bus
                 .insert(
-                    cpu_manager.clone(),
+                    acpi_cpu_hotplug_controller.clone(),
                     acpi_address.0,
                     CPU_MANAGER_ACPI_SIZE as u64,
                 )
@@ -1389,6 +1397,7 @@ impl DeviceManager {
             fw_cfg: None,
             #[cfg(feature = "ivshmem")]
             ivshmem_device: None,
+            _acpi_cpu_hotplug_controller: acpi_cpu_hotplug_controller,
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
