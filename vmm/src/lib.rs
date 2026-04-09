@@ -905,13 +905,13 @@ impl MigrationWorker {
             self.postponed_lifecycle_event.as_ref(),
             self.cancel.clone(),
         )
+        .inspect(|_| event!("vm", "migration-finished"))
         .inspect_err(|e| error!("migrate error: {e}"));
 
         // Notify VMM thread to get migration result by joining this thread.
         self.check_migration_evt.write(1).unwrap();
 
         debug!("migration thread is finished");
-        event!("vm", "migration-finished");
         MigrationThreadOut {
             vm: self.vm,
             migration_res: res,
