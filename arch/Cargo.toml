@@ -36,5 +36,12 @@ crc-any = "3.0.0"
 fdt_parser = { version = "0.1.5", package = "fdt" }
 vm-fdt = { workspace = true }
 
+[build-dependencies]
+anyhow = { workspace = true }
+flate2 = { workspace = true }
+prettyplease = "0.2.37"
+quote = "1.0.45"
+syn = "2.0.117"
+
 [lints]
 workspace = true
