@@ -13,6 +13,7 @@
   # other
   meta, # meta of pkgs.cloud-hypervisor
   src, # clean source
+  chExtraVersion, # Additional information to be appended to the version string.
 }:
 let
   commonArgs = {
@@ -33,6 +34,9 @@ let
       # - https://github.com/sfackler/rust-openssl/issues/1430
       # - https://docs.rs/openssl/latest/openssl/
       OPENSSL_NO_VENDOR = true;
+
+      # Sets additional information to be appended to the version string.
+      CH_EXTRA_VERSION = chExtraVersion;
     };
 
     nativeBuildInputs = [
