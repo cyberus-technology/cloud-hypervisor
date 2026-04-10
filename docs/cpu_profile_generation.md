@@ -2,21 +2,20 @@
 
 ## Generating a CPU profile for a new target
 
-To generate a new CPU profile you start by executing the following command
+To generate a new CPU profile you execute the following command
 
 ```shell
 $ cargo run --release -p arch --bin generate-cpu-profile --features="cpu_profile_generation" "<Your chosen name for the CPU profile>"
 ```
 on the machine you want to create a CPU profile for. This creates four new files in the `arch/src/x86_64/cpu_profiles` directory:
-- `<chosen_name_in_snake_case>.cpuid.json`
-- `<chosen_name_in_snake_case>.msr.json`
+- `<chosen-name-in-kebab-case>.cpuid.json`
+- `<chosen-name-in-kebab-case>.msr.json`
 - one license file for each of the two files listed above
 
-check them in to git and then extend the `arch::x86_64::CpuProfile` enum with a new variant for your freshly generated profile.
+check them in to git and then simply rebuild cloud-hypervisor `cargo build --release --bin cloud-hypervisor`.
 
-The final step is then to adapt `arch::x86_64::CpuProfile::cpuid_data` and `arch::x86_64::CpuProfile::msr_data` to load the
-cpuid and msr JSON files we created above. After doing this you will of course have to rebuild cloud hypervisor in order to
-use the new CPU profile.
+You can now use the new profile by adding `,profile=<chosen-name-in-kebab-case>` to the list of `--cpus` configuration
+options on the command line.
 
 ## Can existing CPU profiles be updated?
 
