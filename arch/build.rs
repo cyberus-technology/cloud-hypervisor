@@ -188,6 +188,7 @@ fn generate_cpu_profile_enum(profile_names: &[ProfileName]) -> String {
     // Use the quote crate to build the CpuProfile enum as a TokenStream.
     let tokens = quote! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+        #[serde(rename_all = "kebab-case")]
         pub enum CpuProfile {
             #[default]
             Host,
