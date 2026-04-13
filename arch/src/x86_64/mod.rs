@@ -11,6 +11,7 @@ pub mod cpu_profile;
 pub mod cpuid_definitions;
 pub mod interrupts;
 pub mod layout;
+pub mod msr_definitions;
 pub mod regs;
 
 #[cfg(feature = "tdx")]

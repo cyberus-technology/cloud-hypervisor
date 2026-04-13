@@ -765,6 +765,7 @@ impl CpusConfig {
             .add("features")
             .add("nested")
             .add("core_scheduling")
+            .add("nested")
             .add("profile");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
