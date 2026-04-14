@@ -95,6 +95,11 @@ itertools = "0.14.0"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2.186"
 log = "0.4.29"
+rustls = { version = "0.23.38", default-features = false, features = [
+  "aws-lc-rs",
+  "std",
+  "tls12",
+] }
 sha2 = "0.11.0"
 signal-hook = "0.4.4"
 thiserror = "2.0.18"
