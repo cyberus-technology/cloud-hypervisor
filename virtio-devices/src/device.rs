@@ -172,19 +172,6 @@ pub trait VirtioDevice: Send {
     fn post_migration_announcer(&self) -> Option<Box<dyn PostMigrationAnnouncer>> {
         None
     }
-
-    /// Runs device-specific follow-up work after vCPUs have resumed.
-    ///
-    /// This hook exists for resume flows where device workers may be resumed
-    /// before guest vCPUs. Implementers can use it for work that may notify
-    /// the guest and therefore must only happen once vCPUs are running again.
-    ///
-    /// Callers must invoke this only after vCPU resume has completed.
-    /// Devices that do not need any post-vCPU-resume handling use the default
-    /// no-op implementation.
-    fn resume_after_vcpus(&mut self) -> std::result::Result<(), MigratableError> {
-        Ok(())
-    }
 }
 
 /// Trait to define address translation for devices managed by virtio-iommu
