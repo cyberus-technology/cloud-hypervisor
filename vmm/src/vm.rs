@@ -3126,10 +3126,6 @@ impl Pausable for Vm {
 
         self.device_manager.lock().unwrap().resume()?;
         self.cpu_manager.lock().unwrap().resume()?;
-        self.device_manager
-            .lock()
-            .unwrap()
-            .post_vcpu_resume_hooks()?;
 
         // And we're back to the Running state.
         self.state = new_state;
