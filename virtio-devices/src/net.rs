@@ -176,11 +176,6 @@ struct NetEpollHandler {
     queue_index_base: u16,
     queue_pair: (Queue, Queue),
     queue_evt_pair: (EventFd, EventFd),
-    // Always generate interrupts until the driver has signalled to the device.
-    // This mitigates a problem with interrupts from tap events being "lost" upon
-    // a restore as the vCPU thread isn't ready to handle the interrupt. This causes
-    // issues when combined with VIRTIO_RING_F_EVENT_IDX interrupt suppression.
-    driver_awake: bool,
 }
 
 impl NetEpollHandler {
@@ -227,7 +222,6 @@ impl NetEpollHandler {
             .net
             .process_tx(&self.mem.memory(), &mut self.queue_pair.1)
             .map_err(DeviceError::NetQueuePair)?
-            || !self.driver_awake
         {
             self.signal_used_queue(self.queue_index_base + 1)?;
             debug!("Signalling TX queue");
@@ -256,7 +250,6 @@ impl NetEpollHandler {
             .net
             .process_rx(&self.mem.memory(), &mut self.queue_pair.0)
             .map_err(DeviceError::NetQueuePair)?
-            || !self.driver_awake
         {
             self.signal_used_queue(self.queue_index_base)?;
             trace!("Signalling RX queue");
@@ -318,7 +311,6 @@ impl EpollHelperHandler for NetEpollHandler {
         let ev_type = event.data as u16;
         match ev_type {
             RX_QUEUE_EVENT => {
-                self.driver_awake = true;
                 self.handle_rx_event().map_err(|e| {
                     EpollHelperError::HandleEvent(anyhow!("Error processing RX queue: {e:?}"))
                 })?;
@@ -328,7 +320,6 @@ impl EpollHelperHandler for NetEpollHandler {
                 if let Err(e) = queue_evt.read() {
                     error!("Failed to get tx queue event: {e:?}");
                 }
-                self.driver_awake = true;
                 self.handle_tx_event().map_err(|e| {
                     EpollHelperError::HandleEvent(anyhow!("Error processing TX queue: {e:?}"))
                 })?;
@@ -385,8 +376,6 @@ impl EpollHelperHandler for NetEpollHandler {
                             "Error from 'rate_limiter.event_handler()': {e:?}"
                         ))
                     })?;
-
-                    self.driver_awake = true;
                     self.process_tx().map_err(|e| {
                         EpollHelperError::HandleEvent(anyhow!("Error processing TX queue: {e:?}"))
                     })?;
@@ -957,7 +946,6 @@ impl VirtioDevice for Net {
                 interrupt_cb: interrupt_cb.clone(),
                 kill_evt,
                 pause_evt,
-                driver_awake: false,
             };
 
             let paused = self.common.paused.clone();
