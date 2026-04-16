@@ -177,7 +177,7 @@ impl CtrlQueue {
                         false
                     };
 
-                    (ok, ctrl_desc.len() + status_desc.len(), status_desc)
+                    (ok, status_desc.len(), status_desc)
                 }
                 _ => {
                     let _data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
