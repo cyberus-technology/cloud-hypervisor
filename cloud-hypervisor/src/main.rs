@@ -118,7 +118,6 @@ enum FdTableError {
 
 struct Logger {
     output: Mutex<Box<dyn std::io::Write + Send>>,
-    start: std::time::Instant,
 }
 
 impl log::Log for Logger {
@@ -131,10 +130,6 @@ impl log::Log for Logger {
             return;
         }
 
-        let now = std::time::Instant::now();
-        let duration = now.duration_since(self.start);
-        let duration_s = duration.as_secs_f32();
-
         let location = if let (Some(file), Some(line)) = (record.file(), record.line()) {
             format!("{file}:{line}")
         } else {
@@ -144,9 +139,8 @@ impl log::Log for Logger {
         let mut out = self.output.lock().unwrap();
         write!(
             &mut *out,
-            // 10: 6 decimal places + sep => whole seconds in range `0..=999` properly aligned
-            "cloud-hypervisor: {:>10.6?}s: <{}> {}:{} -- {}\r\n",
-            duration_s,
+            "cloud-hypervisor: {}: <{}> {}:{} -- {}\r\n",
+            jiff::Zoned::now().strftime("%Y-%m-%dT%H:%M:%S%.f%:z"),
             std::thread::current().name().unwrap_or("anonymous"),
             record.level(),
             location,
@@ -511,7 +505,6 @@ fn start_vmm(cmd_arguments: &ArgMatches) -> Result<Option<String>, Error> {
 
     log::set_boxed_logger(Box::new(Logger {
         output: Mutex::new(log_file),
-        start: std::time::Instant::now(),
     }))
     .map(|()| log::set_max_level(log_level))
     .map_err(Error::LoggerSetup)?;
