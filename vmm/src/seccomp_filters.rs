@@ -939,20 +939,28 @@ fn event_monitor_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendE
     ])
 }
 
+/// Rules needed to print absolute timestamps.
+fn logging_rules() -> Vec<(i64, Vec<SeccompRule>)> {
+    vec![(libc::SYS_readlink, vec![]), (libc::SYS_openat, vec![])]
+}
+
 fn get_seccomp_rules(
     thread_type: Thread,
     hypervisor_type: HypervisorType,
 ) -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
-    match thread_type {
-        Thread::HttpApi => Ok(http_api_thread_rules()?),
+    let mut rules = match thread_type {
+        Thread::HttpApi => http_api_thread_rules()?,
         #[cfg(feature = "dbus_api")]
-        Thread::DBusApi => Ok(dbus_api_thread_rules()?),
-        Thread::EventMonitor => Ok(event_monitor_thread_rules()?),
-        Thread::SignalHandler => Ok(signal_handler_thread_rules()?),
-        Thread::Vcpu => Ok(vcpu_thread_rules(hypervisor_type)?),
-        Thread::Vmm => Ok(vmm_thread_rules(hypervisor_type)?),
-        Thread::PtyForeground => Ok(pty_foreground_thread_rules()?),
-    }
+        Thread::DBusApi => dbus_api_thread_rules()?,
+        Thread::EventMonitor => event_monitor_thread_rules()?,
+        Thread::SignalHandler => signal_handler_thread_rules()?,
+        Thread::Vcpu => vcpu_thread_rules(hypervisor_type)?,
+        Thread::Vmm => vmm_thread_rules(hypervisor_type)?,
+        Thread::PtyForeground => pty_foreground_thread_rules()?,
+    };
+
+    rules.append(&mut logging_rules());
+    Ok(rules)
 }
 
 /// Generate a BPF program based on the seccomp_action value
