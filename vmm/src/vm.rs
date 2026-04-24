@@ -1793,8 +1793,7 @@ impl Vm {
             .lock()
             .unwrap()
             .iommu_attached_devices()
-            .as_ref()
-            .map(|(v, _)| *v);
+            .map(|(v, _)| v);
 
         let vgic = self
             .device_manager

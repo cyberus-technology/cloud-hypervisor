@@ -1014,7 +1014,7 @@ fn create_acpi_tables_internal(
     // VIOT
     if let Some((iommu_bdf, devices_bdf)) = device_manager.lock().unwrap().iommu_attached_devices()
     {
-        let viot = create_viot_table(iommu_bdf, devices_bdf);
+        let viot = create_viot_table(&iommu_bdf, &devices_bdf);
 
         let viot_addr = prev_tbl_addr.checked_add(prev_tbl_len).unwrap();
         tables_bytes.extend_from_slice(viot.as_slice());
@@ -1183,7 +1183,7 @@ pub fn create_acpi_tables_tdx(
     // VIOT
     if let Some((iommu_bdf, devices_bdf)) = device_manager.lock().unwrap().iommu_attached_devices()
     {
-        tables.push(create_viot_table(iommu_bdf, devices_bdf));
+        tables.push(create_viot_table(&iommu_bdf, &devices_bdf));
     }
 
     tables
