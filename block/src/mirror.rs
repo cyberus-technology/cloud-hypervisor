@@ -12,7 +12,12 @@
 use std::mem;
 use std::sync::{Arc, Mutex};
 
+use libc::{iovec, off_t};
 use log::warn;
+use vmm_sys_util::eventfd::EventFd;
+
+use crate::BatchRequest;
+use crate::async_io::{AsyncIo, AsyncIoResult};
 
 /// Phase of a mirror.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,5 +101,66 @@ impl MirrorState {
         }
 
         *current = target;
+    }
+}
+
+/// Per-virtqueue [`AsyncIo`] backend for an active block mirror.
+#[expect(dead_code)]
+pub struct MirroringAsyncIo {
+    source: Box<dyn AsyncIo>,
+    destination: Box<dyn AsyncIo>,
+    state: Arc<MirrorState>,
+}
+
+impl AsyncIo for MirroringAsyncIo {
+    fn notifier(&self) -> &EventFd {
+        self.source.notifier()
+    }
+
+    fn read_vectored(
+        &mut self,
+        offset: off_t,
+        iovecs: &[iovec],
+        user_data: u64,
+    ) -> AsyncIoResult<()> {
+        self.source.read_vectored(offset, iovecs, user_data)
+    }
+
+    fn write_vectored(
+        &mut self,
+        offset: off_t,
+        iovecs: &[iovec],
+        user_data: u64,
+    ) -> AsyncIoResult<()> {
+        self.source.write_vectored(offset, iovecs, user_data)
+    }
+
+    fn fsync(&mut self, user_data: Option<u64>) -> AsyncIoResult<()> {
+        self.source.fsync(user_data)
+    }
+
+    fn punch_hole(&mut self, offset: u64, length: u64, user_data: u64) -> AsyncIoResult<()> {
+        self.source.punch_hole(offset, length, user_data)
+    }
+
+    fn write_zeroes(&mut self, offset: u64, length: u64, user_data: u64) -> AsyncIoResult<()> {
+        self.source.write_zeroes(offset, length, user_data)
+    }
+
+    fn next_completed_request(&mut self) -> Option<(u64, i32)> {
+        self.source.next_completed_request()
+    }
+
+    fn batch_requests_enabled(&self) -> bool {
+        false
+    }
+
+    fn submit_batch_requests(&mut self, _batch_request: &[BatchRequest]) -> AsyncIoResult<()> {
+        unimplemented!("Batch requests are not supported in MirroringAsyncIo")
+    }
+
+    fn alignment(&self) -> u64 {
+        // Stricter alignment wins. Same iovec goes to both backends.
+        self.source.alignment().max(self.destination.alignment())
     }
 }
