@@ -20,7 +20,7 @@ use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
-use std::{cmp, io, result, thread};
+use std::{cmp, io, mem, result, thread};
 
 use acpi_tables::sdt::Sdt;
 use acpi_tables::{Aml, aml};
@@ -632,7 +632,7 @@ pub struct CpuManager {
     #[cfg(feature = "guest_debug")]
     vm_debug_evt: EventFd,
     // Shared with AcpiCpuHotplugController
-    vcpu_states: Arc<Mutex<Vec<VcpuState>>>,
+    vcpu_states: Arc<Vec<VcpuState>>,
     vcpus: Vec<Arc<Mutex<Vcpu>>>,
     seccomp_action: SeccompAction,
     vm_ops: Arc<dyn VmOps>,
@@ -646,14 +646,30 @@ pub struct CpuManager {
     sev_snp_enabled: bool,
 }
 
+/// Hotplug-related state of a [`Vcpu`] and companion of [`VcpuState`].
+#[derive(Default)]
+struct VcpuHotplugState {
+    /// Guest-visible ACPI status that is true until the guest acknowledged the
+    /// hotplugging of a vCPU.
+    inserting: AtomicBool,
+    /// Guest-visible ACPI status that is true until the guest acknowledged the
+    /// removal of a vCPU.
+    removing: AtomicBool,
+}
+
 /// Management structure for a vCPU (thread).
+///
+/// State and handle for a [`Vcpu`]s, which is shared between [`CpuManager`] and
+/// the [`AcpiCpuHotplugController`]. To prevent deadlocks, there must be no lock
+/// around this type.
 #[derive(Default)]
 struct VcpuState {
-    inserting: bool,
-    removing: bool,
+    /// Tracks that this active vCPU is in the host-side hot-remove flow until
+    /// ejection completes.
+    ///
+    /// Used to prevent further VM resizes until the vCPU thread has actually
+    /// been removed.
     pending_removal: Arc<AtomicBool>,
-    /// Handle to the vCPU thread.
-    handle: Option<thread::JoinHandle<()>>,
     /// Instructs the thread to exit the run-vCPU loop.
     kill: Arc<AtomicBool>,
     /// Marks that the vCPU thread ACKed its interruption from executing guest
@@ -661,11 +677,23 @@ struct VcpuState {
     vcpu_run_interrupted: Arc<AtomicBool>,
     /// Used to ACK state changes from the run vCPU loop to the CPU Manager.
     paused: Arc<AtomicBool>,
+    /// Handle to the underlying thread.
+    ///
+    /// The underlying handle is, once created, always `Some` for boot vCPUs, as
+    /// long as the VM is running. For hotplugged vCPUs, this may dynamically
+    /// switch between `Some` and `None`:
+    /// - `None` -> `Some`: in [`CpuManager::start_vcpu`]
+    /// - `Some` -> `None`: in [`AcpiCpuHotplugController::remove_vcpu`]
+    handle: Mutex<Option<thread::JoinHandle<()>>>,
+    /// Hotplug-related state.
+    hotplug_state: VcpuHotplugState,
 }
 
 impl VcpuState {
+    /// Returns whether the vCPU thread is currently active.
     fn active(&self) -> bool {
-        self.handle.is_some()
+        let handle = self.handle.lock().unwrap();
+        handle.is_some()
     }
 
     /// Sends a signal to the underlying thread.
@@ -680,7 +708,8 @@ impl VcpuState {
     /// the next kernel entry of the given vCPU thread immediately exits to
     /// handle the event in user-space.
     fn signal_thread(&self) {
-        if let Some(handle) = self.handle.as_ref() {
+        let handle = self.handle.lock().unwrap();
+        if let Some(handle) = handle.as_ref() {
             // SAFETY: FFI call with correct arguments
             unsafe {
                 libc::pthread_kill(handle.as_pthread_t() as _, SIGRTMIN());
@@ -699,10 +728,6 @@ impl VcpuState {
     ///
     /// This is the counterpart of [`Self::signal_thread`].
     fn wait_until_signal_acknowledged(&self) -> Result<()> {
-        if self.handle.is_none() {
-            return Ok(());
-        }
-
         let start = Instant::now();
         let timeout = Duration::from_secs(10);
         let retry_interval = Duration::from_millis(1);
@@ -710,6 +735,12 @@ impl VcpuState {
 
         let mut next_warn = warn_interval;
         loop {
+            // If the vCPU was removed in the meantime => Ok!
+            if !self.active() {
+                return Ok(());
+            }
+
+            // vCPU thread ACKed the interruption => Ok!
             if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -736,16 +767,20 @@ impl VcpuState {
         }
     }
 
-    fn join_thread(&mut self) -> Result<()> {
-        if let Some(handle) = self.handle.take() {
+    /// Joins the underlying thread, i.e., gracefully exits it.
+    fn join_thread(&self) -> Result<()> {
+        let mut handle = self.handle.lock().unwrap();
+        if let Some(handle) = handle.take() {
             handle.join().map_err(Error::ThreadCleanup)?;
         }
 
         Ok(())
     }
 
+    /// Unparks a parked (paused) thread.
     fn unpark_thread(&self) {
-        if let Some(handle) = self.handle.as_ref() {
+        let handle = self.handle.lock().unwrap();
+        if let Some(handle) = handle.as_ref() {
             handle.thread().unpark();
         }
     }
@@ -777,7 +812,7 @@ impl CpuManager {
         let max_vcpus = usize::try_from(config.max_vcpus).unwrap();
         let mut vcpu_states = Vec::with_capacity(max_vcpus);
         vcpu_states.resize_with(max_vcpus, VcpuState::default);
-        let vcpu_states = Arc::new(Mutex::new(vcpu_states));
+        let vcpu_states = Arc::new(vcpu_states);
         let hypervisor_type = hypervisor.hypervisor_type();
         #[cfg(target_arch = "x86_64")]
         let cpu_vendor = hypervisor.get_cpu_vendor();
@@ -1122,16 +1157,11 @@ impl CpuManager {
         let vcpus_pause_signalled = self.vcpus_pause_signalled.clone();
         let vcpus_kick_signalled = self.vcpus_kick_signalled.clone();
 
-        let mut vcpu_states = self.vcpu_states.lock().unwrap();
-
-        let vcpu_kill = vcpu_states[usize::try_from(vcpu_id).unwrap()].kill.clone();
-        let vcpu_run_interrupted = vcpu_states[usize::try_from(vcpu_id).unwrap()]
-            .vcpu_run_interrupted
-            .clone();
+        let vcpu_id_usize = usize::try_from(vcpu_id).unwrap();
+        let vcpu_kill = self.vcpu_states[vcpu_id_usize].kill.clone();
+        let vcpu_run_interrupted = self.vcpu_states[vcpu_id_usize].vcpu_run_interrupted.clone();
         let panic_vcpu_run_interrupted = vcpu_run_interrupted.clone();
-        let vcpu_paused = vcpu_states[usize::try_from(vcpu_id).unwrap()]
-            .paused
-            .clone();
+        let vcpu_paused = self.vcpu_states[vcpu_id_usize].paused.clone();
 
         // Prepare the CPU set the current vCPU is expected to run onto.
         let cpuset = self.affinity.get(&vcpu_id).map(|host_cpus| {
@@ -1159,8 +1189,7 @@ impl CpuManager {
 
         info!("Starting vCPU: cpu_id = {vcpu_id}");
 
-        let handle = Some(
-            thread::Builder::new()
+        let handle = thread::Builder::new()
                 .name(format!("vcpu{vcpu_id}"))
                 .spawn(move || {
                     // init thread-local kvm_run structure
@@ -1399,13 +1428,17 @@ impl CpuManager {
                     })
                     .ok();
                 })
-                .map_err(Error::VcpuSpawn)?,
-        );
+                .map_err(Error::VcpuSpawn)?;
 
         // On hot plug calls into this function entry_point is None. It is for
         // those hotplug CPU additions that we need to set the inserting flag.
-        vcpu_states[usize::try_from(vcpu_id).unwrap()].handle = handle;
-        vcpu_states[usize::try_from(vcpu_id).unwrap()].inserting = inserting;
+        let vcpu_id = usize::try_from(vcpu_id).unwrap();
+        let vcpu_state = &self.vcpu_states[vcpu_id];
+        let _ = vcpu_state.handle.lock().unwrap().replace(handle);
+        vcpu_state
+            .hotplug_state
+            .inserting
+            .store(inserting, Ordering::SeqCst);
 
         Ok(())
     }
@@ -1449,19 +1482,22 @@ impl CpuManager {
     }
 
     fn mark_vcpus_for_removal(&mut self, desired_vcpus: u32) {
-        let mut vcpu_states = self.vcpu_states.lock().unwrap();
-
         // Mark vCPUs for removal, actual removal happens on ejection
         for cpu_id in desired_vcpus..self.present_vcpus() {
-            vcpu_states[usize::try_from(cpu_id).unwrap()].removing = true;
-            vcpu_states[usize::try_from(cpu_id).unwrap()]
+            let cpu_id = usize::try_from(cpu_id).unwrap();
+            let vcpu_state = &self.vcpu_states[cpu_id];
+            vcpu_state
+                .hotplug_state
+                .removing
+                .store(true, Ordering::SeqCst);
+            self.vcpu_states[cpu_id]
                 .pending_removal
                 .store(true, Ordering::SeqCst);
         }
     }
 
     pub fn check_pending_removed_vcpu(&mut self) -> bool {
-        for state in self.vcpu_states.lock().unwrap().iter() {
+        for state in self.vcpu_states.iter() {
             if state.active() && state.pending_removal.load(Ordering::SeqCst) {
                 return true;
             }
@@ -1551,15 +1587,15 @@ impl CpuManager {
     /// Calls [`VcpuState::signal_thread`] and
     /// [`VcpuState::wait_until_signal_acknowledged`] for each vCPU.
     fn signal_vcpus(&mut self) -> Result<()> {
-        // Holding the lock for the whole operation is correct:
-        let vcpu_states = self.vcpu_states.lock().unwrap();
-
         // Splitting this into two loops reduced the time to pause many vCPUs
         // massively. Example: 254 vCPUs. >254ms -> ~4ms.
-        for state in vcpu_states.iter() {
+        for state in self.vcpu_states.iter() {
             state.signal_thread();
         }
-        for state in vcpu_states.iter() {
+        for state in self.vcpu_states.iter() {
+            // The underlying design ensures that we do not hold a lock that the
+            // vCPU thread may also grab to complete an MMIO operation, before
+            // it can ACK the signal.
             state.wait_until_signal_acknowledged()?;
         }
 
@@ -1574,14 +1610,15 @@ impl CpuManager {
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
 
         // Unpark all the VCPU threads.
-        for state in self.vcpu_states.lock().unwrap().iter() {
+        for state in self.vcpu_states.iter() {
             state.unpark_thread();
         }
 
         self.signal_vcpus()?;
 
         // Wait for all the threads to finish. This removes the state from the vector.
-        for mut state in self.vcpu_states.lock().unwrap().drain(..) {
+        let vec = mem::take(&mut self.vcpu_states);
+        for state in vec.as_ref() {
             state.join_thread()?;
         }
 
@@ -1616,8 +1653,6 @@ impl CpuManager {
 
     fn present_vcpus(&self) -> u32 {
         self.vcpu_states
-            .lock()
-            .unwrap()
             .iter()
             .fold(0, |acc, state| acc + state.active() as u32)
     }
@@ -2579,8 +2614,8 @@ impl Pausable for CpuManager {
         }
 
         // The vCPU thread will change its paused state before parking, wait here for each
-        // activated vCPU change their state to ensure they have parked.
-        for state in self.vcpu_states.lock().unwrap().iter() {
+        // activated vCPU to change their state to ensure they have parked.
+        for state in self.vcpu_states.iter() {
             if state.active() {
                 // wait for vCPU to update state
                 while !state.paused.load(Ordering::SeqCst) {
@@ -2598,18 +2633,16 @@ impl Pausable for CpuManager {
         // their run vCPU loop.
         self.vcpus_pause_signalled.store(false, Ordering::SeqCst);
 
-        let vcpu_states = self.vcpu_states.lock().unwrap();
-
         // Unpark all the vCPU threads.
         // Step 1/2: signal each thread
         {
-            for state in vcpu_states.iter() {
+            for state in self.vcpu_states.iter() {
                 state.unpark_thread();
             }
         }
         // Step 2/2: wait for state ACK
         {
-            for state in vcpu_states.iter() {
+            for state in self.vcpu_states.iter() {
                 // wait for vCPU to update state
                 while state.paused.load(Ordering::SeqCst) {
                     // To avoid a priority inversion with the vCPU thread
@@ -3118,7 +3151,7 @@ pub struct AcpiCpuHotplugController {
     /// The currently selected CPU by the guest.
     selected_cpu: u32,
     /// Shared vCPU state with [`CpuManager`].
-    vcpu_states: Arc<Mutex<Vec<VcpuState>>>,
+    vcpu_states: Arc<Vec<VcpuState>>,
     /// Maximum number of vCPUS of the VM.
     max_vcpus: u32,
 }
@@ -3144,13 +3177,12 @@ impl AcpiCpuHotplugController {
     /// Removes a vCPU from the guest.
     ///
     /// The corresponding vCPU thread will be gracefully stopped and joined.
-    fn remove_vcpu(cpu_id: u32, state: &mut VcpuState) -> Result<()> {
+    fn remove_vcpu(cpu_id: u32, state: &VcpuState) -> Result<()> {
         info!("Removing vCPU: cpu_id = {cpu_id}");
         state.kill.store(true, Ordering::SeqCst);
         state.signal_thread();
         state.wait_until_signal_acknowledged()?;
         state.join_thread()?;
-        state.handle = None;
 
         // Once the thread has exited, clear the "kill" so that it can reused
         state.kill.store(false, Ordering::SeqCst);
@@ -3164,7 +3196,6 @@ impl BusDevice for AcpiCpuHotplugController {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
         // The Linux kernel, quite reasonably, doesn't zero the memory it gives us.
         data.fill(0);
-        let vcpu_states = self.vcpu_states.lock().unwrap();
 
         match offset {
             Self::CPU_SELECTION_OFFSET => {
@@ -3174,14 +3205,15 @@ impl BusDevice for AcpiCpuHotplugController {
             }
             Self::CPU_STATUS_OFFSET => {
                 if self.selected_cpu < self.max_vcpus {
-                    let state = &vcpu_states[usize::try_from(self.selected_cpu).unwrap()];
+                    let vcpu_id = usize::try_from(self.selected_cpu).unwrap();
+                    let state = &self.vcpu_states[vcpu_id];
                     if state.active() {
                         data[0] |= 1 << Self::CPU_ENABLE_FLAG;
                     }
-                    if state.inserting {
+                    if state.hotplug_state.inserting.load(Ordering::Acquire) {
                         data[0] |= 1 << Self::CPU_INSERTING_FLAG;
                     }
-                    if state.removing {
+                    if state.hotplug_state.removing.load(Ordering::Acquire) {
                         data[0] |= 1 << Self::CPU_REMOVING_FLAG;
                     }
                 } else {
@@ -3205,20 +3237,24 @@ impl BusDevice for AcpiCpuHotplugController {
                 if self.selected_cpu < self.max_vcpus {
                     // This structure is not shared with the vCPU thread, therefore, holding the
                     // lock for the entire function doesn't cause any deadlock.
-                    let mut vcpu_states = self.vcpu_states.lock().unwrap();
-                    let state = &mut vcpu_states[usize::try_from(self.selected_cpu).unwrap()];
+                    let vcpu_id = usize::try_from(self.selected_cpu).unwrap();
+                    let state = &self.vcpu_states[vcpu_id];
                     // The ACPI code writes back a 1 to acknowledge the insertion
                     if (data[0] & (1 << Self::CPU_INSERTING_FLAG) == 1 << Self::CPU_INSERTING_FLAG)
-                        && state.inserting
+                        && state.hotplug_state.inserting.load(Ordering::Acquire)
                     {
-                        state.inserting = false;
+                        state
+                            .hotplug_state
+                            .inserting
+                            .store(false, Ordering::Release);
                     }
                     // Ditto for removal
                     if (data[0] & (1 << Self::CPU_REMOVING_FLAG) == 1 << Self::CPU_REMOVING_FLAG)
-                        && state.removing
+                        & state.hotplug_state.removing.load(Ordering::Acquire)
                     {
-                        state.removing = false;
+                        state.hotplug_state.removing.store(false, Ordering::Release);
                     }
+
                     // Trigger removal of vCPU:
                     if data[0] & (1 << Self::CPU_EJECT_FLAG) == 1 << Self::CPU_EJECT_FLAG
                         && let Err(e) = Self::remove_vcpu(self.selected_cpu, state)
