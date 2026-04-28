@@ -9,8 +9,9 @@
 //! both sides are in sync the device manager can complete the mirror,
 //! switching the device to serve I/O from the destination.
 
-use std::mem;
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Condvar, Mutex};
+use std::{io, mem};
 
 use libc::{iovec, off_t};
 use log::warn;
@@ -18,6 +19,104 @@ use vmm_sys_util::eventfd::EventFd;
 
 use crate::BatchRequest;
 use crate::async_io::{AsyncIo, AsyncIoResult};
+
+/// Serializes overlapping byte ranges between the copy worker and the
+/// per-queue mirror writes.
+///
+/// Each party calls [`Self::lock_range`] before submitting I/O and
+/// holds the returned [`RangeGuard`] until completion. A conflicting
+/// request blocks on a `Condvar` until the held guard is dropped.
+struct RangeLockManager {
+    /// Held ranges as `start -> end_exclusive`.
+    ///
+    /// The mutex makes the overlap check and insert in [`Self::lock_range`]
+    /// atomic with respect to releases in [`Self::release`].
+    ranges: Mutex<BTreeMap<u64, u64>>,
+    /// Notified when a range is released.
+    ///
+    /// Waiters re-check their range.
+    cv: Condvar,
+}
+
+#[expect(dead_code)]
+impl RangeLockManager {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            ranges: Mutex::new(BTreeMap::new()),
+            cv: Condvar::new(),
+        })
+    }
+
+    /// Returns true if `[start, end)` overlaps any range in `ranges`.
+    fn overlaps_any(ranges: &BTreeMap<u64, u64>, start: u64, end: u64) -> bool {
+        ranges
+            .range(..end)
+            .next_back()
+            .is_some_and(|(_, &e)| e > start)
+    }
+
+    /// Acquires an exclusive lock on `[offset, offset + length)`.
+    ///
+    /// Blocks while any held range overlaps.
+    fn lock_range(self: Arc<Self>, offset: u64, length: u64) -> io::Result<RangeGuard> {
+        if length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Range length is zero",
+            ));
+        }
+
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Range overflow"))?;
+        {
+            let mut ranges = self
+                .cv
+                .wait_while(self.ranges.lock().unwrap(), |ranges| {
+                    RangeLockManager::overlaps_any(ranges, offset, end)
+                })
+                .unwrap();
+            ranges.insert(offset, end);
+        }
+
+        Ok(RangeGuard {
+            manager: self,
+            start: offset,
+        })
+    }
+
+    /// Acquires a [`RangeGuard`] covering the contiguous bytes from
+    /// `offset` through the end of `iovecs`.
+    fn lock_iovecs(self: Arc<Self>, offset: off_t, iovecs: &[iovec]) -> io::Result<RangeGuard> {
+        let total_len = iovecs
+            .iter()
+            .try_fold(0u64, |acc, v| acc.checked_add(v.iov_len as u64))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "iovec length overflow"))?;
+
+        self.lock_range(offset as u64, total_len)
+    }
+
+    /// Releases the range starting at `start` and wakes all waiters.
+    fn release(&self, start: u64) {
+        let mut ranges = self.ranges.lock().unwrap();
+        ranges.remove(&start);
+        self.cv.notify_all();
+    }
+}
+
+/// RAII handle for a range held in a [`RangeLockManager`].
+///
+/// Dropping the handle releases the range and wakes all waiters.
+struct RangeGuard {
+    manager: Arc<RangeLockManager>,
+    start: u64,
+}
+
+impl Drop for RangeGuard {
+    fn drop(&mut self) {
+        self.manager.release(self.start);
+    }
+}
 
 /// Phase of a mirror.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,5 +261,53 @@ impl AsyncIo for MirroringAsyncIo {
     fn alignment(&self) -> u64 {
         // Stricter alignment wins. Same iovec goes to both backends.
         self.source.alignment().max(self.destination.alignment())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Overlap is detected whether the held range precedes the query or starts
+    /// inside it.
+    #[test]
+    fn overlaps_detects_overlap() {
+        let mut preceding = BTreeMap::new();
+        preceding.insert(10u64, 25u64);
+        assert!(RangeLockManager::overlaps_any(&preceding, 20, 30));
+
+        let mut starts_inside = BTreeMap::new();
+        starts_inside.insert(10u64, 20u64);
+        starts_inside.insert(25u64, 30u64);
+        assert!(RangeLockManager::overlaps_any(&starts_inside, 21, 26));
+    }
+
+    #[test]
+    fn overlaps_disjoint_returns_false() {
+        let mut locked = BTreeMap::new();
+        locked.insert(10u64, 20u64);
+        locked.insert(30u64, 40u64);
+        assert!(!RangeLockManager::overlaps_any(&locked, 22, 28));
+    }
+
+    #[test]
+    fn overlaps_touching_boundary_is_not_overlap() {
+        let mut locked = BTreeMap::new();
+        locked.insert(10u64, 20u64);
+        assert!(!RangeLockManager::overlaps_any(&locked, 20, 30));
+    }
+
+    /// Verifies that empty and overflowing ranges are rejected as invalid input.
+    #[test]
+    fn range_lock_rejects_empty_and_overflowing_ranges() {
+        let manager = RangeLockManager::new();
+
+        let empty = manager.clone().lock_range(0, 0).err().unwrap();
+        assert_eq!(empty.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(empty.to_string(), "Range length is zero");
+
+        let overflow = manager.lock_range(u64::MAX, 1).err().unwrap();
+        assert_eq!(overflow.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(overflow.to_string(), "Range overflow");
     }
 }
