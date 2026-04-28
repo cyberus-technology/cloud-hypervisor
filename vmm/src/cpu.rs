@@ -1496,13 +1496,15 @@ impl CpuManager {
         }
     }
 
+    /// Returns whether any hot-removed vCPU slot is still being torn down.
+    ///
+    /// A slot only becomes reusable once `pending_removal` is cleared again.
+    /// `active()` alone is not sufficient, as the thread handle may already be
+    /// gone before `kill` and the teardown state are fully reset
     pub fn check_pending_removed_vcpu(&mut self) -> bool {
-        for state in self.vcpu_states.iter() {
-            if state.active() && state.pending_removal.load(Ordering::SeqCst) {
-                return true;
-            }
-        }
-        false
+        self.vcpu_states
+            .iter()
+            .any(|state| state.pending_removal.load(Ordering::SeqCst))
     }
 
     pub fn create_boot_vcpus(
@@ -3186,6 +3188,8 @@ impl AcpiCpuHotplugController {
 
         // Once the thread has exited, clear the "kill" so that it can reused
         state.kill.store(false, Ordering::SeqCst);
+
+        // Important that this happens last: CpuManager uses this as synchronization point
         state.pending_removal.store(false, Ordering::SeqCst);
 
         Ok(())
