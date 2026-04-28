@@ -9,17 +9,18 @@
 //! both sides are in sync the device manager can complete the mirror,
 //! switching the device to serve I/O from the destination.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::{io, mem};
 
 use libc::{iovec, off_t};
 use log::warn;
+use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::poll::PollContext;
 
 use crate::BatchRequest;
-use crate::async_io::{AsyncIo, AsyncIoResult};
+use crate::async_io::{AsyncIo, AsyncIoError, AsyncIoResult};
 
 /// Serializes overlapping byte ranges between the copy worker and the
 /// per-queue mirror writes.
@@ -39,7 +40,6 @@ struct RangeLockManager {
     cv: Condvar,
 }
 
-#[expect(dead_code)]
 impl RangeLockManager {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -119,8 +119,37 @@ impl Drop for RangeGuard {
     }
 }
 
+/// Failure that stopped an active block mirror.
+#[derive(Debug, Error)]
+pub enum MirrorFailure {
+    /// A destination completion returned an unexpected result.
+    #[error("Destination completion was {actual}, expected {expected}: user_data={user_data}")]
+    DestinationCompletion {
+        user_data: u64,
+        actual: i32,
+        expected: i32,
+    },
+    /// Submitting an operation to the destination failed.
+    #[error("Destination request submission failed: {0}")]
+    DestinationSubmit(#[source] AsyncIoError),
+    /// Waiting for a destination completion failed.
+    #[error("Destination wait failed for user_data={user_data}: {source}")]
+    DestinationWait {
+        user_data: u64,
+        #[source]
+        source: io::Error,
+    },
+    /// A source completion returned an unexpected result.
+    #[error("Source completion was {actual}, expected {expected}: user_data={user_data}")]
+    SourceCompletion {
+        user_data: u64,
+        actual: i32,
+        expected: i32,
+    },
+}
+
 /// Phase of a mirror.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum MirrorPhase {
     /// Background copy is in progress.
     Running,
@@ -133,7 +162,7 @@ pub enum MirrorPhase {
     /// Mirror cancellation is in progress.
     Cancelling,
     /// The mirror has failed.
-    Failed,
+    Failed(Arc<MirrorFailure>),
 }
 
 /// State shared by the copy worker and the per-queue mirroring
@@ -141,12 +170,14 @@ pub enum MirrorPhase {
 pub struct MirrorState {
     /// Current phase of the mirror.
     phase: Mutex<MirrorPhase>,
+    range_locks: Arc<RangeLockManager>,
 }
 
 impl MirrorState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             phase: Mutex::new(MirrorPhase::Running),
+            range_locks: RangeLockManager::new(),
         })
     }
 
@@ -161,10 +192,10 @@ impl MirrorState {
     ///
     /// Allowed transitions:
     /// ```text
-    /// Running    -> Ready | Cancelling | Failed
-    /// Ready      -> Completing | Cancelling | Failed
+    /// Running    -> Ready | Cancelling | Failed(_)
+    /// Ready      -> Completing | Cancelling | Failed(_)
     /// Completing -> Completed
-    /// Failed     -> Cancelling
+    /// Failed(_)  -> Cancelling
     /// ```
     ///
     /// Plus idempotent self-transitions. `Completed` and `Cancelling` are
@@ -182,12 +213,12 @@ impl MirrorState {
             (&*current, &target),
             (Running, Ready)
                 | (Running, Cancelling)
-                | (Running, Failed)
+                | (Running, Failed(_))
                 | (Ready, Completing)
                 | (Ready, Cancelling)
-                | (Ready, Failed)
+                | (Ready, Failed(_))
                 | (Completing, Completed)
-                | (Failed, Cancelling)
+                | (Failed(_), Cancelling)
         );
 
         if !transition_allowed {
@@ -205,16 +236,110 @@ impl MirrorState {
 }
 
 /// Per-virtqueue [`AsyncIo`] backend for an active block mirror.
-#[expect(dead_code)]
+///
+/// Reads use the source backend. Mutating requests use both the source and
+/// destination backends.
 pub struct MirroringAsyncIo {
-    source: Box<dyn AsyncIo>,
-    destination: Box<dyn AsyncIo>,
+    source: CompletionIo,
+    destination: CompletionIo,
     state: Arc<MirrorState>,
+    /// Queued completions `(user_data, result)` for
+    /// [`AsyncIo::next_completed_request`].
+    ///
+    /// The `user_data` identifies the request it was submitted with. The
+    /// result is the number of bytes transferred or a negative errno.
+    inflight_completions: VecDeque<(u64, i32)>,
+}
+
+impl MirroringAsyncIo {
+    /// Flips the mirror to the `Failed` phase.
+    ///
+    /// The operator must cancel to clean up the destination and the copy worker.
+    fn fail(&mut self, failure: MirrorFailure) {
+        self.state
+            .transition_to_phase(MirrorPhase::Failed(Arc::new(failure)));
+    }
+
+    /// Calls source and destination submissions with mirror-specific error handling.
+    ///
+    /// A source submission error is returned to the guest. A destination submission
+    /// error fails the mirror but is not returned, because `source` is the disk
+    /// visible to the guest.
+    fn mirror_request(
+        &mut self,
+        submit: impl Fn(&mut dyn AsyncIo) -> AsyncIoResult<()>,
+    ) -> AsyncIoResult<()> {
+        submit(self.source.io_mut())?;
+        if let Err(error) = submit(self.destination.io_mut()) {
+            self.fail(MirrorFailure::DestinationSubmit(error));
+        }
+        Ok(())
+    }
+
+    /// Blocks until `user_data`'s source and destination completions arrive,
+    /// then queues the guest-visible `(user_data, src_result)`.
+    ///
+    /// Other completions seen while waiting are stashed for later delivery.
+    fn wait_for_completions(&mut self, user_data: u64, expected_result: i32) -> io::Result<()> {
+        let src_result =
+            Self::await_completion(&mut self.source, &mut self.inflight_completions, user_data)?;
+
+        match Self::await_completion(
+            &mut self.destination,
+            &mut self.inflight_completions,
+            user_data,
+        ) {
+            // Destination reported an I/O error or incomplete operation.
+            Ok(dest_result) if dest_result != expected_result => {
+                self.fail(MirrorFailure::DestinationCompletion {
+                    user_data,
+                    actual: dest_result,
+                    expected: expected_result,
+                });
+            }
+            Ok(_) => {}
+            // The destination wait itself failed (broken notifier or epoll).
+            // Hide it from the guest like any other destination failure.
+            Err(source) => self.fail(MirrorFailure::DestinationWait { user_data, source }),
+        }
+
+        if src_result != expected_result {
+            self.fail(MirrorFailure::SourceCompletion {
+                user_data,
+                actual: src_result,
+                expected: expected_result,
+            });
+        }
+
+        self.inflight_completions.push_back((user_data, src_result));
+        let _ = self.source.io().notifier().write(1);
+        Ok(())
+    }
+
+    /// Drains `completion_io` until `user_data`'s completion appears and pushes
+    /// additional ones to `inflight_completions`.
+    fn await_completion(
+        completion_io: &mut CompletionIo,
+        inflight_completions: &mut VecDeque<(u64, i32)>,
+        user_data: u64,
+    ) -> io::Result<i32> {
+        loop {
+            let (id, res) = completion_io.next_completion()?;
+            if id == user_data {
+                return Ok(res);
+            }
+            inflight_completions.push_back((id, res));
+        }
+    }
 }
 
 impl AsyncIo for MirroringAsyncIo {
+    /// Returns the source notifier.
+    ///
+    /// The destination notifier is consumed internally and is not exposed to
+    /// the virtqueue worker.
     fn notifier(&self) -> &EventFd {
-        self.source.notifier()
+        self.source.io().notifier()
     }
 
     fn read_vectored(
@@ -223,7 +348,9 @@ impl AsyncIo for MirroringAsyncIo {
         iovecs: &[iovec],
         user_data: u64,
     ) -> AsyncIoResult<()> {
-        self.source.read_vectored(offset, iovecs, user_data)
+        self.source
+            .io_mut()
+            .read_vectored(offset, iovecs, user_data)
     }
 
     fn write_vectored(
@@ -232,23 +359,72 @@ impl AsyncIo for MirroringAsyncIo {
         iovecs: &[iovec],
         user_data: u64,
     ) -> AsyncIoResult<()> {
-        self.source.write_vectored(offset, iovecs, user_data)
+        let expected_result = iovecs
+            .iter()
+            .map(|iov| iov.iov_len)
+            .sum::<usize>()
+            .try_into()
+            .map_err(|_| AsyncIoError::WriteVectored(io::Error::other("write is too large")))?;
+
+        let _guard = self
+            .state
+            .range_locks
+            .clone()
+            .lock_iovecs(offset, iovecs)
+            .map_err(AsyncIoError::WriteVectored)?;
+
+        self.mirror_request(|backend| backend.write_vectored(offset, iovecs, user_data))?;
+
+        self.wait_for_completions(user_data, expected_result)
+            .map_err(AsyncIoError::WriteVectored)?;
+        Ok(())
     }
 
     fn fsync(&mut self, user_data: Option<u64>) -> AsyncIoResult<()> {
-        self.source.fsync(user_data)
+        self.mirror_request(|backend| backend.fsync(user_data))?;
+
+        // A tracked fsync (Some) waits for its completion. A barrier fsync (None) does not.
+        if let Some(user_data) = user_data {
+            self.wait_for_completions(user_data, 0)
+                .map_err(AsyncIoError::Fsync)?;
+        }
+        Ok(())
     }
 
     fn punch_hole(&mut self, offset: u64, length: u64, user_data: u64) -> AsyncIoResult<()> {
-        self.source.punch_hole(offset, length, user_data)
+        let _guard = self
+            .state
+            .range_locks
+            .clone()
+            .lock_range(offset, length)
+            .map_err(AsyncIoError::PunchHole)?;
+        self.mirror_request(|backend| backend.punch_hole(offset, length, user_data))?;
+
+        self.wait_for_completions(user_data, 0)
+            .map_err(AsyncIoError::PunchHole)?;
+        Ok(())
     }
 
     fn write_zeroes(&mut self, offset: u64, length: u64, user_data: u64) -> AsyncIoResult<()> {
-        self.source.write_zeroes(offset, length, user_data)
+        let _guard = self
+            .state
+            .range_locks
+            .clone()
+            .lock_range(offset, length)
+            .map_err(AsyncIoError::WriteZeroes)?;
+        self.mirror_request(|backend| backend.write_zeroes(offset, length, user_data))?;
+
+        self.wait_for_completions(user_data, 0)
+            .map_err(AsyncIoError::WriteZeroes)?;
+        Ok(())
     }
 
     fn next_completed_request(&mut self) -> Option<(u64, i32)> {
-        self.source.next_completed_request()
+        // Mirrored writes are awaited synchronously. Only async source reads complete here.
+        while let Some((id, res)) = self.source.io_mut().next_completed_request() {
+            self.inflight_completions.push_back((id, res));
+        }
+        self.inflight_completions.pop_front()
     }
 
     fn batch_requests_enabled(&self) -> bool {
@@ -261,7 +437,10 @@ impl AsyncIo for MirroringAsyncIo {
 
     fn alignment(&self) -> u64 {
         // Stricter alignment wins. Same iovec goes to both backends.
-        self.source.alignment().max(self.destination.alignment())
+        self.source
+            .io()
+            .alignment()
+            .max(self.destination.io().alignment())
     }
 }
 
