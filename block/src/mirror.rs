@@ -16,6 +16,7 @@ use std::{io, mem};
 use libc::{iovec, off_t};
 use log::warn;
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::poll::PollContext;
 
 use crate::BatchRequest;
 use crate::async_io::{AsyncIo, AsyncIoResult};
@@ -261,6 +262,45 @@ impl AsyncIo for MirroringAsyncIo {
     fn alignment(&self) -> u64 {
         // Stricter alignment wins. Same iovec goes to both backends.
         self.source.alignment().max(self.destination.alignment())
+    }
+}
+
+/// Owns an [`AsyncIo`] backend and waits for its completions.
+///
+/// Waiting uses a poller because the backend's notifier is created
+/// non-blocking and therefore never blocks on read.
+struct CompletionIo {
+    poll: PollContext<()>,
+    io: Box<dyn AsyncIo>,
+}
+
+#[expect(dead_code)]
+impl CompletionIo {
+    fn new(io: Box<dyn AsyncIo>) -> io::Result<Self> {
+        let poll = PollContext::new()?;
+        poll.add(io.notifier(), ())?;
+        Ok(Self { poll, io })
+    }
+
+    fn io(&self) -> &dyn AsyncIo {
+        self.io.as_ref()
+    }
+
+    fn io_mut(&mut self) -> &mut dyn AsyncIo {
+        self.io.as_mut()
+    }
+
+    /// Blocks until the owned backend reports a completion, then returns it.
+    fn next_completion(&mut self) -> io::Result<(u64, i32)> {
+        loop {
+            if let Some(completion) = self.io.next_completed_request() {
+                return Ok(completion);
+            }
+            // EINTR is retried inside `wait`.
+            self.poll.wait()?;
+            // Drain the eventfd so the next wait does not fire on a stale signal.
+            self.io.notifier().read()?;
+        }
     }
 }
 
