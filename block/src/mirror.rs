@@ -10,8 +10,10 @@
 //! switching the device to serve I/O from the destination.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::{io, mem};
+use std::thread::JoinHandle;
+use std::{io, mem, thread};
 
 use libc::{iovec, off_t};
 use log::warn;
@@ -21,6 +23,13 @@ use vmm_sys_util::poll::PollContext;
 
 use crate::BatchRequest;
 use crate::async_io::{AsyncIo, AsyncIoError, AsyncIoResult};
+use crate::disk_file::AsyncFullDiskFile;
+use crate::error::BlockResult;
+use crate::qcow_common::AlignedBuf;
+
+/// Block size for the copy worker, in which it copies data from
+/// source to destination and holds the range lock.
+pub const MIRROR_BLOCK_SIZE: usize = 512 * 1024; // 512 KiB
 
 /// Serializes overlapping byte ranges between the copy worker and the
 /// per-queue mirror writes.
@@ -122,6 +131,9 @@ impl Drop for RangeGuard {
 /// Failure that stopped an active block mirror.
 #[derive(Debug, Error)]
 pub enum MirrorFailure {
+    /// The background copy worker failed.
+    #[error("Copy worker failed: {0}")]
+    CopyWorker(#[source] io::Error),
     /// A destination completion returned an unexpected result.
     #[error("Destination completion was {actual}, expected {expected}: user_data={user_data}")]
     DestinationCompletion {
@@ -171,13 +183,17 @@ pub struct MirrorState {
     /// Current phase of the mirror.
     phase: Mutex<MirrorPhase>,
     range_locks: Arc<RangeLockManager>,
+    copied_bytes: AtomicU64,
+    total_bytes: u64,
 }
 
 impl MirrorState {
-    pub fn new() -> Arc<Self> {
+    pub fn new(logical_disk_size: u64) -> Arc<Self> {
         Arc::new(Self {
             phase: Mutex::new(MirrorPhase::Running),
             range_locks: RangeLockManager::new(),
+            copied_bytes: AtomicU64::new(0),
+            total_bytes: logical_disk_size,
         })
     }
 
@@ -444,6 +460,152 @@ impl AsyncIo for MirroringAsyncIo {
     }
 }
 
+/// Owns the copy worker thread's [`JoinHandle`].
+pub struct CopyWorkerHandle {
+    join: JoinHandle<()>,
+}
+
+impl CopyWorkerHandle {
+    /// Waits for the copy worker thread to finish.
+    pub fn join(self) -> thread::Result<()> {
+        self.join.join()
+    }
+}
+
+/// Background thread that copies existing source bytes to destination
+/// in fixed-size blocks.
+///
+/// The worker holds a [`RangeGuard`] across each block so virtqueue mirror
+/// writes cannot race the copy.
+pub struct CopyWorker {
+    source_io: CompletionIo,
+    dest_io: CompletionIo,
+    state: Arc<MirrorState>,
+    block_size_bytes: usize,
+    /// Tracks the next user_data for request and completion notifications.
+    next_user_data: u64,
+}
+
+impl CopyWorker {
+    /// Builds and spawns the copy worker on a named thread.
+    ///
+    /// Queue depth 1 is enough because the worker is sequential. The caller
+    /// must initialize the destination disk.
+    pub fn spawn(
+        source_disk: &dyn AsyncFullDiskFile,
+        destination_disk: &dyn AsyncFullDiskFile,
+        state: Arc<MirrorState>,
+        block_size_bytes: usize,
+    ) -> BlockResult<CopyWorkerHandle> {
+        let source_io = CompletionIo::new(source_disk.create_async_io(1)?)?;
+        let dest_io = CompletionIo::new(destination_disk.create_async_io(1)?)?;
+
+        let worker = Self {
+            source_io,
+            dest_io,
+            state,
+            block_size_bytes,
+            next_user_data: 0,
+        };
+        let state = worker.state.clone();
+        let join = thread::Builder::new()
+            .name("blockdev-mirror-copy-worker".into())
+            .spawn(move || {
+                let mut worker = worker;
+                if let Err(error) = worker.run() {
+                    state.transition_to_phase(MirrorPhase::Failed(Arc::new(
+                        MirrorFailure::CopyWorker(error),
+                    )));
+                }
+            })?;
+
+        Ok(CopyWorkerHandle { join })
+    }
+
+    /// Drives the block-by-block copy for predefined [`MirrorState::total_bytes`],
+    /// then transitions the migration phase to [`MirrorPhase::Ready`].
+    fn run(&mut self) -> io::Result<()> {
+        let alignment = self
+            .source_io
+            .io()
+            .alignment()
+            .max(self.dest_io.io().alignment());
+        let mut buf = AlignedBuf::new(self.block_size_bytes, alignment as usize)?;
+        let total_size = self.state.total_bytes;
+        let max_length = self.block_size_bytes as u64;
+        let mut offset = 0;
+
+        while offset < total_size {
+            let length = max_length.min(total_size - offset) as usize;
+            self.copy_block(offset, length, &mut buf)?;
+            offset += length as u64;
+        }
+
+        let user_data = self.generate_user_data();
+        self.dest_io.flush(user_data)?;
+        self.state.transition_to_phase(MirrorPhase::Ready);
+        Ok(())
+    }
+
+    /// Copies `length` bytes at `offset` from source to destination.
+    ///
+    /// Holds a range lock for the duration so virtqueue mirror writes cannot race
+    /// the copy.
+    fn copy_block(&mut self, offset: u64, length: usize, buf: &mut AlignedBuf) -> io::Result<()> {
+        let _guard = self
+            .state
+            .range_locks
+            .clone()
+            .lock_range(offset, length as u64)?;
+
+        let iovecs = [iovec {
+            iov_base: buf.as_mut_slice(length).as_mut_ptr().cast(),
+            iov_len: length,
+        }];
+
+        // Read from source into buf.
+        buf.as_mut_slice(length).fill(0);
+        let read_id = self.generate_user_data();
+        self.source_io
+            .io_mut()
+            .read_vectored(offset as off_t, &iovecs, read_id)
+            .map_err(|error| io::Error::other(format!("async io read_vectored failed: {error}")))?;
+        let (user_data, result) = self.source_io.next_completion()?;
+        if result < 0 {
+            return Err(io::Error::from_raw_os_error(-result));
+        }
+        debug_assert_eq!(user_data, read_id);
+
+        // Write buf to destination.
+        let write_id = self.generate_user_data();
+        self.dest_io
+            .io_mut()
+            .write_vectored(offset as off_t, &iovecs, write_id)
+            .map_err(|error| {
+                io::Error::other(format!("async io write_vectored failed: {error}"))
+            })?;
+        let (user_data, result) = self.dest_io.next_completion()?;
+        if result < 0 {
+            return Err(io::Error::from_raw_os_error(-result));
+        }
+        debug_assert_eq!(user_data, write_id);
+
+        self.state
+            .copied_bytes
+            .fetch_add(length as u64, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    /// Returns the current [`Self::next_user_data`] and increments it, wrapping on overflow.
+    fn generate_user_data(&mut self) -> u64 {
+        let user_data = self.next_user_data;
+        self.next_user_data = self.next_user_data.wrapping_add(1);
+
+        user_data
+    }
+}
+
 /// Owns an [`AsyncIo`] backend and waits for its completions.
 ///
 /// Waiting uses a poller because the backend's notifier is created
@@ -453,7 +615,6 @@ struct CompletionIo {
     io: Box<dyn AsyncIo>,
 }
 
-#[expect(dead_code)]
 impl CompletionIo {
     fn new(io: Box<dyn AsyncIo>) -> io::Result<Self> {
         let poll = PollContext::new()?;
@@ -480,6 +641,32 @@ impl CompletionIo {
             // Drain the eventfd so the next wait does not fire on a stale signal.
             self.io.notifier().read()?;
         }
+    }
+
+    /// Submits a tracked flush and waits for its matching successful completion.
+    ///
+    /// The completion must carry `user_data` and report zero, as required by
+    /// [`AsyncIo::fsync`].
+    fn flush(&mut self, user_data: u64) -> io::Result<()> {
+        self.io
+            .fsync(Some(user_data))
+            .map_err(|error| io::Error::other(format!("async io fsync failed: {error}")))?;
+
+        let (completed_user_data, result) = self.next_completion()?;
+        if completed_user_data != user_data {
+            return Err(io::Error::other(format!(
+                "fsync completed with unexpected user data {completed_user_data}, expected {user_data}"
+            )));
+        }
+        if result != 0 {
+            return Err(if result < 0 {
+                io::Error::from_raw_os_error(-result)
+            } else {
+                io::Error::other(format!("fsync completed with unexpected result {result}"))
+            });
+        }
+
+        Ok(())
     }
 }
 
