@@ -10,8 +10,10 @@
 //! switching the device to serve I/O from the destination.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::{io, mem};
+use std::thread::JoinHandle;
+use std::{io, mem, thread};
 
 use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
@@ -20,6 +22,12 @@ use vmm_sys_util::poll::PollContext;
 use crate::async_io::{
     AsyncIo, AsyncIoCompletion, AsyncIoError, AsyncIoOperation, AsyncIoResult, OwnedIoBuffer,
 };
+use crate::disk_file::AsyncFullDiskFile;
+use crate::error::BlockResult;
+
+/// Block size for the copy worker, in which it copies data from
+/// source to destination and holds the range lock.
+pub const MIRROR_BLOCK_SIZE: usize = 512 * 1024; // 512 KiB
 
 /// Serializes overlapping byte ranges between the copy worker and the
 /// per-queue mirror writes.
@@ -110,6 +118,9 @@ impl Drop for RangeGuard {
 /// Failure that stopped an active block mirror.
 #[derive(Debug, Error)]
 pub enum MirrorFailure {
+    /// The background copy worker failed.
+    #[error("Copy worker failed: {0}")]
+    CopyWorker(#[source] io::Error),
     /// A destination completion returned an unexpected result.
     #[error("Destination completion was {actual}, expected {expected}: user_data={user_data}")]
     DestinationCompletion {
@@ -159,13 +170,17 @@ pub struct MirrorState {
     /// Current phase of the mirror.
     phase: Mutex<MirrorPhase>,
     range_locks: Arc<RangeLockManager>,
+    copied_bytes: AtomicU64,
+    total_bytes: u64,
 }
 
 impl MirrorState {
-    pub fn new() -> Arc<Self> {
+    pub fn new(logical_disk_size: u64) -> Arc<Self> {
         Arc::new(Self {
             phase: Mutex::new(MirrorPhase::Running),
             range_locks: RangeLockManager::new(),
+            copied_bytes: AtomicU64::new(0),
+            total_bytes: logical_disk_size,
         })
     }
 
@@ -174,27 +189,17 @@ impl MirrorState {
         self.phase.lock().unwrap().clone()
     }
 
-    /// Attempts a phase transition.
-    ///
-    /// Only documented transitions are applied. Invalid transitions panic.
-    ///
-    /// Allowed transitions:
-    /// ```text
-    /// Running    -> Ready | Cancelling | Failed(_)
-    /// Ready      -> Completing | Cancelling | Failed(_)
-    /// Completing -> Completed
-    /// Failed(_)  -> Cancelling
-    /// ```
-    ///
-    /// Plus idempotent self-transitions. `Completed` and `Cancelling` are
-    /// terminal: the mirror handle is dropped out of them, after which
-    /// `Block::mirror_status` reports no active mirror.
-    pub fn transition_to_phase(&self, target: MirrorPhase) {
+    /// Non-panicking variant of [`Self::transition_to_phase`] that returns the
+    /// rejected `(from, to)` phases.
+    fn try_transition_to_phase(
+        &self,
+        target: MirrorPhase,
+    ) -> Result<(), (MirrorPhase, MirrorPhase)> {
         use MirrorPhase::*;
         let mut current = self.phase.lock().unwrap();
 
         if mem::discriminant(&*current) == mem::discriminant(&target) {
-            return;
+            return Ok(());
         }
 
         let transition_allowed = matches!(
@@ -210,16 +215,47 @@ impl MirrorState {
         );
 
         if !transition_allowed {
-            // An invalid transition indicates a programming error. Reverting the
-            // virtqueue workers requires sending a `BlockQueueCommand` to each
-            // worker, which `MirrorState` cannot do.
-            panic!(
-                "Invalid mirror phase transition attempted: {:?} -> {:?}",
-                *current, target
-            );
+            return Err((current.clone(), target));
         }
 
         *current = target;
+
+        Ok(())
+    }
+
+    /// Attempts a phase transition.
+    ///
+    /// Only allowed transitions are applied. Invalid transitions panic.
+    ///
+    /// Allowed transitions:
+    /// ```text
+    /// Running    -> Ready | Cancelling | Failed(_)
+    /// Ready      -> Completing | Cancelling | Failed(_)
+    /// Completing -> Completed
+    /// Failed(_)  -> Cancelling
+    /// ```
+    ///
+    /// Plus idempotent self-transitions. `Completed` and `Cancelling` are
+    /// terminal: the mirror handle is dropped out of them, after which
+    /// `Block::mirror_status` reports no active mirror.
+    pub fn transition_to_phase(&self, target: MirrorPhase) {
+        if let Err((from, to)) = self.try_transition_to_phase(target) {
+            // An invalid transition indicates a programming error. Reverting the
+            // virtqueue workers requires sending a `BlockQueueCommand` to each
+            // worker, which `MirrorState` cannot do.
+            panic!("Invalid mirror phase transition attempted: {from:?} -> {to:?}");
+        }
+    }
+
+    /// Applies the copy worker's result unless another thread already left
+    /// [`MirrorPhase::Running`].
+    pub(crate) fn finish_copy(&self, result: io::Result<()>) {
+        let target = match result {
+            Ok(()) => MirrorPhase::Ready,
+            Err(error) => MirrorPhase::Failed(Arc::new(MirrorFailure::CopyWorker(error))),
+        };
+
+        let _ = self.try_transition_to_phase(target);
     }
 }
 
@@ -466,6 +502,162 @@ impl AsyncIo for MirroringAsyncIo {
     }
 }
 
+/// Owns the copy worker thread's [`JoinHandle`].
+pub struct CopyWorkerHandle {
+    join: JoinHandle<()>,
+}
+
+impl CopyWorkerHandle {
+    /// Waits for the copy worker thread to finish.
+    pub fn join(self) -> thread::Result<()> {
+        self.join.join()
+    }
+}
+
+/// Background thread that copies existing source bytes to destination
+/// in fixed-size blocks.
+///
+/// The worker holds a [`RangeGuard`] across each block so virtqueue mirror
+/// writes cannot race the copy.
+pub struct CopyWorker {
+    source_io: CompletionIo,
+    dest_io: CompletionIo,
+    state: Arc<MirrorState>,
+    block_size_bytes: usize,
+    /// Tracks the next user_data for request and completion notifications.
+    next_user_data: u64,
+    alignment: u64,
+}
+
+impl CopyWorker {
+    /// Builds and spawns the copy worker on a named thread.
+    ///
+    /// Queue depth 1 is enough because the worker is sequential. The caller
+    /// must initialize the destination disk.
+    pub fn spawn(
+        source_disk: &dyn AsyncFullDiskFile,
+        destination_disk: &dyn AsyncFullDiskFile,
+        state: Arc<MirrorState>,
+        block_size_bytes: usize,
+    ) -> BlockResult<CopyWorkerHandle> {
+        let source_io = CompletionIo::new(source_disk.create_async_io(1)?)?;
+        let dest_io = CompletionIo::new(destination_disk.create_async_io(1)?)?;
+
+        let io_alignment = source_io
+            .io()
+            .alignment()
+            .max(dest_io.io().alignment())
+            .unwrap_or(1);
+        // Include disk topology when choosing buffer alignment; request offsets
+        // and lengths only need to satisfy the backends' I/O constraints.
+        let alignment = source_disk
+            .topology()
+            .logical_block_size
+            .max(destination_disk.topology().logical_block_size)
+            .max(io_alignment);
+
+        if block_size_bytes == 0
+            || block_size_bytes > i32::MAX as usize
+            || !(block_size_bytes as u64).is_multiple_of(io_alignment)
+            || !state.total_bytes.is_multiple_of(io_alignment)
+            || state.total_bytes > i64::MAX as u64
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid mirror copy size or alignment",
+            )
+            .into());
+        }
+
+        let worker = Self {
+            source_io,
+            dest_io,
+            state,
+            block_size_bytes,
+            next_user_data: 0,
+            alignment,
+        };
+        let state = Arc::clone(&worker.state);
+        let join = thread::Builder::new()
+            .name("blockdev-mirror-copy-worker".into())
+            .spawn(move || {
+                let mut worker = worker;
+                state.finish_copy(worker.run());
+            })?;
+
+        Ok(CopyWorkerHandle { join })
+    }
+
+    /// Drives the block-by-block copy for predefined [`MirrorState::total_bytes`].
+    ///
+    /// The caller records the result with [`MirrorState::finish_copy`].
+    fn run(&mut self) -> io::Result<()> {
+        let total_size = self.state.total_bytes;
+        let max_length = self.block_size_bytes as u64;
+        let mut offset = 0;
+
+        while offset < total_size {
+            let length = max_length.min(total_size - offset) as usize;
+            self.copy_block(offset, length)?;
+            offset += length as u64;
+        }
+
+        let user_data = self.generate_user_data();
+        self.dest_io.flush(user_data)?;
+        Ok(())
+    }
+
+    /// Copies `length` bytes at `offset` from source to destination.
+    ///
+    /// Holds a range lock for the duration so virtqueue mirror writes cannot race
+    /// the copy.
+    fn copy_block(&mut self, offset: u64, length: usize) -> io::Result<()> {
+        let _guard = Arc::clone(&self.state.range_locks).lock_range(offset, length as u64)?;
+        let expected_result =
+            i32::try_from(length).map_err(|_| io::Error::other("Copy block is too large"))?;
+        let offset = libc::off_t::try_from(offset)
+            .map_err(|_| io::Error::other("Copy offset is too large"))?;
+
+        // The read operation owns the buffer until it is returned in the completion.
+        let buffer = OwnedIoBuffer::new(length, self.alignment as usize)?;
+        let read_id = self.generate_user_data();
+        self.source_io
+            .io_mut()
+            .read_to_vec(offset, buffer, read_id)
+            .map_err(io::Error::other)?;
+        let completion = self
+            .source_io
+            .wait_for_completion(read_id, expected_result)?;
+        let buffer = completion
+            .buffer
+            .ok_or_else(|| io::Error::other("Source read completed without a buffer"))?;
+
+        // Transfer ownership to the destination. Write completions do not return
+        // the buffer, so the next block allocates a new one.
+        let write_id = self.generate_user_data();
+        self.dest_io
+            .io_mut()
+            .write_from_vec(offset, buffer, write_id)
+            .map_err(io::Error::other)?;
+        self.dest_io
+            .wait_for_completion(write_id, expected_result)?;
+
+        self.state
+            .copied_bytes
+            .fetch_add(length as u64, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    /// Returns the current [`Self::next_user_data`] and increments it, wrapping on overflow.
+    fn generate_user_data(&mut self) -> u64 {
+        let user_data = self.next_user_data;
+        self.next_user_data = self.next_user_data.wrapping_add(1);
+
+        user_data
+    }
+}
+
 /// Owns an [`AsyncIo`] backend and waits for its completions.
 ///
 /// Waiting uses a poller because the backend's notifier is created
@@ -475,7 +667,6 @@ struct CompletionIo {
     io: Box<dyn AsyncIo>,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 impl CompletionIo {
     fn new(io: Box<dyn AsyncIo>) -> io::Result<Self> {
         let poll = PollContext::new()?;
@@ -503,6 +694,40 @@ impl CompletionIo {
             self.io.notifier().read()?;
         }
     }
+
+    /// Waits for the next completion and validates its identifier and result.
+    /// Used by the sequential copy worker, which has one request in flight.
+    fn wait_for_completion(
+        &mut self,
+        user_data: u64,
+        expected_result: i32,
+    ) -> io::Result<AsyncIoCompletion> {
+        let completion = self.next_completion()?;
+        if completion.user_data != user_data {
+            return Err(io::Error::other(format!(
+                "Unexpected completion user data {}, expected {user_data}",
+                completion.user_data
+            )));
+        }
+        if completion.result != expected_result {
+            return Err(if completion.result < 0 {
+                io::Error::from_raw_os_error(-completion.result)
+            } else {
+                io::Error::other(format!(
+                    "Unexpected completion result {}, expected {expected_result}",
+                    completion.result
+                ))
+            });
+        }
+        Ok(completion)
+    }
+
+    /// Submits a tracked flush and waits for its matching successful completion.
+    fn flush(&mut self, user_data: u64) -> io::Result<()> {
+        self.io.fsync(Some(user_data)).map_err(io::Error::other)?;
+        self.wait_for_completion(user_data, 0)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -528,7 +753,7 @@ mod tests {
         let mirror = MirroringAsyncIo {
             source: create_io(&source),
             destination: create_io(&destination),
-            state: MirrorState::new(),
+            state: MirrorState::new(4096),
             inflight_completions: VecDeque::new(),
             bypass_destination: false,
         };
@@ -576,6 +801,42 @@ mod tests {
             assert_eq!(bytes, [0x53; 4096]);
         }
         assert!(mirror.state.range_locks.ranges.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn copy_worker_copies_multiple_blocks_and_partial_tail() {
+        for size in [0, 8192 + 17] {
+            let source = TempFile::new().unwrap();
+            let destination = TempFile::new().unwrap();
+            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            source.as_file().write_all_at(&bytes, 0).unwrap();
+            destination
+                .as_file()
+                .write_all_at(&vec![0xff; size], 0)
+                .unwrap();
+            let source_disk = RawDisk::new(
+                source.as_file().try_clone().unwrap(),
+                RawBackend::Sync,
+                false,
+            );
+            let destination_disk = RawDisk::new(
+                destination.as_file().try_clone().unwrap(),
+                RawBackend::Sync,
+                false,
+            );
+            let state = MirrorState::new(size as u64);
+            CopyWorker::spawn(&source_disk, &destination_disk, Arc::clone(&state), 4096)
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(matches!(state.phase(), MirrorPhase::Ready));
+            assert_eq!(state.copied_bytes.load(Ordering::Relaxed), size as u64);
+            let mut copied = vec![0; size];
+            destination.as_file().read_exact_at(&mut copied, 0).unwrap();
+            assert_eq!(copied, bytes);
+
+            assert!(CopyWorker::spawn(&source_disk, &destination_disk, state, 0).is_err());
+        }
     }
 
     /// Overlap is detected whether the held range precedes the query or starts
