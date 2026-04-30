@@ -55,6 +55,8 @@ use crate::api::{
 use crate::config::{MemoryRestoreMode, RestoreConfig, VmMemoryZoneUpdateData, add_to_config};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::GuestDebuggable;
+#[cfg(feature = "kvm")]
+use crate::cpu::IS_IN_SHUTDOWN;
 use crate::device_manager::DeviceManager;
 use crate::landlock::Landlock;
 use crate::locked_unix_listener::LockedUnixListener;
@@ -1886,6 +1888,14 @@ impl Vmm {
             // Capture snapshot. This may have side effects, e.g. vhost-user backend inflight drain
             let snapshot = vm.snapshot()?;
 
+            #[cfg(feature = "kvm")]
+            // Prevent signal handler to access thread local storage when signals are received
+            // close to the end when thread-local storage is already destroyed.
+            {
+                let mut lock = IS_IN_SHUTDOWN.write().unwrap();
+                *lock = true;
+            }
+
             // One final memory iteration to handle side effects from snapshot.
             if matches!(memory_mode, MigrationMode::Precopy) {
                 let memory_ranges = vm.dirty_log()?;
@@ -1899,7 +1909,6 @@ impl Vmm {
             }
             Ok(snapshot)
         })?;
-
         let (_, send_snapshot_duration) =
             measure_ok(|| transport::send_state(&mut socket, &vm_snapshot))?;
 

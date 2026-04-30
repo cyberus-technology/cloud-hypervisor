@@ -20,7 +20,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(feature = "tdx")]
 use std::os::raw;
 use std::os::unix::io::AsRawFd;
-#[cfg(feature = "tdx")]
+#[cfg(any(feature = "kvm", feature = "tdx"))]
 use std::os::unix::io::RawFd;
 #[cfg(feature = "tdx")]
 use std::ptr;
@@ -3628,6 +3628,11 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     fn set_immediate_exit(&mut self, exit: bool) {
         self.fd.set_kvm_immediate_exit(exit.into());
+    }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 
     ///

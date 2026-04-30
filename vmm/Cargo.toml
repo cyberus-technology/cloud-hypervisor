@@ -66,6 +66,7 @@ igvm = { workspace = true, optional = true }
 igvm_defs = { workspace = true, optional = true }
 iommufd-bindings = { workspace = true, optional = true }
 iommufd-ioctls = { workspace = true, optional = true }
+kvm-bindings = { workspace = true }
 landlock = "0.4.5"
 libc = { workspace = true }
 linux-loader = { workspace = true, features = ["bzimage", "elf", "pe"] }

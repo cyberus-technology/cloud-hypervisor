@@ -12,6 +12,8 @@
 
 #[cfg(feature = "tdx")]
 use std::io;
+#[cfg(feature = "kvm")]
+use std::os::fd::RawFd;
 use std::result;
 
 #[cfg(feature = "sev_snp")]
@@ -652,6 +654,13 @@ pub trait Vcpu: Send + Sync {
     /// Trigger NMI interrupt
     ///
     fn nmi(&self) -> Result<()>;
+    /// Returns the underlying vCPU FD of KVM.
+    ///
+    /// # SAFETY
+    /// This is safe as we only use this to map the KVM_RUN structure for the
+    /// signal handler and only use it from there.
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd;
 
     ///
     /// The type of the hypervisor backing this vCPU
