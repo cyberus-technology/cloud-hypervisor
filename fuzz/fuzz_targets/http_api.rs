@@ -113,6 +113,10 @@ impl RequestHandler for StubApiRequestHandler {
         Ok(())
     }
 
+    fn vm_disk_mirror_start(&mut self, _: String, _: PathBuf) -> Result<(), VmError> {
+        Ok(())
+    }
+
     #[cfg(target_arch = "x86_64")]
     fn vm_coredump(&mut self, _: &str) -> Result<(), VmError> {
         Ok(())
