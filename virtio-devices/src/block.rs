@@ -15,8 +15,8 @@ use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{io, result, thread};
 
@@ -25,6 +25,10 @@ use block::async_io::{AsyncIo, AsyncIoError};
 use block::disk_file::AsyncFullDiskFile;
 use block::error::BlockError;
 use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType};
+use block::mirror::{
+    BlockMirrorHandle, CopyWorker, CopyWorkerHandle, MIRROR_BLOCK_SIZE, MirrorFailure, MirrorPhase,
+    MirrorState, MirroringAsyncIo,
+};
 use block::{
     ExecuteAsync, ExecuteError, MAX_DISCARD_WRITE_ZEROES_SEG, Request, RequestType,
     VirtioBlockConfig, build_serial,
@@ -66,6 +70,9 @@ const RATE_LIMITER_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
 
 // A `BlockQueueCommand` has been queued for this worker to apply (e.g. swap disk_image).
 const BLOCK_COMMAND_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 4;
+
+// Maximum duration to wait for a command to be acknowledged by the virtqueue worker.
+const MIRROR_COMMAND_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 // latency scale, for reduce precision loss in calculate.
 const LATENCY_SCALE: u64 = 10000;
@@ -123,12 +130,35 @@ pub type Result<T> = result::Result<T, Error>;
 /// Describes errors reported by synchronous block mirror operations.
 #[derive(Error, Debug)]
 pub enum MirrorError {
+    /// Reports an underlying block backend operation failure.
+    #[error("Block mirror backend operation failed")]
+    Backend(#[source] BlockError),
+    /// Indicates that the source and destination have different logical sizes.
+    #[error(
+        "Mirror destination logical size ({destination_size} bytes) differs from source logical size ({source_size} bytes)"
+    )]
+    DestinationSizeMismatch {
+        source_size: u64,
+        destination_size: u64,
+    },
+    /// Indicates that a mirror operation was requested before device activation.
+    #[error("Mirror operation rejected: the device is not active")]
+    DeviceNotActive,
     /// Reports a failure to register the new disk notifier.
     #[error("Failed to register new disk notifier")]
     RegisterNotifier(#[source] EpollHelperError),
     /// Reports a failure to deregister the old disk notifier.
     #[error("Failed to deregister old disk notifier")]
     DeregisterNotifier(#[source] EpollHelperError),
+    /// Indicates that a queue already has a pending mirror command.
+    #[error("Mirror command slot is occupied")]
+    CommandSlotOccupied,
+    /// Reports a failure to notify a virtqueue worker about a mirror command.
+    #[error("Failed to notify mirror queue worker")]
+    NotifyWorker(#[source] io::Error),
+    /// Reports a missing or late acknowledgement from a virtqueue worker.
+    #[error("Failed waiting for mirror command acknowledgement")]
+    Ack(#[source] mpsc::RecvTimeoutError),
 }
 
 /// Represents the result of a synchronous block mirror operation.
@@ -169,6 +199,9 @@ pub struct BlockQueueCommand {
     pub ack: Sender<BlockQueueAck>,
 }
 
+/// One command per virtqueue, each paired with the sender of its queue.
+type QueueCommands<'a> = Vec<(&'a BlockQueueCommandSender, BlockQueueCommand)>;
+
 /// Worker side of the per-virtqueue command channel that receives commands
 /// to swap the `disk_image` at runtime.
 ///
@@ -192,10 +225,6 @@ pub struct BlockQueueCommandReceiver {
 }
 
 /// API-thread handles used to stage and signal commands for one virtqueue.
-#[expect(
-    dead_code,
-    reason = "Mirror operations are introduced in the following commit."
-)]
 struct BlockQueueCommandSender {
     /// Single command slot shared with the virtqueue worker.
     cmd: Arc<Mutex<Option<BlockQueueCommand>>>,
@@ -982,6 +1011,7 @@ pub struct Block {
     /// `Block::start_mirror` fills each slot with a [`BlockQueueCommand`] and
     /// writes the corresponding eventfd.
     queue_cmd_senders: Vec<BlockQueueCommandSender>,
+    mirror_handle: Option<BlockMirrorHandle>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1150,6 +1180,7 @@ impl Block {
             active_request_count: Arc::new(AtomicUsize::new(0)),
             draining_active_requests: Arc::new(AtomicBool::new(false)),
             queue_cmd_senders: Vec::new(),
+            mirror_handle: None,
         })
     }
 
@@ -1348,6 +1379,191 @@ impl Block {
             .map_err(Error::ConfigChange)
     }
 
+    /// Starts mirroring the device's disk to `destination`.
+    ///
+    /// `destination` is an already-opened disk backend whose file lives in
+    /// the host filesystem, typically on a different mount than the source
+    /// (e.g. another host mounted NFS share).
+    /// `destination_path` is the host path backing it.
+    ///
+    /// Each virtqueue worker swaps its `disk_image` to a new
+    /// [`MirroringAsyncIo`] that fans every mutating request out to both
+    /// backends. A background [`CopyWorker`] copies existing source bytes
+    /// to destination until all initial bytes are copied.
+    /// The [`MirroringAsyncIo`] stays in place until completion, keeping the device's
+    /// disk and `destination` in sync.
+    pub fn start_mirror(
+        &mut self,
+        destination: Box<dyn AsyncFullDiskFile>,
+        destination_path: PathBuf,
+    ) -> MirrorResult<()> {
+        // Mirroring requires activation to have installed at least one live queue worker.
+        if self.common.epoll_threads.is_none() || self.queue_cmd_senders.is_empty() {
+            return Err(MirrorError::DeviceNotActive);
+        }
+        let source_size = self
+            .disk_image
+            .logical_size()
+            .map_err(MirrorError::Backend)?;
+        let destination_size = destination.logical_size().map_err(MirrorError::Backend)?;
+        if destination_size != source_size {
+            return Err(MirrorError::DestinationSizeMismatch {
+                source_size,
+                destination_size,
+            });
+        }
+
+        let (state, copy_worker) = self.initialize_mirror(destination.as_ref(), source_size)?;
+
+        self.mirror_handle = Some(BlockMirrorHandle {
+            state,
+            copy_worker,
+            destination,
+            destination_path,
+        });
+        Ok(())
+    }
+
+    /// Installs the mirror backends and starts the copy worker.
+    ///
+    /// On success, returns after every virtqueue has acknowledged the new
+    /// backend. If installation fails after commands are created, the queues
+    /// are reverted to the source backend.
+    fn initialize_mirror(
+        &mut self,
+        destination: &dyn AsyncFullDiskFile,
+        source_size: u64,
+    ) -> MirrorResult<(Arc<MirrorState>, CopyWorkerHandle)> {
+        let state = MirrorState::new(source_size);
+        let (commands, ack_rx) = self.create_mirror_queue_commands(
+            BlockQueueCommandKind::InstallMirror,
+            |ring_depth| {
+                Ok(Box::new(
+                    MirroringAsyncIo::create(
+                        self.disk_image.as_ref(),
+                        destination,
+                        state.clone(),
+                        ring_depth,
+                    )
+                    .map_err(MirrorError::Backend)?,
+                ))
+            },
+        )?;
+
+        Self::send_mirror_queue_commands(commands)
+            .inspect_err(|_| self.rollback_mirror_installation(&state))?;
+
+        self.wait_for_mirror_queue_command_acks(&ack_rx)
+            .inspect_err(|_| self.rollback_mirror_installation(&state))?;
+
+        let copy_worker = CopyWorker::spawn(
+            self.disk_image.as_ref(),
+            destination,
+            state.clone(),
+            MIRROR_BLOCK_SIZE,
+        )
+        .map_err(MirrorError::Backend)
+        .inspect_err(|_| self.rollback_mirror_installation(&state))?;
+
+        Ok((state, copy_worker))
+    }
+
+    /// Marks a mirror installation as failed and reverts to the source.
+    fn rollback_mirror_installation(&mut self, state: &Arc<MirrorState>) {
+        state.transition_to_phase(MirrorPhase::Failed(Arc::new(MirrorFailure::Installation)));
+
+        if let Err(revert_error) = self.revert_queues_to_source() {
+            error!(
+                "failed to revert virtqueues to source after mirror install failure: {revert_error}"
+            );
+        }
+    }
+
+    /// Creates one command per virtqueue, all sharing one ack channel.
+    ///
+    /// Returns each command paired with the sender of its queue, plus
+    /// the receiving end of the channel.
+    ///
+    /// `new_async_io` is called once per queue with the ring depth of
+    /// that queue and returns the backend the worker swaps to.
+    ///
+    /// The ack sender lives only inside the returned commands. Once
+    /// every worker has consumed or dropped its command, a lost ack
+    /// shows up as `Disconnected` on the receiver instead of costing
+    /// the full ack timeout, and only the workers can ack this op.
+    fn create_mirror_queue_commands(
+        &self,
+        kind: BlockQueueCommandKind,
+        mut new_async_io: impl FnMut(u32) -> MirrorResult<Box<dyn AsyncIo>>,
+    ) -> MirrorResult<(QueueCommands<'_>, Receiver<BlockQueueAck>)> {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let commands = self
+            .queue_cmd_senders
+            .iter()
+            .map(|sender| {
+                Ok((
+                    sender,
+                    BlockQueueCommand {
+                        kind,
+                        async_io: new_async_io(u32::from(sender.queue_size))?,
+                        ack: ack_tx.clone(),
+                    },
+                ))
+            })
+            .collect::<MirrorResult<_>>()?;
+        Ok((commands, ack_rx))
+    }
+
+    /// Sends one staged mirror command to each virtqueue worker.
+    fn send_mirror_queue_commands(commands: QueueCommands<'_>) -> MirrorResult<()> {
+        for (sender, command) in commands {
+            let mut slot = sender.cmd.lock().unwrap();
+
+            if slot.is_some() {
+                return Err(MirrorError::CommandSlotOccupied);
+            }
+
+            *slot = Some(command);
+            sender.evt.write(1).map_err(MirrorError::NotifyWorker)?;
+        }
+
+        Ok(())
+    }
+
+    /// Waits for all mirror-command acknowledgements.
+    ///
+    /// Returns an error when the shared deadline expires or an acknowledgement
+    /// reports an error.
+    fn wait_for_mirror_queue_command_acks(
+        &self,
+        ack_rx: &Receiver<BlockQueueAck>,
+    ) -> MirrorResult<()> {
+        let deadline = Instant::now() + MIRROR_COMMAND_ACK_TIMEOUT;
+
+        for _ in 0..self.queue_cmd_senders.len() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let ack = ack_rx.recv_timeout(remaining).map_err(MirrorError::Ack)?;
+
+            ack.result?;
+        }
+
+        Ok(())
+    }
+
+    /// Swaps every virtqueue worker back to a plain `AsyncIo` on the source disk.
+    fn revert_queues_to_source(&mut self) -> MirrorResult<()> {
+        let (commands, ack_rx) = self.create_mirror_queue_commands(
+            BlockQueueCommandKind::CancelToSource,
+            |ring_depth| {
+                self.disk_image
+                    .create_async_io(ring_depth)
+                    .map_err(MirrorError::Backend)
+            },
+        )?;
+        Self::send_mirror_queue_commands(commands)?;
+        self.wait_for_mirror_queue_command_acks(&ack_rx)
+    }
+
     #[cfg(fuzzing)]
     pub fn wait_for_epoll_threads(&mut self) {
         self.common.wait_for_epoll_threads();
@@ -1361,6 +1577,19 @@ impl Drop for Block {
             let _ = kill_evt.write(1);
         }
         self.common.wait_for_epoll_threads();
+
+        let Some(handle) = self.mirror_handle.take() else {
+            return;
+        };
+
+        if !handle.copy_worker.is_finished() {
+            warn!("copy worker is still running during block teardown");
+            return;
+        }
+
+        if let Err(error) = handle.copy_worker.join() {
+            error!("copy worker thread panicked: {error:?}");
+        }
     }
 }
 
