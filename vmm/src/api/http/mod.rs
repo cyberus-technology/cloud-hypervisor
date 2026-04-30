@@ -33,9 +33,9 @@ use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
     VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
-    VmDelete, VmDiskMirrorStart, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration,
-    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
-    VmShutdown, VmSnapshot,
+    VmDelete, VmDiskMirrorStart, VmDiskMirrorStatus, VmNmi, VmPause, VmPowerButton, VmReboot,
+    VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume,
+    VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::ValidationError;
 use crate::device_manager::DeviceManagerError;
@@ -134,7 +134,10 @@ fn api_error_status_code(error: &ApiError) -> StatusCode {
             VmError::VmNotCreated
             | VmError::VmMissingConfig
             | VmError::NoDeviceToRemove(_)
-            | VmError::DeviceManager(DeviceManagerError::UnknownDeviceId(_)),
+            | VmError::DeviceManager(
+                DeviceManagerError::UnknownDeviceId(_)
+                | DeviceManagerError::BlockMirrorNotActive(_),
+            ),
         ) => StatusCode::NotFound,
         Some(
             VmError::VmMigrating
@@ -307,6 +310,10 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
     r.routes.insert(
         endpoint!("/vm.disk-mirror-start"),
         Box::new(VmActionHandler::new(&VmDiskMirrorStart)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-status"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorStatus)),
     );
     r.routes.insert(endpoint!("/vm.info"), Box::new(VmInfo {}));
     r.routes.insert(
@@ -578,6 +585,23 @@ mod tests {
                 DeviceManagerError::UnknownDeviceId("disk0".to_string())
             ))),
             StatusCode::NotFound
+        );
+    }
+
+    #[test]
+    fn test_disk_mirror_status_error_codes() {
+        for error in [
+            DeviceManagerError::UnknownDeviceId("disk0".into()),
+            DeviceManagerError::BlockMirrorNotActive("disk0".into()),
+        ] {
+            assert_eq!(
+                api_error_status_code(&ApiError::VmDiskMirrorStatus(VmError::DeviceManager(error))),
+                StatusCode::NotFound
+            );
+        }
+        assert_eq!(
+            api_error_status_code(&ApiError::VmDiskMirrorStatus(VmError::VmMigrating)),
+            StatusCode::Conflict
         );
     }
 
