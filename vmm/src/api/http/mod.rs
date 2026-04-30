@@ -13,6 +13,7 @@ use std::sync::LazyLock;
 use std::sync::mpsc::Sender;
 use std::{panic, result, thread};
 
+use block::error::BlockErrorKind;
 use log::{error, info};
 use micro_http::{
     Body, HttpServer, MediaType, Method, Request, Response, ServerError, StatusCode, Version,
@@ -20,6 +21,7 @@ use micro_http::{
 use seccompiler::{SeccompAction, apply_filter};
 use serde_json::Error as SerdeError;
 use thiserror::Error;
+use virtio_devices::block::MirrorError;
 use vm_migration::MigratableError;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -31,9 +33,9 @@ use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
     VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
-    VmDelete, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice,
-    VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown,
-    VmSnapshot,
+    VmDelete, VmDiskMirrorStart, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration,
+    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
+    VmShutdown, VmSnapshot,
 };
 use crate::config::ValidationError;
 use crate::device_manager::DeviceManagerError;
@@ -97,6 +99,26 @@ impl HttpError {
 
 /// Maps an [`ApiError`] to an HTTP [`StatusCode`].
 fn api_error_status_code(error: &ApiError) -> StatusCode {
+    if let ApiError::VmDiskMirrorStart(VmError::DeviceManager(device_error)) = error {
+        match device_error {
+            DeviceManagerError::Disk(error)
+                if matches!(error.kind(), BlockErrorKind::ImageTypeMismatch { .. }) =>
+            {
+                return StatusCode::BadRequest;
+            }
+            DeviceManagerError::BlockMirrorAlreadyActive(_)
+            | DeviceManagerError::BlockMirrorDestinationInUse(_)
+            | DeviceManagerError::BlockMirrorStart(
+                MirrorError::DeviceNotActive
+                | MirrorError::DevicePaused
+                | MirrorError::DestinationSizeMismatch { .. }
+                | MirrorError::DestinationLock { .. }
+                | MirrorError::Unsupported(_),
+            ) => return StatusCode::BadRequest,
+            _ => {}
+        }
+    }
+
     let source = error.source();
 
     // The migration endpoints report state conflicts with a `MigratableError`,
@@ -281,6 +303,10 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
     r.routes.insert(
         endpoint!("/vm.delete"),
         Box::new(VmActionHandler::new(&VmDelete)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-start"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorStart)),
     );
     r.routes.insert(endpoint!("/vm.info"), Box::new(VmInfo {}));
     r.routes.insert(
@@ -630,6 +656,45 @@ mod tests {
             api_error_status_code(&ApiError::VmReceiveMigration(MigratableError::Conflict(
                 anyhow!("A VM already exists on this VMM")
             ))),
+            StatusCode::Conflict
+        );
+    }
+
+    #[test]
+    fn test_disk_mirror_error_status_codes() {
+        use block::error::BlockError;
+
+        for (error, expected) in [
+            (
+                DeviceManagerError::Disk(BlockError::from_kind(
+                    BlockErrorKind::ImageTypeMismatch {
+                        specified: block::ImageType::Qcow2,
+                    },
+                )),
+                StatusCode::BadRequest,
+            ),
+            (
+                DeviceManagerError::BlockMirrorAlreadyActive("disk0".into()),
+                StatusCode::BadRequest,
+            ),
+            (
+                DeviceManagerError::BlockMirrorStart(MirrorError::DevicePaused),
+                StatusCode::BadRequest,
+            ),
+            (
+                DeviceManagerError::UnknownDeviceId("disk0".into()),
+                StatusCode::NotFound,
+            ),
+            (
+                DeviceManagerError::Disk(BlockError::from_kind(BlockErrorKind::Io)),
+                StatusCode::InternalServerError,
+            ),
+        ] {
+            let error = ApiError::VmDiskMirrorStart(VmError::DeviceManager(error));
+            assert_eq!(api_error_status_code(&error), expected, "{error:?}");
+        }
+        assert_eq!(
+            api_error_status_code(&ApiError::VmDiskMirrorStart(VmError::VmMigrating)),
             StatusCode::Conflict
         );
     }

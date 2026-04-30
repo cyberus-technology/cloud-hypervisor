@@ -8,7 +8,6 @@ use std::fs::File;
 use std::io::{Read, Write, stdout};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::panic::AssertUnwindSafe;
-#[cfg(feature = "guest_debug")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "guest_debug")]
@@ -3608,6 +3607,20 @@ impl RequestHandler for Vmm {
         migration_worker_handle.try_cancel_migration();
 
         Ok(())
+    }
+
+    fn vm_disk_mirror_start(
+        &mut self,
+        id: String,
+        destination_path: PathBuf,
+    ) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        match self.vm {
+            VmOwnership::Owned(ref mut vm) => vm.mirror_disk(&id, &destination_path),
+            VmOwnership::Migration { .. } => Err(VmError::VmMigrating),
+            VmOwnership::None => Err(VmError::DiskMirrorStart),
+        }
     }
 }
 
