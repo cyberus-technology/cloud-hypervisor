@@ -10,6 +10,7 @@
 //! switching the device to serve I/O from the destination.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -115,7 +116,7 @@ impl Drop for RangeGuard {
     }
 }
 
-/// Failure that stopped an active block mirror.
+/// Describes a failure recorded in a block mirror's shared state.
 #[derive(Debug, Error)]
 pub enum MirrorFailure {
     /// The background copy worker failed.
@@ -138,6 +139,9 @@ pub enum MirrorFailure {
         #[source]
         source: io::Error,
     },
+    /// Installing the mirror backend failed.
+    #[error("Mirror installation failed")]
+    Installation,
     /// A source completion returned an unexpected result.
     #[error("Source completion was {actual}, expected {expected}: user_data={user_data}")]
     SourceCompletion {
@@ -281,6 +285,28 @@ pub struct MirroringAsyncIo {
 }
 
 impl MirroringAsyncIo {
+    /// Creates a mirroring backend for one virtqueue.
+    ///
+    /// `state` must be shared with the copy worker and all other virtqueue
+    /// backends for the same mirror.
+    pub fn create(
+        source_disk: &dyn AsyncFullDiskFile,
+        destination_disk: &dyn AsyncFullDiskFile,
+        state: Arc<MirrorState>,
+        ring_depth: u32,
+    ) -> BlockResult<Self> {
+        let source = CompletionIo::new(source_disk.create_async_io(ring_depth)?)?;
+        let destination = CompletionIo::new(destination_disk.create_async_io(ring_depth)?)?;
+
+        Ok(Self {
+            source,
+            destination,
+            state,
+            inflight_completions: VecDeque::new(),
+            bypass_destination: false,
+        })
+    }
+
     /// Flips the mirror to the `Failed` phase.
     ///
     /// The operator must cancel to clean up the destination and the copy worker.
@@ -597,6 +623,10 @@ impl CopyWorker {
         let mut offset = 0;
 
         while offset < total_size {
+            if !matches!(self.state.phase(), MirrorPhase::Running) {
+                return Ok(());
+            }
+
             let length = max_length.min(total_size - offset) as usize;
             self.copy_block(offset, length)?;
             offset += length as u64;
@@ -656,6 +686,21 @@ impl CopyWorker {
 
         user_data
     }
+}
+
+/// Represents an active block mirror operation.
+///
+/// The operation must be completed or cancelled before the handle is dropped.
+/// Dropping it does not stop or join the background copy worker.
+pub struct BlockMirrorHandle {
+    /// Shared lifecycle state and copy progress.
+    pub state: Arc<MirrorState>,
+    /// Handle for joining the background copy worker.
+    pub copy_worker: CopyWorkerHandle,
+    /// Destination backend of the mirror.
+    pub destination: Box<dyn AsyncFullDiskFile>,
+    /// Host path backing the destination.
+    pub destination_path: PathBuf,
 }
 
 /// Owns an [`AsyncIo`] backend and waits for its completions.
@@ -739,24 +784,22 @@ mod tests {
 
     use super::*;
     use crate::async_io::GuestMemoryTarget;
-    use crate::disk_file::AsyncDiskFile;
     use crate::formats::raw::{RawBackend, RawDisk};
 
     fn mirror_with_files() -> (MirroringAsyncIo, TempFile, TempFile) {
         let source = TempFile::new().unwrap();
         let destination = TempFile::new().unwrap();
-        let create_io = |file: &TempFile| {
+        let create_disk = |file: &TempFile| {
             file.as_file().set_len(4096).unwrap();
-            let disk = RawDisk::new(file.as_file().try_clone().unwrap(), RawBackend::Sync, false);
-            CompletionIo::new(disk.create_async_io(1).unwrap()).unwrap()
+            RawDisk::new(file.as_file().try_clone().unwrap(), RawBackend::Sync, false)
         };
-        let mirror = MirroringAsyncIo {
-            source: create_io(&source),
-            destination: create_io(&destination),
-            state: MirrorState::new(4096),
-            inflight_completions: VecDeque::new(),
-            bypass_destination: false,
-        };
+        let mirror = MirroringAsyncIo::create(
+            &create_disk(&source),
+            &create_disk(&destination),
+            MirrorState::new(4096),
+            1,
+        )
+        .unwrap();
         (mirror, source, destination)
     }
 
