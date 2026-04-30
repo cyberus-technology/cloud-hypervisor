@@ -27,7 +27,7 @@ use block::error::BlockError;
 use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType};
 use block::mirror::{
     BlockMirrorHandle, CopyWorker, CopyWorkerHandle, MIRROR_BLOCK_SIZE, MirrorFailure, MirrorPhase,
-    MirrorState, MirroringAsyncIo,
+    MirrorState, MirrorStatus, MirroringAsyncIo,
 };
 use block::{
     ExecuteAsync, ExecuteError, MAX_DISCARD_WRITE_ZEROES_SEG, Request, RequestType,
@@ -1562,6 +1562,13 @@ impl Block {
         )?;
         Self::send_mirror_queue_commands(commands)?;
         self.wait_for_mirror_queue_command_acks(&ack_rx)
+    }
+
+    /// Returns a snapshot of the current mirror progress.
+    pub fn mirror_status(&self) -> Option<MirrorStatus> {
+        self.mirror_handle
+            .as_ref()
+            .map(|handle| handle.state.status())
     }
 
     #[cfg(fuzzing)]

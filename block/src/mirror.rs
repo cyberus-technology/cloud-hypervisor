@@ -253,6 +253,25 @@ impl MirrorState {
 
         *current = target;
     }
+
+    /// Returns a snapshot of the mirror phase and copy progress.
+    pub fn status(&self) -> MirrorStatus {
+        MirrorStatus {
+            phase: self.phase(),
+            copied_bytes: self.copied_bytes.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
+/// Snapshot of an active block mirror's phase and copy progress.
+pub struct MirrorStatus {
+    /// Current lifecycle phase.
+    pub phase: MirrorPhase,
+    /// Number of source bytes copied by the background worker.
+    pub copied_bytes: u64,
+    /// Total logical number of bytes to copy.
+    pub total_bytes: u64,
 }
 
 /// Per-virtqueue [`AsyncIo`] backend for an active block mirror.
