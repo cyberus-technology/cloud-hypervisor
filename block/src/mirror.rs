@@ -22,11 +22,11 @@ use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::poll::PollContext;
 
-use crate::BatchRequest;
 use crate::async_io::{AsyncIo, AsyncIoError, AsyncIoResult};
 use crate::disk_file::AsyncFullDiskFile;
 use crate::error::BlockResult;
 use crate::qcow_common::AlignedBuf;
+use crate::{BatchRequest, RequestType};
 
 /// Block size for the copy worker, in which it copies data from
 /// source to destination and holds the range lock.
@@ -488,11 +488,27 @@ impl AsyncIo for MirroringAsyncIo {
     }
 
     fn batch_requests_enabled(&self) -> bool {
-        false
+        true
     }
 
-    fn submit_batch_requests(&mut self, _batch_request: &[BatchRequest]) -> AsyncIoResult<()> {
-        unimplemented!("Batch requests are not supported in MirroringAsyncIo")
+    fn submit_batch_requests(&mut self, batch_request: &[BatchRequest]) -> AsyncIoResult<()> {
+        for req in batch_request {
+            let result = match req.request_type {
+                RequestType::In => self.read_vectored(req.offset, &req.iovecs, req.user_data),
+                RequestType::Out => self.write_vectored(req.offset, &req.iovecs, req.user_data),
+                // Only In and Out are batched, see request.rs.
+                _ => unreachable!("Unexpected batch request type: {:?}", req.request_type),
+            };
+
+            // Push partial batch error to completions, vectored op has not
+            // pushed it to the inflight_completions queue.
+            if result.is_err() {
+                self.inflight_completions
+                    .push_back((req.user_data, -libc::EIO));
+                let _ = self.source.io().notifier().write(1);
+            }
+        }
+        Ok(())
     }
 
     fn alignment(&self) -> u64 {
