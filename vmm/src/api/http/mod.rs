@@ -30,9 +30,9 @@ use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
     VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
-    VmDelete, VmMigrationProgress, VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton,
-    VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore,
-    VmResume, VmSendMigration, VmShutdown, VmSnapshot,
+    VmDelete, VmDiskMirrorStart, VmMigrationProgress, VmNmi, VmPause, VmPostMigrationAnnounce,
+    VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk,
+    VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::landlock::Landlock;
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
@@ -53,9 +53,20 @@ pub enum HttpError {
     #[error("Bad Request")]
     BadRequest,
 
+    /// A bad request caused by an internal API error. The source is retained
+    /// for logging and for the response body while the HTTP status remains 400.
+    #[error("Bad Request")]
+    BadRequestWithApiError(#[source] ApiError),
+
     /// Undefined endpoints
     #[error("Not Found")]
     NotFound,
+
+    /// A not-found response caused by an internal API error. The source is
+    /// retained for logging and for the response body while the HTTP status
+    /// remains 404.
+    #[error("Not Found")]
+    NotFoundWithApiError(#[source] ApiError),
 
     /// Too many requests
     #[error("Too Many Requests")]
@@ -137,10 +148,15 @@ pub trait EndpointHandler {
                 }
             }
             Err(e @ HttpError::BadRequest) => error_response(e, StatusCode::BadRequest),
+            Err(e @ HttpError::BadRequestWithApiError(_)) => {
+                error_response(e, StatusCode::BadRequest)
+            }
             Err(e @ HttpError::SerdeJsonDeserialize(_)) => {
                 error_response(e, StatusCode::BadRequest)
             }
             Err(e @ HttpError::TooManyRequests) => error_response(e, StatusCode::TooManyRequests),
+            Err(e @ HttpError::NotFound) => error_response(e, StatusCode::NotFound),
+            Err(e @ HttpError::NotFoundWithApiError(_)) => error_response(e, StatusCode::NotFound),
             Err(e) => error_response(e, StatusCode::InternalServerError),
         }
     }
@@ -232,6 +248,10 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
     r.routes.insert(
         endpoint!("/vm.delete"),
         Box::new(VmActionHandler::new(&VmDelete)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-start"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorStart)),
     );
     r.routes.insert(endpoint!("/vm.info"), Box::new(VmInfo {}));
     r.routes.insert(

@@ -149,6 +149,10 @@ pub enum ApiError {
     #[error("The disk could not be resized")]
     VmResizeDisk(#[source] VmError),
 
+    /// Error starting disk mirror
+    #[error("Error starting disk mirror")]
+    VmDiskMirrorStart(#[source] VmError),
+
     /// The memory zone could not be resized.
     #[error("The memory zone could not be resized")]
     VmResizeZone(#[source] VmError),
@@ -233,6 +237,12 @@ pub struct VmInfoResponse {
     pub state: VmState,
     pub memory_actual_size: u64,
     pub device_tree: Option<DeviceTree>,
+}
+
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmDiskMirrorStartData {
+    pub id: String,
+    pub destination_path: PathBuf,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -752,6 +762,12 @@ pub trait RequestHandler {
     fn vm_resize_zone(&mut self, id: String, desired_ram: u64) -> Result<(), VmError>;
 
     fn vm_resize_disk(&mut self, id: String, desired_size: u64) -> Result<(), VmError>;
+
+    fn vm_disk_mirror_start(
+        &mut self,
+        id: String,
+        destination_path: PathBuf,
+    ) -> Result<(), VmError>;
 
     fn vm_add_device(&mut self, device_cfg: DeviceConfig) -> Result<Option<Vec<u8>>, VmError>;
 
@@ -1360,6 +1376,37 @@ impl ApiAction for VmDelete {
             let response = vmm
                 .vm_delete()
                 .map_err(ApiError::VmDelete)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmDiskMirrorStart;
+
+impl ApiAction for VmDiskMirrorStart {
+    type RequestBody = VmDiskMirrorStartData;
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            let response = vmm
+                .vm_disk_mirror_start(data.id, data.destination_path)
+                .map_err(ApiError::VmDiskMirrorStart)
                 .map(|_| ApiResponsePayload::Empty);
 
             response_sender
