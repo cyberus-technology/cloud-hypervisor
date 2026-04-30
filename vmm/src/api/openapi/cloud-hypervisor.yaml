@@ -510,6 +510,26 @@ paths:
         500:
           description: The VM migration could not be sent.
 
+  /vm.disk-mirror-start:
+    put:
+      summary: Start mirroring a disk to a destination
+      requestBody:
+        description: The disk to mirror and the destination path
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorStartData"
+        required: true
+      responses:
+        204:
+          description: Disk mirroring was successfully started.
+        400:
+          description: A mirror is already active for the disk, or the destination is not usable.
+        404:
+          description: No disk with the given identifier was found.
+        500:
+          description: Disk mirroring could not be started.
+
 components:
   schemas:
     VmmPingResponse:
@@ -1563,4 +1583,15 @@ components:
         path:
           type: string
         access:
+          type: string
+
+    VmDiskMirrorStartData:
+      required:
+        - id
+        - destination_path
+      type: object
+      properties:
+        id:
+          type: string
+        destination_path:
           type: string

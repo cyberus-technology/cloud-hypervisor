@@ -689,6 +689,12 @@ pub enum DeviceManagerError {
     /// Block mirroring is not active for the current device.
     #[error("Block mirroring is not active for the current disk with identifier: {0}")]
     BlockMirrorNotActive(String),
+
+    /// Mirroring is already active for the current device.
+    #[error(
+        "Failed to start block mirroring for the disk with identifier: {0} as mirroring is already active"
+    )]
+    BlockMirrorAlreadyActive(String),
 }
 
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
@@ -5346,6 +5352,12 @@ impl DeviceManager {
             .map(|dev| dev.lock().unwrap())
             .find(|disk| disk.id() == device_id)
             .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))?;
+
+        if disk.mirror_status().is_some() {
+            return Err(DeviceManagerError::BlockMirrorAlreadyActive(
+                device_id.to_string(),
+            ));
+        }
 
         let (options, image_type) = {
             let cfg = self.config.lock().unwrap();

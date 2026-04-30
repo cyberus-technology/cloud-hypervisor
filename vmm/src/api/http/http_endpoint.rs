@@ -39,6 +39,7 @@ use std::sync::mpsc::Sender;
 
 use log::info;
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
+use virtio_devices::block::MirrorError;
 use vmm_sys_util::eventfd::EventFd;
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
@@ -48,13 +49,14 @@ use crate::api::http::{EndpointHandler, HttpError, error_response};
 use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, NetConfig, VmAddDevice, VmAddFs,
     VmAddGenericVhostUser, VmAddNet, VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot,
-    VmCancelMigration, VmConfig, VmCounters, VmDelete, VmMigrationProgress, VmNmi, VmPause,
-    VmPostMigrationAnnounce, VmPowerButton, VmReboot, VmReceiveMigration, VmReceiveMigrationData,
-    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
-    VmShutdown, VmSnapshot,
+    VmCancelMigration, VmConfig, VmCounters, VmDelete, VmDiskMirrorStart, VmMigrationProgress,
+    VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton, VmReboot, VmReceiveMigration,
+    VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore,
+    VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::RestoreConfig;
 use crate::cpu::Error as CpuError;
+use crate::device_manager::DeviceManagerError;
 use crate::vm::Error as VmError;
 
 /// Helper module for attaching externally opened FDs to config objects.
@@ -383,6 +385,11 @@ macro_rules! vm_action_put_handler {
 
 macro_rules! vm_action_put_handler_body {
     ($action:ty) => {
+        vm_action_put_handler_body!($action, HttpError::ApiError);
+    };
+    // The two-argument form takes an error mapper for actions that
+    // want their own `ApiError` to HTTP status translation.
+    ($action:ty, $map_err:expr) => {
         impl PutHandler for $action {
             fn handle_request(
                 &'static self,
@@ -397,7 +404,7 @@ macro_rules! vm_action_put_handler_body {
                         api_sender,
                         serde_json::from_slice(body.raw())?,
                     )
-                    .map_err(HttpError::ApiError)
+                    .map_err($map_err)
                 } else {
                     Err(HttpError::BadRequest)
                 }
@@ -517,6 +524,24 @@ impl PutHandler for VmSendMigration {
 }
 
 impl GetHandler for VmSendMigration {}
+
+vm_action_put_handler_body!(VmDiskMirrorStart, |error| {
+    if let ApiError::VmDiskMirrorStart(VmError::DeviceManager(device_error)) = &error {
+        match device_error {
+            DeviceManagerError::UnknownDeviceId(_) => {
+                return HttpError::NotFoundWithApiError(error);
+            }
+            DeviceManagerError::DiskImageTypeMismatch { .. }
+            | DeviceManagerError::BlockMirrorAlreadyActive(_)
+            | DeviceManagerError::BlockMirrorStart(
+                MirrorError::DeviceNotActive | MirrorError::DestinationSizeMismatch { .. },
+            ) => return HttpError::BadRequestWithApiError(error),
+            _ => {}
+        }
+    }
+
+    HttpError::ApiError(error)
+});
 
 impl PutHandler for VmResize {
     fn handle_request(
