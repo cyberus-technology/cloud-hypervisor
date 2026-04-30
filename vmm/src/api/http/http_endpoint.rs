@@ -49,10 +49,10 @@ use crate::api::http::{EndpointHandler, HttpError, error_response};
 use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, NetConfig, VmAddDevice, VmAddFs,
     VmAddGenericVhostUser, VmAddNet, VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot,
-    VmCancelMigration, VmConfig, VmCounters, VmDelete, VmDiskMirrorStart, VmMigrationProgress,
-    VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton, VmReboot, VmReceiveMigration,
-    VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore,
-    VmResume, VmSendMigration, VmShutdown, VmSnapshot,
+    VmCancelMigration, VmConfig, VmCounters, VmDelete, VmDiskMirrorStart, VmDiskMirrorStatus,
+    VmMigrationProgress, VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton, VmReboot,
+    VmReceiveMigration, VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk,
+    VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::RestoreConfig;
 use crate::cpu::Error as CpuError;
@@ -541,6 +541,16 @@ vm_action_put_handler_body!(VmDiskMirrorStart, |error| {
     }
 
     HttpError::ApiError(error)
+});
+
+vm_action_put_handler_body!(VmDiskMirrorStatus, |error| match &error {
+    ApiError::VmDiskMirrorStatus(VmError::DeviceManager(DeviceManagerError::UnknownDeviceId(
+        _,
+    ))) => HttpError::NotFoundWithApiError(error),
+    ApiError::VmDiskMirrorStatus(VmError::DeviceManager(
+        DeviceManagerError::BlockMirrorNotActive(_),
+    )) => HttpError::NotFoundWithApiError(error),
+    _ => HttpError::ApiError(error),
 });
 
 impl PutHandler for VmResize {

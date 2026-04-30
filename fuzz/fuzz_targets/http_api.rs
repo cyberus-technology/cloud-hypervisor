@@ -117,6 +117,10 @@ impl RequestHandler for StubApiRequestHandler {
         Ok(())
     }
 
+    fn vm_disk_mirror_status(&mut self, _: String) -> Result<Option<Vec<u8>>, VmError> {
+        Ok(None)
+    }
+
     #[cfg(target_arch = "x86_64")]
     fn vm_coredump(&mut self, _: &str) -> Result<(), VmError> {
         Ok(())
