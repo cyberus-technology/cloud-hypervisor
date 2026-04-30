@@ -26,7 +26,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 #[cfg(not(target_arch = "riscv64"))]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
 use std::{iter, path, result, sync};
@@ -694,6 +694,26 @@ pub enum DeviceManagerError {
     /// Block mirroring is not active for the current device.
     #[error("Block mirroring is not active for the current disk with identifier: {0}")]
     BlockMirrorNotActive(String),
+
+    /// Mirroring is already active for the current device.
+    #[error(
+        "Failed to start block mirroring for the disk with identifier: {0} as mirroring is already active"
+    )]
+    BlockMirrorAlreadyActive(String),
+
+    /// Cannot perform given action, as the device is currently performing a block mirroring operation.
+    #[error(
+        "Failed to perform the requested action for the disk with identifier: {0} as it is currently performing a block mirroring operation"
+    )]
+    BlockMirrorActive(String),
+
+    /// Reports a failure to complete block mirroring.
+    #[error("Failed to complete block mirroring")]
+    BlockMirrorComplete(#[source] MirrorError),
+
+    /// Cancelling the block mirror failed.
+    #[error("Failed to cancel block mirroring")]
+    BlockMirrorCancel(#[source] MirrorError),
 }
 
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
@@ -5557,16 +5577,20 @@ impl DeviceManager {
         // Release advisory locks by dropping all references.
         // Linux automatically releases all locks of that file if the last open FD is closed.
         {
-            let maybe_block_device_index = self
+            if let Some(index) = self
                 .block_devices
                 .iter()
-                .enumerate()
-                .find(|(_, dev)| {
-                    let dev = dev.lock().unwrap();
-                    dev.id() == id
-                })
-                .map(|(i, _)| i);
-            if let Some(index) = maybe_block_device_index {
+                .position(|dev| dev.lock().unwrap().id() == id)
+            {
+                // Deny removal of active mirroring block device.
+                if self.block_devices[index]
+                    .lock()
+                    .unwrap()
+                    .mirror_status()
+                    .is_some()
+                {
+                    return Err(DeviceManagerError::BlockMirrorActive(id.to_string()));
+                }
                 let _ = self.block_devices.swap_remove(index);
             }
         }
@@ -6127,6 +6151,18 @@ impl DeviceManager {
         0
     }
 
+    /// Locks and returns the block device with the given id.
+    ///
+    /// Returns [`DeviceManagerError::UnknownDeviceId`] when no attached
+    /// block device matches.
+    fn find_block_device(&self, device_id: &str) -> DeviceManagerResult<MutexGuard<'_, Block>> {
+        self.block_devices
+            .iter()
+            .map(|dev| dev.lock().unwrap())
+            .find(|disk| disk.id() == device_id)
+            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))
+    }
+
     pub fn balloon_stats(&self) -> DeviceManagerResult<virtio_devices::BalloonStatsSnapshot> {
         let balloon = self
             .balloon
@@ -6140,15 +6176,9 @@ impl DeviceManager {
     }
 
     pub fn resize_disk(&mut self, device_id: &str, new_size: u64) -> DeviceManagerResult<()> {
-        for dev in &self.block_devices {
-            let mut disk = dev.lock().unwrap();
-            if disk.id() == device_id {
-                return disk
-                    .resize(new_size)
-                    .map_err(DeviceManagerError::DiskResize);
-            }
-        }
-        Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))
+        self.find_block_device(device_id)?
+            .resize(new_size)
+            .map_err(DeviceManagerError::DiskResize)
     }
 
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
@@ -6307,12 +6337,13 @@ impl DeviceManager {
     /// Returns an error if no disk with the given identifier is attached
     /// to the VM, or the destination cannot be opened.
     pub fn mirror_disk(&self, device_id: &str, dest_path: &Path) -> DeviceManagerResult<()> {
-        let mut disk = self
-            .block_devices
-            .iter()
-            .map(|dev| dev.lock().unwrap())
-            .find(|disk| disk.id() == device_id)
-            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))?;
+        let mut disk = self.find_block_device(device_id)?;
+
+        if disk.mirror_status().is_some() {
+            return Err(DeviceManagerError::BlockMirrorAlreadyActive(
+                device_id.to_string(),
+            ));
+        }
 
         let src = self.find_disk_config(device_id)?;
 
@@ -6330,13 +6361,51 @@ impl DeviceManager {
     /// Returns an error if no disk with the given identifier is
     /// attached to the VM, or if the disk has no active mirror.
     pub fn mirror_disk_status(&self, device_id: &str) -> DeviceManagerResult<MirrorStatus> {
-        self.block_devices
-            .iter()
-            .map(|dev| dev.lock().unwrap())
-            .find(|disk| disk.id() == device_id)
-            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))?
+        self.find_block_device(device_id)?
             .mirror_status()
             .ok_or_else(|| DeviceManagerError::BlockMirrorNotActive(device_id.to_string()))
+    }
+
+    /// Completes the active block mirror for `device_id` and switches to its
+    /// destination disk.
+    ///
+    /// Returns an error if the disk is not attached, no mirror is active, or the
+    /// mirror is not ready.
+    pub fn mirror_disk_complete(&self, device_id: &str) -> DeviceManagerResult<()> {
+        let mut disk = self.find_block_device(device_id)?;
+        let new_path = disk
+            .complete_mirror()
+            .map_err(DeviceManagerError::BlockMirrorComplete)?;
+
+        // Repoint the config entry so a rebuild reopens the destination.
+        if let Some(cfg) = self
+            .config
+            .lock()
+            .unwrap()
+            .disks
+            .as_mut()
+            .and_then(|disks| {
+                disks
+                    .iter_mut()
+                    .find(|disk_config| disk_config.pci_common.id.as_deref() == Some(device_id))
+            })
+        {
+            cfg.path = Some(new_path);
+        }
+
+        Ok(())
+    }
+
+    /// Cancels the active block mirror for the disk identified by
+    /// `device_id`, reverting all virtqueue workers to the source disk
+    /// and releasing the destination.
+    ///
+    /// Returns an error if the disk is not attached, no mirror is active,
+    /// mirror completion has started, or reverting a virtqueue worker fails.
+    pub fn mirror_disk_cancel(&self, device_id: &str) -> DeviceManagerResult<()> {
+        self.find_block_device(device_id)?
+            .cancel_mirror()
+            .map_err(DeviceManagerError::BlockMirrorCancel)
     }
 
     /// Returns a list of devices for which a boot index was configured.
@@ -6384,6 +6453,24 @@ impl DeviceManager {
         );
 
         Some(tracker)
+    }
+    /// Returns true if there is an active mirror in any of the block devices, false otherwise.
+    pub fn any_active_block_mirrors(&self) -> bool {
+        self.block_devices
+            .iter()
+            .any(|dev| dev.lock().unwrap().mirror_status().is_some())
+    }
+
+    /// Cancels every active block mirror. Failures are logged and ignored.
+    pub fn cancel_block_mirrors(&self) {
+        self.block_devices
+            .iter()
+            .map(|dev| dev.lock().unwrap())
+            .filter(|disk| disk.mirror_status().is_some())
+            .filter_map(|mut disk| disk.cancel_mirror().err().map(|error| (disk.id(), error)))
+            .for_each(|(id, error)| {
+                warn!("Failed to cancel block mirror for {id}: {error}");
+            });
     }
 }
 

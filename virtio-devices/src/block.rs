@@ -119,6 +119,8 @@ pub enum Error {
     ConfigChange(#[source] io::Error),
     #[error("Disk resize failed")]
     DiskResize(#[source] BlockError),
+    #[error("Mirror is currently active")]
+    MirrorActive,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -140,12 +142,18 @@ pub enum MirrorError {
     /// Indicates that a mirror operation was requested before device activation.
     #[error("Mirror operation rejected: the device is not active")]
     DeviceNotActive,
+    /// Indicates that a mirror operation was requested while the device is paused.
+    #[error("Mirror operation rejected: the device is paused")]
+    DevicePaused,
     /// Indicates that a mirror operation was requested without an active mirror.
     #[error("No active mirror for the device")]
     NotActive,
     /// Indicates that completion was requested before the mirror became ready.
     #[error("Mirror is not yet ready, cannot complete")]
     NotReady,
+    /// Indicates that the source or destination does not support mirroring.
+    #[error("Block mirroring is not supported")]
+    Unsupported(#[source] BlockError),
     /// Indicates that cancellation was requested after completion started.
     #[error("Mirror completion already in progress")]
     CompletionInProgress,
@@ -1386,6 +1394,10 @@ impl Block {
             return Err(Error::InvalidSize);
         }
 
+        if self.mirror_handle.is_some() {
+            return Err(Error::MirrorActive);
+        }
+
         self.disk_image
             .resize(new_size)
             .map_err(Error::DiskResize)?;
@@ -1430,6 +1442,7 @@ impl Block {
         if self.common.workers.is_none() || self.queue_cmd_senders.is_empty() {
             return Err(MirrorError::DeviceNotActive);
         }
+        self.ensure_not_paused_for_mirror()?;
         let source_size = self
             .disk_image
             .logical_size()
@@ -1476,6 +1489,8 @@ impl Block {
     /// to the destination only, and there is no revert that keeps
     /// acknowledged writes, so aborting is preferred over data loss.
     pub fn complete_mirror(&mut self) -> MirrorResult<PathBuf> {
+        self.ensure_not_paused_for_mirror()?;
+
         let handle = self.mirror_handle.as_ref().ok_or(MirrorError::NotActive)?;
 
         if !matches!(handle.state.phase(), MirrorPhase::Ready) {
@@ -1526,6 +1541,15 @@ impl Block {
         self.disk_image = destination;
         self.disk_path = destination_path.clone();
         Ok(destination_path)
+    }
+
+    /// Fails with [`MirrorError::DevicePaused`] when the device is paused, since a
+    /// parked worker cannot apply a staged mirror command.
+    fn ensure_not_paused_for_mirror(&self) -> MirrorResult<()> {
+        if self.common.paused.load(Ordering::SeqCst) {
+            return Err(MirrorError::DevicePaused);
+        }
+        Ok(())
     }
 
     /// Creates the backend for a queue worker.
@@ -1756,6 +1780,7 @@ impl Block {
     /// Blocks until the copy worker finishes its current block and joins,
     /// which can stall on a slow or hung destination.
     pub fn cancel_mirror(&mut self) -> MirrorResult<()> {
+        self.ensure_not_paused_for_mirror()?;
         let state = &self
             .mirror_handle
             .as_ref()
@@ -2081,6 +2106,11 @@ impl Snapshottable for Block {
     }
 
     fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
+        if self.mirror_handle.is_some() {
+            return Err(MigratableError::Snapshot(anyhow!(
+                "Cannot snapshot while mirror is active"
+            )));
+        }
         Snapshot::new_from_state(&self.state())
     }
 }
