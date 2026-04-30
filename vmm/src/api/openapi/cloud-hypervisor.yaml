@@ -530,6 +530,28 @@ paths:
         500:
           description: Disk mirroring could not be started.
 
+  /vm.disk-mirror-status:
+    put:
+      summary: Query the status of a disk mirror
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorStatusData"
+        required: true
+      responses:
+        200:
+          description: The current status of the disk mirror.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VmDiskMirrorStatusResponse"
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        500:
+          description: The disk mirror status could not be retrieved.
+
 components:
   schemas:
     VmmPingResponse:
@@ -1594,4 +1616,37 @@ components:
         id:
           type: string
         destination_path:
+          type: string
+
+    VmDiskMirrorStatusData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
+          type: string
+
+    VmDiskMirrorStatusResponse:
+      required:
+        - phase
+        - copied_bytes
+        - total_bytes
+      type: object
+      properties:
+        phase:
+          type: string
+          enum:
+            - running
+            - ready
+            - completing
+            - completed
+            - cancelling
+            - failed
+        copied_bytes:
+          type: integer
+          format: int64
+        total_bytes:
+          type: integer
+          format: int64
+        failure:
           type: string

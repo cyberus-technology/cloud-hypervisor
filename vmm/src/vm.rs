@@ -274,6 +274,9 @@ pub enum Error {
     #[error("Failed to start disk mirror")]
     DiskMirrorStart,
 
+    #[error("Failed to read disk mirror state")]
+    DiskMirrorStatus,
+
     #[error("Cannot activate virtio devices")]
     ActivateVirtioDevices(#[source] DeviceManagerError),
 
