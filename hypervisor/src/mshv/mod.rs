@@ -49,6 +49,8 @@ pub mod x86_64;
 // aarch64 dependencies
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+#[cfg(feature = "kvm")]
+use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 #[cfg(target_arch = "aarch64")]
 use std::sync::Mutex;
@@ -1660,6 +1662,11 @@ impl cpu::Vcpu for MshvVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
 
         Ok(())
+    }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        todo!()
     }
 }
 
