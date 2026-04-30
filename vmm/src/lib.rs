@@ -17,7 +17,6 @@ use std::fs::File;
 use std::io::{Read, Write, stdout};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::panic::AssertUnwindSafe;
-#[cfg(feature = "guest_debug")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
@@ -3493,6 +3492,20 @@ impl RequestHandler for Vmm {
         // enable querying the state of the last failed migration.
         let lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
         lock.clone()
+    }
+
+    fn vm_disk_mirror_start(
+        &mut self,
+        id: String,
+        destination_path: PathBuf,
+    ) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        match self.vm {
+            MaybeVmOwnership::Vmm(ref mut vm) => vm.mirror_disk(&id, &destination_path),
+            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::None => Err(VmError::DiskMirrorStart),
+        }
     }
 }
 
