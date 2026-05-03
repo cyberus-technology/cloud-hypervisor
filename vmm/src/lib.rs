@@ -3522,6 +3522,16 @@ impl RequestHandler for Vmm {
             MaybeVmOwnership::None => Err(VmError::DiskMirrorStatus),
         }
     }
+
+    fn vm_disk_mirror_complete(&mut self, id: String) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        match self.vm {
+            MaybeVmOwnership::Vmm(ref mut vm) => vm.mirror_disk_complete(&id),
+            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::None => Err(VmError::DiskMirrorComplete),
+        }
+    }
 }
 
 const CPU_MANAGER_SNAPSHOT_ID: &str = "cpu-manager";
