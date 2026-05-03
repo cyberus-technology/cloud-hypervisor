@@ -144,6 +144,12 @@ pub enum MirrorError {
     /// Indicates that a mirror operation was requested before device activation.
     #[error("Mirror operation rejected: the device is not active")]
     DeviceNotActive,
+    /// Indicates that a mirror operation was requested without an active mirror.
+    #[error("No active mirror for the device")]
+    NotActive,
+    /// Indicates that completion was requested before the mirror became ready.
+    #[error("Mirror is not yet ready, cannot complete")]
+    NotReady,
     /// Reports a failure to register the new disk notifier.
     #[error("Failed to register new disk notifier")]
     RegisterNotifier(#[source] EpollHelperError),
@@ -1422,6 +1428,75 @@ impl Block {
             destination_path,
         });
         Ok(())
+    }
+
+    /// Switch the device's mirroring wrapper to the destination disk.
+    ///
+    /// Each virtqueue worker swaps its [`MirroringAsyncIo`] for a plain
+    /// [`AsyncIo`] on the destination through the same slot and eventfd
+    /// mechanism used to install the mirror. After this call the source
+    /// disk is no longer used by the VM and the operator can detach or
+    /// remove it.
+    ///
+    /// Returns [`MirrorError::NotActive`] when no mirror is active for the
+    /// device, and [`MirrorError::NotReady`] when the copy worker has not yet
+    /// reported the ready phase or the mirror has since failed. Both errors
+    /// return before any queue command is sent, so the mirror handle is left in
+    /// place and the caller can poll the state and retry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a queue command cannot be sent or acknowledged after the
+    /// switch-over has started. At that point some queues may already write
+    /// to the destination only, and there is no revert that keeps
+    /// acknowledged writes, so aborting is preferred over data loss.
+    pub fn complete_mirror(&mut self) -> MirrorResult<PathBuf> {
+        let handle = self.mirror_handle.as_ref().ok_or(MirrorError::NotActive)?;
+
+        if !matches!(handle.state.phase(), MirrorPhase::Ready) {
+            return Err(MirrorError::NotReady);
+        }
+
+        let (commands, ack_rx) = self.create_mirror_queue_commands(
+            BlockQueueCommandKind::CompleteToDestination,
+            |ring_depth| {
+                handle
+                    .destination
+                    .create_async_io(ring_depth)
+                    .map_err(MirrorError::Backend)
+            },
+        )?;
+
+        // A concurrent destination failure may have moved the mirror to
+        // Failed since the phase check above. Confirm Completing took effect
+        // before sending any command, otherwise we would swap the device
+        // onto a failed mirror.
+        handle.state.transition_to_phase(MirrorPhase::Completing);
+        if !matches!(handle.state.phase(), MirrorPhase::Completing) {
+            return Err(MirrorError::NotReady);
+        }
+
+        // Once the first command is sent a queue may write to the destination
+        // only, so a partial switch-over has no safe revert. We panic rather
+        // than risk losing acknowledged writes.
+        Self::send_mirror_queue_commands(commands).expect("mirror queue commands sent");
+        self.wait_for_mirror_queue_command_acks(&ack_rx)
+            .expect("mirror queue command acks received");
+        handle.state.transition_to_phase(MirrorPhase::Completed);
+
+        let BlockMirrorHandle {
+            destination,
+            destination_path,
+            copy_worker,
+            state: _,
+        } = self.mirror_handle.take().unwrap();
+        if let Err(error) = copy_worker.join() {
+            error!("copy worker thread panicked: {error:?}");
+        }
+
+        self.disk_image = destination;
+        self.disk_path = destination_path.clone();
+        Ok(destination_path)
     }
 
     /// Installs the mirror backends and starts the copy worker.
