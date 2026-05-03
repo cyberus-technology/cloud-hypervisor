@@ -140,6 +140,15 @@ pub enum MirrorError {
     /// Indicates that a mirror operation was requested before device activation.
     #[error("Mirror operation rejected: the device is not active")]
     DeviceNotActive,
+    /// Indicates that a mirror operation was requested without an active mirror.
+    #[error("No active mirror for the device")]
+    NotActive,
+    /// Indicates that completion was requested before the mirror became ready.
+    #[error("Mirror is not yet ready, cannot complete")]
+    NotReady,
+    /// Indicates that cancellation was requested after completion started.
+    #[error("Mirror completion already in progress")]
+    CompletionInProgress,
     /// Reports a failure to register the new disk notifier.
     #[error("Failed to register new disk notifier")]
     RegisterNotifier(#[source] EpollHelperError),
@@ -165,6 +174,10 @@ pub type MirrorResult<T> = result::Result<T, MirrorError>;
 pub enum BlockQueueCommandKind {
     /// Replaces the plain source backend with a mirroring backend.
     InstallMirror,
+    /// Drains in-flight guest requests and stops new requests until the next queue command.
+    DrainAndStallQueue,
+    /// Resumes new guest requests without replacing the backend.
+    ResumeQueue,
     /// Replaces the mirroring backend with a destination backend.
     CompleteToDestination,
     /// Replaces the mirroring backend with a source backend.
@@ -188,7 +201,8 @@ pub struct BlockQueueCommand {
     ///
     /// For start this is a `MirroringAsyncIo`. For cancel this is a plain
     /// source `AsyncIo`. For completion this is a plain destination `AsyncIo`.
-    pub async_io: Box<dyn AsyncIo>,
+    /// Commands that do not swap the backend pass `None`.
+    pub async_io: Option<Box<dyn AsyncIo>>,
 
     /// Channel used by the worker to report that the command was applied or
     /// failed.
@@ -308,6 +322,8 @@ struct BlockEpollHandler {
     acked_features: u64,
     /// Receives mirror lifecycle commands for this virtqueue worker.
     mirror_cmd_receiver: Option<BlockQueueCommandReceiver>,
+    /// True while a drained queue stops submitting new guest requests.
+    submissions_stopped: bool,
 }
 
 fn has_feature(features: u64, feature_flag: u64) -> bool {
@@ -356,12 +372,13 @@ impl BlockEpollHandler {
             return Ok(());
         }
 
-        // Defer submitting new descriptors while a mirror swap is draining.
-        // The queue_evt is kicked at the end of the swap.
-        if self
-            .mirror_cmd_receiver
-            .as_ref()
-            .is_some_and(|receiver| receiver.pending_block_queue_command.is_some())
+        // Defer new descriptors while a mirror command is pending or guest
+        // requests are stopped. The queue_evt is kicked at the end of the swap.
+        if self.submissions_stopped
+            || self
+                .mirror_cmd_receiver
+                .as_ref()
+                .is_some_and(|receiver| receiver.pending_block_queue_command.is_some())
         {
             return Ok(());
         }
@@ -637,12 +654,33 @@ impl BlockEpollHandler {
         };
 
         let BlockQueueCommand {
-            kind: _,
+            kind,
             async_io,
             ack,
         } = command;
 
-        let result = self.replace_disk_image(async_io, helper);
+        let result = match kind {
+            BlockQueueCommandKind::DrainAndStallQueue => {
+                // Stop new guest requests until the next command swaps the backend.
+                self.submissions_stopped = true;
+                Ok(())
+            }
+            BlockQueueCommandKind::ResumeQueue => {
+                // A failed drain resumes the queue without swapping the backend.
+                self.submissions_stopped = false;
+                Ok(())
+            }
+            BlockQueueCommandKind::InstallMirror
+            | BlockQueueCommandKind::CompleteToDestination
+            | BlockQueueCommandKind::CancelToSource => {
+                let result = self.replace_disk_image(
+                    async_io.expect("mirror swap command without a backend"),
+                    helper,
+                );
+                self.submissions_stopped = false;
+                result
+            }
+        };
 
         let _ = ack.send(BlockQueueAck { result });
 
@@ -1415,6 +1453,81 @@ impl Block {
         Ok(())
     }
 
+    /// Switch the device's mirroring wrapper to the destination disk.
+    ///
+    /// Before the switch-over the queues are drained and stop accepting new
+    /// requests, which freezes the mirror phase until the swap completes.
+    /// Each virtqueue worker swaps its [`MirroringAsyncIo`] for a plain
+    /// [`AsyncIo`] on the destination through the same slot and eventfd
+    /// mechanism used to install the mirror. After this call the source
+    /// disk is no longer used by the VM and the operator can detach or
+    /// remove it.
+    ///
+    /// Returns [`MirrorError::NotActive`] when no mirror is active for the
+    /// device, and [`MirrorError::NotReady`] when the copy worker has not yet
+    /// reported the ready phase or the mirror has since failed. Both errors
+    /// return before any queue command is sent, so the mirror handle is left in
+    /// place and the caller can poll the state and retry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a queue command cannot be sent or acknowledged after the
+    /// switch-over has started. At that point some queues may already write
+    /// to the destination only, and there is no revert that keeps
+    /// acknowledged writes, so aborting is preferred over data loss.
+    pub fn complete_mirror(&mut self) -> MirrorResult<PathBuf> {
+        let handle = self.mirror_handle.as_ref().ok_or(MirrorError::NotActive)?;
+
+        if !matches!(handle.state.phase(), MirrorPhase::Ready) {
+            return Err(MirrorError::NotReady);
+        }
+
+        let (commands, ack_rx) = self.create_mirror_queue_commands(
+            BlockQueueCommandKind::CompleteToDestination,
+            |ring_depth| {
+                handle
+                    .destination
+                    .create_async_io(ring_depth)
+                    .map(Some)
+                    .map_err(MirrorError::Backend)
+            },
+        )?;
+
+        // Drain queues to avoid racing failures during completion.
+        self.drain_and_stall_queues()?;
+
+        if matches!(handle.state.phase(), MirrorPhase::Failed(_)) {
+            // A destination write failed while draining. Put the workers back
+            // on the source and let the operator cancel the mirror.
+            self.revert_queues_to_source()?;
+            return Err(MirrorError::NotReady);
+        }
+
+        handle.state.transition_to_phase(MirrorPhase::Completing);
+
+        // Once the first command is sent a queue may write to the destination
+        // only, so a partial switch-over has no safe revert. We panic rather
+        // than risk losing acknowledged writes.
+        Self::send_mirror_queue_commands(commands).expect("mirror queue commands sent");
+        self.wait_for_mirror_queue_command_acks(&ack_rx)
+            .expect("mirror queue command acks received");
+        handle.state.transition_to_phase(MirrorPhase::Completed);
+
+        let BlockMirrorHandle {
+            destination,
+            destination_path,
+            copy_worker,
+            state: _,
+        } = self.mirror_handle.take().unwrap();
+        if let Err(error) = copy_worker.join() {
+            error!("copy worker thread panicked: {error:?}");
+        }
+
+        self.disk_image = destination;
+        self.disk_path = destination_path.clone();
+        Ok(destination_path)
+    }
+
     /// Creates the backend for a queue worker.
     ///
     /// When the block device is reset and reactivated during an active mirror,
@@ -1457,7 +1570,7 @@ impl Block {
         let (commands, ack_rx) = self.create_mirror_queue_commands(
             BlockQueueCommandKind::InstallMirror,
             |ring_depth| {
-                Ok(Box::new(
+                Ok(Some(Box::new(
                     MirroringAsyncIo::create(
                         self.disk_image.as_ref(),
                         destination,
@@ -1465,7 +1578,7 @@ impl Block {
                         ring_depth,
                     )
                     .map_err(MirrorError::Backend)?,
-                ))
+                )))
             },
         )?;
 
@@ -1504,7 +1617,8 @@ impl Block {
     /// the receiving end of the channel.
     ///
     /// `new_async_io` is called once per queue with the ring depth of
-    /// that queue and returns the backend the worker swaps to.
+    /// that queue and returns the backend the worker swaps to, or `None`
+    /// for commands that do not swap the backend.
     ///
     /// The ack sender lives only inside the returned commands. Once
     /// every worker has consumed or dropped its command, a lost ack
@@ -1513,7 +1627,7 @@ impl Block {
     fn create_mirror_queue_commands(
         &self,
         kind: BlockQueueCommandKind,
-        mut new_async_io: impl FnMut(u32) -> MirrorResult<Box<dyn AsyncIo>>,
+        mut new_async_io: impl FnMut(u32) -> MirrorResult<Option<Box<dyn AsyncIo>>>,
     ) -> MirrorResult<(QueueCommands<'_>, Receiver<BlockQueueAck>)> {
         let (ack_tx, ack_rx) = mpsc::channel();
         let commands = self
@@ -1531,6 +1645,40 @@ impl Block {
             })
             .collect::<MirrorResult<_>>()?;
         Ok((commands, ack_rx))
+    }
+
+    /// Drains every virtqueue and stalls it until the next queue command.
+    ///
+    /// Returns once no queue can report a destination failure anymore. Every
+    /// queue is resumed when the drain fails.
+    fn drain_and_stall_queues(&self) -> MirrorResult<()> {
+        let (commands, ack_rx) = self
+            .create_mirror_queue_commands(BlockQueueCommandKind::DrainAndStallQueue, |_| {
+                Ok(None)
+            })?;
+
+        Self::send_mirror_queue_commands(commands)
+            .and_then(|()| self.wait_for_mirror_queue_command_acks(&ack_rx))
+            .inspect_err(|_| self.resume_queues())
+    }
+
+    /// Resumes every queue that [`Self::drain_and_stall_queues`] stalled.
+    ///
+    /// A staged resume also replaces a drain the worker has not applied yet.
+    /// A resume that cannot be staged is logged, and the queue stays stalled
+    /// until a retry.
+    fn resume_queues(&self) {
+        // Drop staged commands so a stale drain cannot follow its resume.
+        for sender in &self.queue_cmd_senders {
+            let _ = sender.cmd.lock().unwrap().take();
+        }
+
+        if let Err(error) = self
+            .create_mirror_queue_commands(BlockQueueCommandKind::ResumeQueue, |_| Ok(None))
+            .and_then(|(commands, _)| Self::send_mirror_queue_commands(commands))
+        {
+            error!("failed to resume queues after a failed drain: {error}");
+        }
     }
 
     /// Sends one staged mirror command to each virtqueue worker.
@@ -1581,6 +1729,7 @@ impl Block {
             |ring_depth| {
                 self.disk_image
                     .create_async_io(ring_depth)
+                    .map(Some)
                     .map_err(MirrorError::Backend)
             },
         )?;
@@ -1752,6 +1901,7 @@ impl VirtioDevice for Block {
                 active_request_count: Arc::clone(&self.active_request_count),
                 draining_active_requests: Arc::clone(&self.draining_active_requests),
                 mirror_cmd_receiver: Some(cmd_receiver),
+                submissions_stopped: false,
             };
 
             let paused = Arc::clone(&self.common.paused);
@@ -1966,10 +2116,147 @@ mod tests {
             host_cpus: None,
             acked_features: 0,
             mirror_cmd_receiver: None,
+            submissions_stopped: false,
         };
 
         handler.process_queue_submit().unwrap();
 
         assert_eq!(vq.used.idx.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use block::factory::{DiskOpenOptions, open_disk};
+    use vmm_sys_util::tempfile::TempFile;
+
+    use super::*;
+
+    const TEST_DISK_SIZE: u64 = 1 << 20;
+
+    fn block_with_disk(
+        disk_path: &Path,
+        disk: Box<dyn AsyncFullDiskFile>,
+        read_only: bool,
+    ) -> Block {
+        Block::new(
+            "test".to_string(),
+            disk,
+            disk_path.to_path_buf(),
+            read_only,
+            false,
+            1,
+            128,
+            None,
+            SeccompAction::Allow,
+            None,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            None,
+            BTreeMap::new(),
+            true,
+            LockGranularityChoice::QemuCompatible,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn raw_disk(path: &Path, read_only: bool) -> Box<dyn AsyncFullDiskFile> {
+        open_disk(
+            &DiskOpenOptions {
+                path,
+                readonly: read_only,
+                direct: false,
+                sparse: false,
+                backing_files: false,
+                disable_io_uring: true,
+                disable_aio: true,
+            },
+            block::ImageType::Raw,
+        )
+        .unwrap()
+    }
+
+    /// A temporary disk image of [`TEST_DISK_SIZE`] bytes.
+    fn temp_disk() -> TempFile {
+        let file = TempFile::new().unwrap();
+        file.as_file().set_len(TEST_DISK_SIZE).unwrap();
+        file
+    }
+
+    /// Returns a block device with an active mirror that copied everything and
+    /// is ready to switch over to `destination`.
+    fn block_with_ready_mirror(source: &Path, destination: &Path, read_only: bool) -> Block {
+        let mut block = block_with_disk(source, raw_disk(source, read_only), read_only);
+        let destination_disk = raw_disk(destination, false);
+
+        let state = MirrorState::new(TEST_DISK_SIZE);
+        state.transition_to_phase(MirrorPhase::Ready);
+        let copy_worker = CopyWorker::spawn(
+            block.disk_image.as_ref(),
+            destination_disk.as_ref(),
+            Arc::clone(&state),
+            MIRROR_BLOCK_SIZE,
+        )
+        .unwrap();
+        block.mirror_handle = Some(BlockMirrorHandle {
+            state,
+            copy_worker,
+            destination: destination_disk,
+            destination_path: destination.to_path_buf(),
+        });
+        block
+    }
+
+    /// Registers a fake queue worker on the block's active mirror.
+    ///
+    /// It acknowledges every command, and reports a destination failure when a
+    /// command arrives while the mirror is still ready. It blocks until the
+    /// block stages a command.
+    fn register_failing_mirror_worker(block: &mut Block) -> thread::JoinHandle<()> {
+        let state = Arc::clone(&block.mirror_handle.as_ref().unwrap().state);
+        let cmd: Arc<Mutex<Option<BlockQueueCommand>>> = Arc::new(Mutex::new(None));
+        let evt = EventFd::new(0).unwrap();
+        block.queue_cmd_senders.push(BlockQueueCommandSender {
+            cmd: Arc::clone(&cmd),
+            evt: evt.try_clone().unwrap(),
+            queue_size: 8,
+        });
+
+        thread::spawn(move || {
+            while evt.read().is_ok() {
+                let Some(command) = cmd.lock().unwrap().take() else {
+                    return;
+                };
+                if matches!(state.phase(), MirrorPhase::Ready) {
+                    state.transition_to_phase(MirrorPhase::Failed(Arc::new(
+                        MirrorFailure::DestinationSubmit(AsyncIoError::WriteVectored(
+                            io::Error::other("destination write failed"),
+                        )),
+                    )));
+                }
+                let _ = command.ack.send(BlockQueueAck { result: Ok(()) });
+                if matches!(command.kind, BlockQueueCommandKind::CancelToSource) {
+                    return;
+                }
+            }
+        })
+    }
+
+    /// A destination failure reported while the completion is in progress must
+    /// surface as an error instead of an illegal phase transition.
+    #[test]
+    fn completion_survives_a_destination_failure() {
+        let source = temp_disk();
+        let destination = temp_disk();
+        let mut block = block_with_ready_mirror(source.as_path(), destination.as_path(), false);
+        let worker = register_failing_mirror_worker(&mut block);
+
+        let result = block.complete_mirror();
+
+        assert!(
+            matches!(result, Err(MirrorError::NotReady)),
+            "a destination failure during completion must fail the completion: {result:?}"
+        );
+        worker.join().unwrap();
     }
 }
