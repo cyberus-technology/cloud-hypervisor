@@ -695,6 +695,10 @@ pub enum DeviceManagerError {
         "Failed to start block mirroring for the disk with identifier: {0} as mirroring is already active"
     )]
     BlockMirrorAlreadyActive(String),
+
+    /// Reports a failure to complete block mirroring.
+    #[error("Failed to complete block mirroring")]
+    BlockMirrorComplete(#[source] MirrorError),
 }
 
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
@@ -5410,6 +5414,41 @@ impl DeviceManager {
             .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))?
             .mirror_status()
             .ok_or_else(|| DeviceManagerError::BlockMirrorNotActive(device_id.to_string()))
+    }
+
+    /// Completes the active block mirror for `device_id` and switches to its
+    /// destination disk.
+    ///
+    /// Returns an error if the disk is not attached, no mirror is active, or the
+    /// mirror is not ready.
+    pub fn mirror_disk_complete(&self, device_id: &str) -> DeviceManagerResult<()> {
+        for dev in &self.block_devices {
+            let mut disk = dev.lock().unwrap();
+            if disk.id() == device_id {
+                let new_path = disk
+                    .complete_mirror()
+                    .map_err(DeviceManagerError::BlockMirrorComplete)?;
+
+                // Repoint the config entry so a rebuild reopens the destination.
+                if let Some(cfg) = self
+                    .config
+                    .lock()
+                    .unwrap()
+                    .disks
+                    .as_mut()
+                    .and_then(|disks| {
+                        disks.iter_mut().find(|disk_config| {
+                            disk_config.pci_common.id.as_deref() == Some(device_id)
+                        })
+                    })
+                {
+                    cfg.path = Some(new_path);
+                }
+
+                return Ok(());
+            }
+        }
+        Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))
     }
 
     /// Helps the environment converge quickly after a live migration by

@@ -157,6 +157,9 @@ pub enum ApiError {
     #[error("Error reading disk mirror state")]
     VmDiskMirrorStatus(#[source] VmError),
 
+    #[error("Error completing disk mirror")]
+    VmDiskMirrorComplete(#[source] VmError),
+
     /// The memory zone could not be resized.
     #[error("The memory zone could not be resized")]
     VmResizeZone(#[source] VmError),
@@ -251,6 +254,11 @@ pub struct VmDiskMirrorStartData {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VmDiskMirrorStatusData {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VmDiskMirrorCompleteData {
     pub id: String,
 }
 
@@ -820,6 +828,7 @@ pub trait RequestHandler {
     ) -> Result<(), VmError>;
 
     fn vm_disk_mirror_status(&mut self, id: String) -> Result<Option<Vec<u8>>, VmError>;
+    fn vm_disk_mirror_complete(&mut self, id: String) -> Result<(), VmError>;
 
     fn vm_add_device(&mut self, device_cfg: DeviceConfig) -> Result<Option<Vec<u8>>, VmError>;
 
@@ -1490,6 +1499,36 @@ impl ApiAction for VmDiskMirrorStatus {
                 .vm_disk_mirror_status(data.id)
                 .map_err(ApiError::VmDiskMirrorStatus)
                 .map(ApiResponsePayload::VmAction);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmDiskMirrorComplete;
+
+impl ApiAction for VmDiskMirrorComplete {
+    type RequestBody = VmDiskMirrorCompleteData;
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            let response = vmm
+                .vm_disk_mirror_complete(data.id)
+                .map_err(ApiError::VmDiskMirrorComplete)
+                .map(|_| ApiResponsePayload::Empty);
 
             response_sender
                 .send(response)

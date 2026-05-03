@@ -552,6 +552,26 @@ paths:
         500:
           description: The disk mirror status could not be retrieved.
 
+  /vm.disk-mirror-complete:
+    put:
+      summary: Complete a disk mirror and switch to the destination
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorCompleteData"
+        required: true
+      responses:
+        204:
+          description: The disk mirror was completed and the device now uses the destination.
+        400:
+          description: The mirror is not ready to complete.
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        500:
+          description: The disk mirror could not be completed.
+
 components:
   schemas:
     VmmPingResponse:
@@ -1649,4 +1669,12 @@ components:
           type: integer
           format: int64
         failure:
+          type: string
+
+    VmDiskMirrorCompleteData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
           type: string
