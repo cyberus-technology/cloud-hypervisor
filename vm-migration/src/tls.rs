@@ -6,12 +6,7 @@
 //! TLS support for migration streams over TCP.
 //!
 //! This module wraps `rustls` to provide a blocking [`TlsStream`] for migration
-//! traffic. [`TlsStream::new_client`] authenticates the server against
-//! `ca-cert.pem` and the expected hostname, and presents `client-cert.pem` and
-//! `client-key.pem` for mutual TLS (mTLS) authentication. [`TlsServerConfig`] loads
-//! `server-cert.pem` and `server-key.pem`, trusts client certificates issued by
-//! the CA in `ca-cert.pem`, and [`TlsStream::new_server`] uses that
-//! configuration to establish the server side of the connection.
+//! traffic.
 //!
 //! [`TlsStream`] implements [`Read`], [`Write`], [`ReadVolatile`],
 //! [`WriteVolatile`], and [`AsFd`] so it can be used by the transport layer like
@@ -27,7 +22,7 @@ use std::sync::Arc;
 
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, InvalidDnsNameError, PrivateKeyDer, ServerName};
-use rustls::server::{VerifierBuilderError, WebPkiClientVerifier};
+use rustls::server::VerifierBuilderError;
 use rustls::{
     ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
 };
@@ -97,14 +92,10 @@ impl TlsStream {
         hostname: &str,
     ) -> result::Result<Self, MigratableError> {
         let root_store = load_root_store(&cert_dir.join("ca-cert.pem"))?;
-        let client_certs = load_cert_chain(&cert_dir.join("client-cert.pem"))?;
-        let client_key = load_private_key(&cert_dir.join("client-key.pem"))?;
 
         let config = ClientConfig::builder()
             .with_root_certificates(root_store)
-            .with_client_auth_cert(client_certs, client_key)
-            .map_err(TlsError::RustlsError)
-            .map_err(MigratableError::Tls)?;
+            .with_no_client_auth();
         let config = Arc::new(config);
 
         let server_name = ServerName::try_from(hostname.to_string())
@@ -293,16 +284,9 @@ impl TlsServerConfig {
     pub fn new(cert_dir: &Path) -> result::Result<Self, MigratableError> {
         let server_certs = load_cert_chain(&cert_dir.join("server-cert.pem"))?;
         let server_key = load_private_key(&cert_dir.join("server-key.pem"))?;
-        // Trust anchors used to verify client certificates for mTLS.
-        let client_roots = Arc::new(load_root_store(&cert_dir.join("ca-cert.pem"))?);
-
-        let client_verifier = WebPkiClientVerifier::builder(client_roots)
-            .build()
-            .map_err(TlsError::RustlsVerifierBuilderError)
-            .map_err(MigratableError::Tls)?;
 
         let config = ServerConfig::builder()
-            .with_client_cert_verifier(client_verifier)
+            .with_no_client_auth()
             .with_single_cert(server_certs, server_key)
             .map_err(TlsError::RustlsError)
             .map_err(MigratableError::Tls)?;

@@ -200,20 +200,11 @@ The destination host needs a directory containing:
 
 - `server-cert.pem`: the certificate presented by the destination
 - `server-key.pem`: the private key for `server-cert.pem`
-- `ca-cert.pem`: the CA certificate used to verify client certificates
 
 The source host needs a directory containing:
 
 - `ca-cert.pem`: the CA certificate used to verify the destination
   certificate
-- `client-cert.pem`: the certificate presented by the source
-- `client-key.pem`: the private key for `client-cert.pem`
-
-Current TCP migration uses mutual TLS (mTLS) authentication. The source
-verifies the destination certificate against `ca-cert.pem` and presents
-`client-cert.pem` and `client-key.pem`. The destination presents
-`server-cert.pem` and `server-key.pem`, and only accepts client
-certificates that chain to `ca-cert.pem`.
 
 Example receiver command:
 
