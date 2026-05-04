@@ -314,11 +314,10 @@ impl FromStr for MigrationMode {
 pub struct VmReceiveMigrationData {
     /// URL for the reception of migration state
     pub receiver_url: String,
-    /// Directory containing the TLS server certificate (`server-cert.pem`),
-    /// the TLS server key (`server-key.pem`), and the server's TLS root CA
-    /// certificate (`ca-cert.pem`).
+    /// Directory containing the TLS server certificate (`server-cert.pem`)
+    /// and the TLS server key (`server-key.pem`).
     ///
-    /// If this is `Some`, the migration is instructed to use mTLS.
+    /// If this is `Some`, the migration uses TLS without client authentication.
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
     /// Optional VFIO device id to cdev FD pairs, used to substitute each
@@ -630,11 +629,10 @@ pub struct VmSendMigrationData {
     /// Must be between 1 and `MAX_MIGRATION_CONNECTIONS` inclusive.
     #[serde(default = "VmSendMigrationData::default_connections")]
     pub connections: NonZeroU32,
-    /// Directory containing the TLS client certificate (`client-cert.pem`),
-    /// the TLS client key (`client-key.pem`), and the client's TLS root CA
-    /// certificate (`ca-cert.pem`).
+    /// Directory containing the TLS root CA certificate (`ca-cert.pem`) used
+    /// to verify the destination's certificate.
     ///
-    /// If this is `Some`, the migration is instructed to use mTLS.
+    /// If this is `Some`, the migration uses TLS with server authentication.
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
     /// Requested memory transfer mode.
@@ -2240,15 +2238,12 @@ mod tests {
         }
 
         fn add_receive_tls_files(&self) {
-            self.add_file("ca-cert.pem");
             self.add_file("server-cert.pem");
             self.add_file("server-key.pem");
         }
 
         fn add_send_tls_files(&self) {
             self.add_file("ca-cert.pem");
-            self.add_file("client-cert.pem");
-            self.add_file("client-key.pem");
         }
     }
 

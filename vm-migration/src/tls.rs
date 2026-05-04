@@ -6,12 +6,7 @@
 //! TLS support for migration streams over TCP.
 //!
 //! This module wraps `rustls` to provide a blocking [`TlsStream`] for migration
-//! traffic. [`TlsStream::new_client`] authenticates the server against
-//! `ca-cert.pem` and the expected hostname, and presents `client-cert.pem` and
-//! `client-key.pem` for mutual TLS (mTLS) authentication. [`TlsServerConfig`] loads
-//! `server-cert.pem` and `server-key.pem`, trusts client certificates issued by
-//! the CA in `ca-cert.pem`, and [`TlsStream::new_server`] uses that
-//! configuration to establish the server side of the connection.
+//! traffic.
 //!
 //! [`TlsStream`] implements [`Read`], [`Write`], [`ReadVolatile`],
 //! [`WriteVolatile`], and [`AsFd`] so it can be used by the transport layer like
@@ -29,7 +24,7 @@ use std::sync::Arc;
 use log::{info, warn};
 use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, InvalidDnsNameError, PrivateKeyDer, ServerName};
-use rustls::server::{VerifierBuilderError, WebPkiClientVerifier};
+use rustls::server::VerifierBuilderError;
 use rustls::{
     ClientConfig, ClientConnection, CommonState, RootCertStore, ServerConfig, ServerConnection,
     StreamOwned,
@@ -41,8 +36,6 @@ use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile}
 use crate::MigratableError;
 
 const CA_CERT_FILE: &str = "ca-cert.pem";
-const CLIENT_CERT_FILE: &str = "client-cert.pem";
-const CLIENT_KEY_FILE: &str = "client-key.pem";
 const SERVER_CERT_FILE: &str = "server-cert.pem";
 const SERVER_KEY_FILE: &str = "server-key.pem";
 
@@ -54,10 +47,10 @@ pub enum TlsEndpoint {
 }
 
 impl TlsEndpoint {
-    fn required_files(self) -> [&'static str; 3] {
+    fn required_files(self) -> &'static [&'static str] {
         match self {
-            Self::Client => [CA_CERT_FILE, CLIENT_CERT_FILE, CLIENT_KEY_FILE],
-            Self::Server => [CA_CERT_FILE, SERVER_CERT_FILE, SERVER_KEY_FILE],
+            Self::Client => &[CA_CERT_FILE],
+            Self::Server => &[SERVER_CERT_FILE, SERVER_KEY_FILE],
         }
     }
 
@@ -228,23 +221,17 @@ impl TlsStream {
     /// Creates a client [`TlsStream`].
     ///
     /// The client verifies the server certificate against `ca-cert.pem` and the
-    /// provided `hostname`, and presents the certificate chain in
-    /// `client-cert.pem` together with the private key in `client-key.pem` for
-    /// mutual TLS authentication.
+    /// provided `hostname`. The client does not present a certificate.
     pub fn new_client(
         socket: TcpStream,
         cert_dir: &Path,
         hostname: &str,
     ) -> result::Result<Self, MigratableError> {
         let root_store = load_root_store(&cert_dir.join(CA_CERT_FILE))?;
-        let client_certs = load_cert_chain(&cert_dir.join(CLIENT_CERT_FILE))?;
-        let client_key = load_private_key(&cert_dir.join(CLIENT_KEY_FILE))?;
 
         let config = ClientConfig::builder()
             .with_root_certificates(root_store)
-            .with_client_auth_cert(client_certs, client_key)
-            .map_err(TlsError::RustlsError)
-            .map_err(MigratableError::Tls)?;
+            .with_no_client_auth();
         let config = Arc::new(config);
 
         let server_name = ServerName::try_from(hostname.to_string())
@@ -436,24 +423,14 @@ pub struct TlsServerConfig {
 
 impl TlsServerConfig {
     /// Creates a [`TlsServerConfig`] from the certificate chain in
-    /// `server-cert.pem`, the private key in `server-key.pem`, and the client
-    /// trust anchors in `ca-cert.pem`.
-    ///
-    /// Client certificates presented during the TLS handshake must chain to a CA in
-    /// `ca-cert.pem`.
+    /// `server-cert.pem` and the private key in `server-key.pem`.
+    /// The server does not authenticate clients.
     pub fn new(cert_dir: &Path) -> result::Result<Self, MigratableError> {
         let server_certs = load_cert_chain(&cert_dir.join(SERVER_CERT_FILE))?;
         let server_key = load_private_key(&cert_dir.join(SERVER_KEY_FILE))?;
-        // Trust anchors used to verify client certificates for mTLS.
-        let client_roots = Arc::new(load_root_store(&cert_dir.join(CA_CERT_FILE))?);
-
-        let client_verifier = WebPkiClientVerifier::builder(client_roots)
-            .build()
-            .map_err(TlsError::RustlsVerifierBuilderError)
-            .map_err(MigratableError::Tls)?;
 
         let config = ServerConfig::builder()
-            .with_client_cert_verifier(client_verifier)
+            .with_no_client_auth()
             .with_single_cert(server_certs, server_key)
             .map_err(TlsError::RustlsError)
             .map_err(MigratableError::Tls)?;
@@ -536,12 +513,9 @@ mod tests {
 
         fn add_client_files(&self) {
             self.add_file(CA_CERT_FILE);
-            self.add_file(CLIENT_CERT_FILE);
-            self.add_file(CLIENT_KEY_FILE);
         }
 
         fn add_server_files(&self) {
-            self.add_file(CA_CERT_FILE);
             self.add_file(SERVER_CERT_FILE);
             self.add_file(SERVER_KEY_FILE);
         }
@@ -554,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_tls_dir_accepts_complete_client_directory() {
+    fn validate_tls_dir_accepts_ca_only_client_directory() {
         let dir = TestDir::new("tls-client");
         dir.add_client_files();
 
@@ -562,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_tls_dir_accepts_complete_server_directory() {
+    fn validate_tls_dir_accepts_server_directory_without_ca() {
         let dir = TestDir::new("tls-server");
         dir.add_server_files();
 
@@ -571,24 +545,29 @@ mod tests {
 
     #[test]
     fn validate_tls_dir_rejects_missing_role_specific_file() {
-        let dir = TestDir::new("tls-missing-client-key");
-        dir.add_file(CA_CERT_FILE);
-        dir.add_file(CLIENT_CERT_FILE);
-
-        let err = validate_tls_dir(&dir.path, TlsEndpoint::Client).unwrap_err();
-        let err = err.to_string();
-        assert!(err.contains(CLIENT_KEY_FILE), "unexpected error: {err}");
+        for endpoint in [TlsEndpoint::Client, TlsEndpoint::Server] {
+            for missing in endpoint.required_files() {
+                let dir = TestDir::new("tls-missing-file");
+                for file in endpoint.required_files() {
+                    if file != missing {
+                        dir.add_file(file);
+                    }
+                }
+                let err = validate_tls_dir(&dir.path, endpoint).unwrap_err();
+                assert!(
+                    matches!(err, TlsConfigError::MissingFile { path, .. } if path == dir.path.join(missing))
+                );
+            }
+        }
     }
 
     #[test]
     fn validate_tls_dir_rejects_non_file_entry() {
         let dir = TestDir::new("tls-non-file");
-        dir.add_file(CA_CERT_FILE);
-        dir.add_file(CLIENT_KEY_FILE);
-        fs::create_dir(dir.path.join(CLIENT_CERT_FILE)).unwrap();
+        fs::create_dir(dir.path.join(CA_CERT_FILE)).unwrap();
 
         let err = validate_tls_dir(&dir.path, TlsEndpoint::Client).unwrap_err();
         let err = err.to_string();
-        assert!(err.contains(CLIENT_CERT_FILE), "unexpected error: {err}");
+        assert!(err.contains(CA_CERT_FILE), "unexpected error: {err}");
     }
 }

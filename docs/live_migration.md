@@ -60,9 +60,9 @@ the source VM is terminated gracefully.
 ## TCP/TLS Migration
 
 TCP/TLS migration is intended for migration from one machine (`src`) to
-another (`dst`) across the network. The connection uses mutual TLS
-(mTLS): both sides authenticate each other with certificates, and all
-migration data is encrypted. To keep it simple, we will use a minimal VM
+another (`dst`) across the network. TLS encrypts migration data, and the
+source verifies the destination's certificate. The destination does not
+authenticate the source. To keep it simple, we will use a minimal VM
 setup without storage. Same host TCP/TLS migration is also supported.
 
 > [!WARNING]
@@ -159,7 +159,6 @@ both `receive-migration` and `send-migration`.
 
 The destination host needs a directory containing:
 
-- `ca-cert.pem`: the CA certificate used to verify source certificates
 - `server-cert.pem`: the certificate presented by the destination
 - `server-key.pem`: the private key for `server-cert.pem`
 
@@ -167,32 +166,6 @@ The source host needs a directory containing:
 
 - `ca-cert.pem`: the CA certificate used to verify the destination
   certificate
-- `client-cert.pem`: the certificate presented by the source
-- `client-key.pem`: the private key for `client-cert.pem`
-
-Protect the private key files with file mode `0600` to reduce the risk
-of accidental disclosure:
-
-```console
-$ chmod 600 server-key.pem client-key.pem
-```
-
-Current TCP migration uses mutual TLS (mTLS) authentication. The source
-verifies the destination certificate against `ca-cert.pem` and presents
-`client-cert.pem` and `client-key.pem`. The destination presents
-`server-cert.pem` and `server-key.pem`, and only accepts client
-certificates that chain to `ca-cert.pem`. The destination certificate
-must be valid for the host name or IP address in `destination_url`. The
-destination accepts every client certificate issued by this CA, so use a
-CA dedicated to migration.
-
-TLS encryption is only supported with `tcp:<host>:<port>` migration
-URLs, not with UNIX domain socket migration.
-
-The commands below describe how to create the encryption material necessary
-to perform a same-host TCP migration with TLS.
-
-##### Setup the Certificate Authority
 
 First, set up the CA with a private key and a self-signed certificate.
 
@@ -218,37 +191,25 @@ $ certtool --generate-self-signed \
            --outfile ca-cert.pem
 ```
 
-##### Issuing host certificates
+##### Issuing the destination certificate
 
-Generate a private key and a certificate for each side. Cloud Hypervisor enforces mTLS, thus you also need a key for the migration sender.
+Generate a private key and certificate for the migration receiver. The sender
+only needs the CA certificate and does not need its own certificate or key.
 
-The certificates also require template data. You can use separate templates for sender and receiver, but this example uses a single template, `hosts.info`, for a same-host migration. For migration between hosts, set `cn`, `dns_name`, and `ip_address` to the destination host. The source can use the same template, as the destination does not check the name of the client certificate:
+The certificate also requires template data. This example uses `hosts.info`
+for a same-host migration. For migration between hosts, set `cn`, `dns_name`,
+and `ip_address` to the destination host:
 
 ```text
 organization = Name of your organization
 cn = localhost
 tls_www_server
-tls_www_client
 signing_key
 dns_name = localhost
 ip_address = 127.0.0.1
 ```
 
-Then you can create the necessary files for the client (migration sender):
-
-```console
-$ certtool --generate-privkey \
-           --outfile client-key.pem
-
-$ certtool --generate-certificate \
-           --load-ca-certificate ca-cert.pem \
-           --load-ca-privkey ca-key.pem \
-           --load-privkey client-key.pem \
-           --template hosts.info \
-           --outfile client-cert.pem
-```
-
-And the necessary files for the server (migration receiver):
+Create the files for the server (migration receiver):
 
 ```console
 $ certtool --generate-privkey \
@@ -262,7 +223,11 @@ $ certtool --generate-certificate \
            --outfile server-cert.pem
 ```
 
-For a same-host test, place these files, except `ca-key.pem`, in a single directory and use that directory as `tls_dir` for both commands. The CA key is only needed to issue certificates and does not belong in a `tls_dir`.
+For a same-host test, place `ca-cert.pem`, `server-cert.pem`, and
+`server-key.pem` in one directory and use it as `tls_dir` for both commands.
+For separate hosts, the sender only needs `ca-cert.pem`, while the receiver
+only needs `server-cert.pem` and `server-key.pem`. The CA key is only needed
+to issue certificates and does not belong in a `tls_dir`.
 
 ## Migration Parameters
 
