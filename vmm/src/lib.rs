@@ -1232,7 +1232,7 @@ impl Vmm {
 
             ctx.update_metrics_before_transfer(iteration_begin, &iteration_table);
             if is_converged(ctx)? {
-                debug!("Precopy converged: {ctx}");
+                info!("Precopy converged: {ctx}");
                 break Ok(iteration_table);
             }
 
@@ -1243,7 +1243,7 @@ impl Vmm {
             ctx.update_metrics_after_transfer(transfer_begin, transfer_duration);
 
             // Log progress of the current iteration
-            debug!("Precopy: {ctx}");
+            info!("Precopy: {ctx}");
 
             // Enables management software (e.g., libvirt) to easily track forward progress.
             event!(
