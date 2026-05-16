@@ -512,7 +512,8 @@ impl VmOps for VmOpsHandler {
     fn pio_read(&self, port: u64, data: &mut [u8]) -> result::Result<(), HypervisorVmError> {
         if let Err(vm_device::BusError::MissingAddressRange) = self.io_bus.read(port, data) {
             // TODO: Make this `info!` again (see https://github.com/cobaltcore-dev/cobaltcore/issues/603)
-            debug!("Guest PIO read to unregistered address 0x{port:x}");
+            debug!("Guest PIO read from unregistered address 0x{port:x}");
+            data.fill(0xff); // 0xff is sentinel value for invalid reads
         }
         Ok(())
     }
