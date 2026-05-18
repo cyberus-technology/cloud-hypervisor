@@ -87,6 +87,7 @@ use pci::{
 };
 use rate_limiter::group::RateLimiterGroup;
 use seccompiler::SeccompAction;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracer::trace_scoped;
@@ -1155,6 +1156,29 @@ fn create_mmio_allocators(
 }
 
 impl DeviceManager {
+    fn has_restored_device(&self, id: &str) -> bool {
+        self.snapshot.is_some() && self.device_tree.lock().unwrap().contains_key(id)
+    }
+
+    fn restored_device_state<T: DeserializeOwned>(
+        &self,
+        id: &str,
+    ) -> DeviceManagerResult<Option<T>> {
+        if !self.has_restored_device(id) {
+            return Ok(None);
+        }
+
+        state_from_id(self.snapshot.as_ref(), id).map_err(DeviceManagerError::RestoreGetState)
+    }
+
+    fn restored_device_snapshot(&self, id: &str) -> Option<&Snapshot> {
+        if !self.has_restored_device(id) {
+            return None;
+        }
+
+        snapshot_from_id(self.snapshot.as_ref(), id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         io_bus: Arc<Bus>,
@@ -1627,8 +1651,7 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::EventFd)?,
                 self.get_msi_iova_space(),
                 iommu_address_width_bits,
-                state_from_id(self.snapshot.as_ref(), iommu_id.as_str())
-                    .map_err(DeviceManagerError::RestoreGetState)?,
+                self.restored_device_state(iommu_id.as_str())?,
             )
             .map_err(DeviceManagerError::CreateVirtioIommu)?;
             let device = Arc::new(Mutex::new(device));
@@ -1732,7 +1755,7 @@ impl DeviceManager {
 
         // Restore the vGic if this is in the process of restoration
         let id = String::from(gic::GIC_SNAPSHOT_ID);
-        if let Some(vgic_snapshot) = snapshot_from_id(self.snapshot.as_ref(), &id) {
+        if let Some(vgic_snapshot) = self.restored_device_snapshot(&id) {
             // PMU support is optional. Nothing should be impacted if the PMU initialization failed.
             if self
                 .cpu_manager
@@ -1785,7 +1808,7 @@ impl DeviceManager {
 
         // Restore the vAia if this is in the process of restoration
         let id = String::from(aia::_AIA_SNAPSHOT_ID);
-        if let Some(_vaia_snapshot) = snapshot_from_id(self.snapshot.as_ref(), &id) {
+        if let Some(_vaia_snapshot) = self.restored_device_snapshot(&id) {
             // TODO: vAia snapshotting and restoration is scheduled to next stage of riscv64 support.
             // TODO: PMU support is scheduled to next stage of riscv64 support.
             // PMU support is optional. Nothing should be impacted if the PMU initialization failed.
@@ -1811,8 +1834,7 @@ impl DeviceManager {
     ) -> DeviceManagerResult<Arc<Mutex<dyn InterruptController>>> {
         let id = String::from(IOAPIC_DEVICE_NAME);
 
-        let state = state_from_id(self.snapshot.as_ref(), id.as_str())
-            .map_err(DeviceManagerError::RestoreGetState)?;
+        let state = self.restored_device_state(id.as_str())?;
         // Create IOAPIC
         let interrupt_controller = Arc::new(Mutex::new(
             ioapic::Ioapic::new(
@@ -2099,8 +2121,7 @@ impl DeviceManager {
         let gpio_device = Arc::new(Mutex::new(devices::legacy::Gpio::new(
             id.clone(),
             interrupt_group,
-            state_from_id(self.snapshot.as_ref(), id.as_str())
-                .map_err(DeviceManagerError::RestoreGetState)?,
+            self.restored_device_state(id.as_str())?,
         )));
 
         self.bus_devices
@@ -2199,8 +2220,7 @@ impl DeviceManager {
             id.clone(),
             interrupt_group,
             serial_writer,
-            state_from_id(self.snapshot.as_ref(), id.as_str())
-                .map_err(DeviceManagerError::RestoreGetState)?,
+            self.restored_device_state(id.as_str())?,
         )));
 
         self.bus_devices
@@ -2256,8 +2276,7 @@ impl DeviceManager {
             interrupt_group,
             serial_writer,
             self.timestamp,
-            state_from_id(self.snapshot.as_ref(), id.as_str())
-                .map_err(DeviceManagerError::RestoreGetState)?,
+            self.restored_device_state(id.as_str())?,
         )));
 
         self.bus_devices
@@ -2319,8 +2338,7 @@ impl DeviceManager {
             id.clone(),
             interrupt_group,
             serial_writer,
-            state_from_id(self.snapshot.as_ref(), id.as_str())
-                .map_err(DeviceManagerError::RestoreGetState)?,
+            self.restored_device_state(id.as_str())?,
         )));
 
         self.bus_devices
@@ -2411,8 +2429,7 @@ impl DeviceManager {
             self.exit_evt
                 .try_clone()
                 .map_err(DeviceManagerError::EventFd)?,
-            state_from_id(self.snapshot.as_ref(), id.as_str())
-                .map_err(DeviceManagerError::RestoreGetState)?,
+            self.restored_device_state(id.as_str())?,
         )
         .map_err(DeviceManagerError::CreateVirtioConsole)?;
         let virtio_console_device = Arc::new(Mutex::new(virtio_console_device));
@@ -2678,8 +2695,7 @@ impl DeviceManager {
                         .try_clone()
                         .map_err(DeviceManagerError::EventFd)?,
                     self.force_iommu,
-                    state_from_id(self.snapshot.as_ref(), id.as_str())
-                        .map_err(DeviceManagerError::RestoreGetState)?,
+                    self.restored_device_state(id.as_str())?,
                 ) {
                     Ok(vub_device) => vub_device,
                     Err(e) => {
@@ -2886,8 +2902,7 @@ impl DeviceManager {
                 self.exit_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
-                state_from_id(self.snapshot.as_ref(), id.as_str())
-                    .map_err(DeviceManagerError::RestoreGetState)?,
+                self.restored_device_state(id.as_str())?,
                 queue_affinity,
                 disk_cfg.sparse,
                 disable_sector0_writes,
@@ -2986,8 +3001,7 @@ impl DeviceManager {
                         .try_clone()
                         .map_err(DeviceManagerError::EventFd)?,
                     self.force_iommu,
-                    state_from_id(self.snapshot.as_ref(), id.as_str())
-                        .map_err(DeviceManagerError::RestoreGetState)?,
+                    self.restored_device_state(id.as_str())?,
                     net_cfg.offload_tso,
                     net_cfg.offload_ufo,
                     net_cfg.offload_csum,
@@ -3004,8 +3018,7 @@ impl DeviceManager {
                 vhost_user_net as Arc<Mutex<dyn Migratable>>,
             )
         } else {
-            let state = state_from_id(self.snapshot.as_ref(), id.as_str())
-                .map_err(DeviceManagerError::RestoreGetState)?;
+            let state = self.restored_device_state(id.as_str())?;
             let virtio_net = if let Some(ref tap_if_name) = net_cfg.tap {
                 debug!("Creating virtio-net device from Tap device: {tap_if_name}");
                 Arc::new(Mutex::new(
@@ -3147,8 +3160,7 @@ impl DeviceManager {
                     self.exit_evt
                         .try_clone()
                         .map_err(DeviceManagerError::EventFd)?,
-                    state_from_id(self.snapshot.as_ref(), id.as_str())
-                        .map_err(DeviceManagerError::RestoreGetState)?,
+                    self.restored_device_state(id.as_str())?,
                 )
                 .map_err(DeviceManagerError::CreateVirtioRng)?,
             ));
@@ -3209,8 +3221,7 @@ impl DeviceManager {
                         .try_clone()
                         .map_err(DeviceManagerError::EventFd)?,
                     self.force_iommu,
-                    state_from_id(self.snapshot.as_ref(), id.as_str())
-                        .map_err(DeviceManagerError::RestoreGetState)?,
+                    self.restored_device_state(id.as_str())?,
                 )
                 .map_err(DeviceManagerError::CreateVirtioFs)?,
             ));
@@ -3398,8 +3409,7 @@ impl DeviceManager {
                 self.exit_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
-                state_from_id(self.snapshot.as_ref(), id.as_str())
-                    .map_err(DeviceManagerError::RestoreGetState)?,
+                self.restored_device_state(id.as_str())?,
             )
             .map_err(DeviceManagerError::CreateVirtioPmem)?,
         ));
@@ -3475,8 +3485,7 @@ impl DeviceManager {
                 self.exit_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
-                state_from_id(self.snapshot.as_ref(), id.as_str())
-                    .map_err(DeviceManagerError::RestoreGetState)?,
+                self.restored_device_state(id.as_str())?,
             )
             .map_err(DeviceManagerError::CreateVirtioVsock)?,
         ));
@@ -3537,8 +3546,7 @@ impl DeviceManager {
                             .try_clone()
                             .map_err(DeviceManagerError::EventFd)?,
                         virtio_mem_zone.blocks_state().clone(),
-                        state_from_id(self.snapshot.as_ref(), memory_zone_id.as_str())
-                            .map_err(DeviceManagerError::RestoreGetState)?,
+                        self.restored_device_state(memory_zone_id.as_str())?,
                     )
                     .map_err(DeviceManagerError::CreateVirtioMem)?,
                 ));
@@ -3630,8 +3638,7 @@ impl DeviceManager {
                     self.exit_evt
                         .try_clone()
                         .map_err(DeviceManagerError::EventFd)?,
-                    state_from_id(self.snapshot.as_ref(), id.as_str())
-                        .map_err(DeviceManagerError::RestoreGetState)?,
+                    self.restored_device_state(id.as_str())?,
                 )
                 .map_err(DeviceManagerError::CreateVirtioBalloon)?,
             ));
@@ -3679,8 +3686,7 @@ impl DeviceManager {
                 self.exit_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
-                state_from_id(self.snapshot.as_ref(), id.as_str())
-                    .map_err(DeviceManagerError::RestoreGetState)?,
+                self.restored_device_state(id.as_str())?,
             )
             .map_err(DeviceManagerError::CreateVirtioWatchdog)?,
         ));
@@ -3727,8 +3733,7 @@ impl DeviceManager {
                 device_path,
                 self.memory_manager.lock().unwrap().guest_memory(),
                 vdpa_cfg.num_queues as u16,
-                state_from_id(self.snapshot.as_ref(), id.as_str())
-                    .map_err(DeviceManagerError::RestoreGetState)?,
+                self.restored_device_state(id.as_str())?,
             )
             .map_err(DeviceManagerError::CreateVdpa)?,
         ));
@@ -3952,7 +3957,7 @@ impl DeviceManager {
             device_cfg.iommu,
             pci_device_bdf,
             memory_manager.lock().unwrap().memory_slot_allocator(),
-            vm_migration::snapshot_from_id(self.snapshot.as_ref(), vfio_name.as_str()),
+            self.restored_device_snapshot(vfio_name.as_str()),
             device_cfg.x_nv_gpudirect_clique,
             device_cfg.path.clone(),
         )
@@ -4120,7 +4125,7 @@ impl DeviceManager {
             legacy_interrupt_group,
             pci_device_bdf,
             memory_manager.lock().unwrap().memory_slot_allocator(),
-            vm_migration::snapshot_from_id(self.snapshot.as_ref(), vfio_user_name.as_str()),
+            self.restored_device_snapshot(vfio_user_name.as_str()),
         )
         .map_err(DeviceManagerError::VfioUserCreate)?;
 
@@ -4309,7 +4314,7 @@ impl DeviceManager {
                 pci_segment_id > 0 || device_type != VirtioDeviceType::Block as u32,
                 dma_handler,
                 self.pending_activations.clone(),
-                vm_migration::snapshot_from_id(self.snapshot.as_ref(), id.as_str()),
+                self.restored_device_snapshot(id.as_str()),
             )
             .map_err(DeviceManagerError::VirtioDevice)?,
         ));
@@ -4352,7 +4357,7 @@ impl DeviceManager {
         let (pci_segment_id, pci_device_bdf, resources) =
             self.pci_resources(&id, pci_segment_id, None)?;
 
-        let snapshot = snapshot_from_id(self.snapshot.as_ref(), id.as_str());
+        let snapshot = self.restored_device_snapshot(id.as_str());
 
         let pvpanic_device = devices::PvPanicDevice::new(id.clone(), snapshot)
             .map_err(DeviceManagerError::PvPanicCreate)?;
@@ -4389,7 +4394,7 @@ impl DeviceManager {
 
         let (pci_segment_id, pci_device_bdf, resources) =
             self.pci_resources(&id, pci_segment_id, None)?;
-        let snapshot = snapshot_from_id(self.snapshot.as_ref(), id.as_str());
+        let snapshot = self.restored_device_snapshot(id.as_str());
 
         let ivshmem_ops = Arc::new(Mutex::new(IvshmemHandler {
             memory_manager: self.memory_manager.clone(),
