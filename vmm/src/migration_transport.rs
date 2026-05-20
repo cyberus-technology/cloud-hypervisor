@@ -7,12 +7,14 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::num::NonZeroU32;
 use std::os::fd::{AsFd, BorrowedFd};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::result::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
+use std::sync::mpsc::{
+    Receiver, Sender, SyncSender, TryRecvError, TrySendError, channel, sync_channel,
+};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -25,9 +27,12 @@ use vm_memory::{
     Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, ReadVolatile, VolatileMemoryError,
     VolatileSlice, WriteVolatile,
 };
+use vm_migration::keep_alive_stream::KeepAliveStream;
 use vm_migration::protocol::{Command, MemoryRangeTable, Request, Response};
+use vm_migration::tls::{TlsServerConfig, TlsStream};
 use vm_migration::{MigratableError, Snapshot};
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::timerfd::TimerFd;
 
 use crate::sync_utils::Gate;
 use crate::{GuestMemoryMmap, VmMigrationConfig};
@@ -36,27 +41,118 @@ use crate::{GuestMemoryMmap, VmMigrationConfig};
 /// receiver side.
 pub(crate) const MAX_MIGRATION_CONNECTIONS: u32 = 128;
 
+/// The time a writer may block on a socket until it throws an error.
+///
+/// Also the interval at which the [`KeepAliveStream`] sends keep alive messages.
+///
+/// # Relation with [`MIGRATION_READ_TIMEOUT_DURATION`]
+///
+/// This timeout has to be smaller than [`MIGRATION_READ_TIMEOUT_DURATION`],
+/// otherwise spurious timeouts may happen.
+const MIGRATION_WRITE_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+
+/// The time a reader may block on a socket until it throws an error.
+///
+/// # Relation with [`MIGRATION_WRITE_TIMEOUT_DURATION`]
+///
+/// This timeout has to be larger than [`MIGRATION_WRITE_TIMEOUT_DURATION`],
+/// otherwise spurious timeouts may happen.
+const MIGRATION_READ_TIMEOUT_DURATION: Duration = {
+    let migration_read_timeout_duration = Duration::from_secs(10);
+
+    // This timeout has to be larger than [`MIGRATION_WRITE_TIMEOUT_DURATION`],
+    // otherwise spurious timeouts may happen.
+    assert!(
+        MIGRATION_WRITE_TIMEOUT_DURATION.as_millis() < migration_read_timeout_duration.as_millis(),
+        "MIGRATION_WRITE_TIMEOUT_DURATION must be smaller than MIGRATION_READ_TIMEOUT_DURATION",
+    );
+    migration_read_timeout_duration
+};
+
+/// The timeout of the migration-receiver.
+///
+/// We set this to a relatively high number to ease local development with
+/// `ch-remote`. For production, this has no negative impacts as the management
+/// software has full control over the Cloud Hypervisor process and will kill
+/// the process on terminated migration. The timeout is used as a fallback
+/// if the management software doesn't kill the process correctly.
+const MIGRATION_ACCEPT_TIMEOUT_DURATION: Duration = Duration::from_secs(60);
+
+fn set_migration_socket_timeouts(socket: &TcpStream) -> anyhow::Result<()> {
+    socket
+        .set_read_timeout(Some(MIGRATION_READ_TIMEOUT_DURATION))
+        .context("Error setting read timeout on TCP socket")?;
+    socket
+        .set_write_timeout(Some(MIGRATION_WRITE_TIMEOUT_DURATION))
+        .context("Error setting write timeout on TCP socket")?;
+    Ok(())
+}
+
 /// Transport-agnostic listener used to receive connections.
 #[derive(Debug)]
 pub(crate) enum ReceiveListener {
     Tcp(TcpListener),
     Unix(UnixListener),
+    Tls(TcpListener, TlsServerConfig),
 }
 
 impl ReceiveListener {
     /// Block until a connection is accepted.
-    pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
+    pub(crate) fn accept(
+        &mut self,
+        main_connection: bool,
+    ) -> Result<SocketStream, MigratableError> {
         match self {
-            ReceiveListener::Tcp(listener) => listener
-                .accept()
-                .map(|(socket, _)| SocketStream::Tcp(socket))
-                .context("Failed to accept TCP migration connection")
-                .map_err(MigratableError::MigrateReceive),
+            ReceiveListener::Tcp(listener) => {
+                info!(
+                    "Waiting for incoming migration via TCP (timeout {}s) ...",
+                    MIGRATION_ACCEPT_TIMEOUT_DURATION.as_secs()
+                );
+                let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
+                    .context("Failed to accept TCP migration connection")
+                    .map_err(MigratableError::MigrateReceive)?;
+                set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateReceive)?;
+
+                let socket = SocketStream::Tcp(socket);
+                if main_connection {
+                    KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION, false)
+                        .map(SocketStream::KeepAlive)
+                        .context("Error creating keep-alive migration stream")
+                        .map_err(MigratableError::MigrateReceive)
+                } else {
+                    Ok(socket)
+                }
+            }
             ReceiveListener::Unix(listener) => listener
                 .accept()
                 .map(|(socket, _)| SocketStream::Unix(socket))
                 .context("Failed to accept Unix migration connection")
                 .map_err(MigratableError::MigrateReceive),
+            ReceiveListener::Tls(listener, config) => {
+                info!(
+                    "Waiting for incoming migration via TCP/TLS (timeout {}s) ...",
+                    MIGRATION_ACCEPT_TIMEOUT_DURATION.as_secs()
+                );
+                let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
+                    .context("Failed to accept TCP connection")
+                    .map_err(MigratableError::MigrateReceive)?;
+                set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateReceive)?;
+
+                let socket = TlsStream::new_server(socket, config)
+                    .map(Box::new)
+                    .map(SocketStream::Tls)
+                    .context("Failed to accept TLS migration connection")
+                    .map_err(MigratableError::MigrateReceive)?;
+
+                if main_connection {
+                    KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION, false)
+                        .map(SocketStream::KeepAlive)
+                        .context("Error creating keep-alive migration stream")
+                        .map_err(MigratableError::MigrateReceive)
+                } else {
+                    Ok(socket)
+                }
+            }
         }
     }
 
@@ -70,7 +166,7 @@ impl ReceiveListener {
             .map_err(MigratableError::MigrateReceive)?
         {
             // The listener is readable; accept the connection.
-            Ok(Some(self.accept()?))
+            Ok(Some(self.accept(false)?))
         } else {
             // The abort event was signaled before any connection arrived.
             Ok(None)
@@ -90,8 +186,33 @@ impl ReceiveListener {
                 .map(ReceiveListener::Unix)
                 .context("Failed to clone Unix listener")
                 .map_err(MigratableError::MigrateReceive),
+            ReceiveListener::Tls(listener, config) => listener
+                .try_clone()
+                .map(|listener| ReceiveListener::Tls(listener, config.clone()))
+                .context("Failed to clone TLS listener")
+                .map_err(MigratableError::MigrateReceive),
         }
     }
+}
+
+/// Same as [`TcpListener::accept`], but returns an error if `timeout` expires.
+fn accept_with_timeout(
+    listener: &TcpListener,
+    timeout: Duration,
+) -> Result<(TcpStream, std::net::SocketAddr), io::Error> {
+    let mut timer_fd = TimerFd::new()?;
+    timer_fd
+        .reset(timeout, None)
+        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
+
+    wait_for_readable(listener, &timer_fd)?
+        .then(|| listener.accept())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timed out waiting for sender to connect.",
+            )
+        })?
 }
 
 impl AsFd for ReceiveListener {
@@ -99,6 +220,7 @@ impl AsFd for ReceiveListener {
         match self {
             ReceiveListener::Tcp(listener) => listener.as_fd(),
             ReceiveListener::Unix(listener) => listener.as_fd(),
+            ReceiveListener::Tls(listener, _) => listener.as_fd(),
         }
     }
 }
@@ -107,6 +229,8 @@ impl AsFd for ReceiveListener {
 pub(crate) enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
+    Tls(Box<TlsStream>),
+    KeepAlive(KeepAliveStream),
 }
 
 impl Read for SocketStream {
@@ -114,6 +238,8 @@ impl Read for SocketStream {
         match self {
             SocketStream::Unix(stream) => stream.read(buf),
             SocketStream::Tcp(stream) => stream.read(buf),
+            SocketStream::Tls(stream) => stream.read(buf),
+            SocketStream::KeepAlive(stream) => stream.read(buf),
         }
     }
 }
@@ -123,6 +249,8 @@ impl Write for SocketStream {
         match self {
             SocketStream::Unix(stream) => stream.write(buf),
             SocketStream::Tcp(stream) => stream.write(buf),
+            SocketStream::Tls(stream) => stream.write(buf),
+            SocketStream::KeepAlive(stream) => stream.write(buf),
         }
     }
 
@@ -130,15 +258,8 @@ impl Write for SocketStream {
         match self {
             SocketStream::Unix(stream) => stream.flush(),
             SocketStream::Tcp(stream) => stream.flush(),
-        }
-    }
-}
-
-impl AsRawFd for SocketStream {
-    fn as_raw_fd(&self) -> RawFd {
-        match self {
-            SocketStream::Unix(s) => s.as_raw_fd(),
-            SocketStream::Tcp(s) => s.as_raw_fd(),
+            SocketStream::Tls(stream) => stream.flush(),
+            SocketStream::KeepAlive(stream) => stream.flush(),
         }
     }
 }
@@ -148,6 +269,8 @@ impl AsFd for SocketStream {
         match self {
             SocketStream::Unix(s) => s.as_fd(),
             SocketStream::Tcp(s) => s.as_fd(),
+            SocketStream::Tls(s) => s.as_fd(),
+            SocketStream::KeepAlive(s) => s.as_fd(),
         }
     }
 }
@@ -160,16 +283,8 @@ impl ReadVolatile for SocketStream {
         match self {
             SocketStream::Unix(s) => s.read_volatile(buf),
             SocketStream::Tcp(s) => s.read_volatile(buf),
-        }
-    }
-
-    fn read_exact_volatile<B: BitmapSlice>(
-        &mut self,
-        buf: &mut VolatileSlice<B>,
-    ) -> Result<(), VolatileMemoryError> {
-        match self {
-            SocketStream::Unix(s) => s.read_exact_volatile(buf),
-            SocketStream::Tcp(s) => s.read_exact_volatile(buf),
+            SocketStream::Tls(s) => s.read_volatile(buf),
+            SocketStream::KeepAlive(s) => s.read_volatile(buf),
         }
     }
 }
@@ -182,16 +297,8 @@ impl WriteVolatile for SocketStream {
         match self {
             SocketStream::Unix(s) => s.write_volatile(buf),
             SocketStream::Tcp(s) => s.write_volatile(buf),
-        }
-    }
-
-    fn write_all_volatile<B: BitmapSlice>(
-        &mut self,
-        buf: &VolatileSlice<B>,
-    ) -> Result<(), VolatileMemoryError> {
-        match self {
-            SocketStream::Unix(s) => s.write_all_volatile(buf),
-            SocketStream::Tcp(s) => s.write_all_volatile(buf),
+            SocketStream::Tls(s) => s.write_volatile(buf),
+            SocketStream::KeepAlive(s) => s.write_volatile(buf),
         }
     }
 }
@@ -478,6 +585,9 @@ pub(crate) struct SendAdditionalConnections {
     /// this using this flag. Only the main thread checks this variable, the worker
     /// threads will be stopped during cleanup.
     worker_error: Arc<AtomicBool>,
+    /// Externally triggered cancellation. Workers drain queued memory messages
+    /// after this is set and wait for the disconnect message.
+    external_cancel: Arc<AtomicBool>,
     /// After the main thread sent all memory chunks to the sender threads, it waits
     /// until one of the workers notifies it. Either because an error occurred, or
     /// because they arrived at the gate.
@@ -512,6 +622,7 @@ impl SendAdditionalConnections {
     pub(crate) fn new(
         destination: &str,
         connections: NonZeroU32,
+        tls_dir: Option<&Path>,
         guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<Self, MigratableError> {
         let mut threads = Vec::new();
@@ -519,6 +630,7 @@ impl SendAdditionalConnections {
         let buffer_size = Self::BUFFERED_REQUESTS_PER_THREAD * configured_connections as usize;
         let (message_tx, message_rx) = sync_channel::<SendMemoryThreadMessage>(buffer_size);
         let worker_error = Arc::new(AtomicBool::new(false));
+        let external_cancel = Arc::new(AtomicBool::new(false));
         let (notify_tx, notify_rx) = channel::<SendMemoryThreadNotify>();
 
         // If one connection is configured, we don't have to create any additional threads.
@@ -529,6 +641,7 @@ impl SendAdditionalConnections {
                 threads,
                 message_tx,
                 worker_error,
+                external_cancel,
                 notify_rx,
             });
         }
@@ -538,10 +651,11 @@ impl SendAdditionalConnections {
         // the memory chunks to the workers, but does not send memory anymore. Thus in
         // this case we create one additional thread for each connection.
         for n in 0..configured_connections {
-            let mut socket = send_migration_socket(destination)?;
+            let mut socket = send_migration_socket(destination, tls_dir)?;
             let guest_memory = guest_memory.clone();
             let message_rx = message_rx.clone();
             let worker_error = worker_error.clone();
+            let external_cancel = external_cancel.clone();
             let notify_tx = notify_tx.clone();
 
             let thread = thread::Builder::new()
@@ -552,6 +666,7 @@ impl SendAdditionalConnections {
                         &guest_memory,
                         &message_rx,
                         &worker_error,
+                        &external_cancel,
                         &notify_tx,
                     )
                 })
@@ -574,6 +689,7 @@ impl SendAdditionalConnections {
             threads,
             message_tx,
             worker_error,
+            external_cancel,
             notify_rx,
         })
     }
@@ -583,6 +699,7 @@ impl SendAdditionalConnections {
         guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
         message_rx: &Mutex<Receiver<SendMemoryThreadMessage>>,
         worker_error: &AtomicBool,
+        external_cancel: &AtomicBool,
         notify_tx: &Sender<SendMemoryThreadNotify>,
     ) -> Result<(), MigratableError> {
         info!("Spawned thread to send VM memory.");
@@ -607,6 +724,10 @@ impl SendAdditionalConnections {
                 })?;
             match message {
                 SendMemoryThreadMessage::Memory(table) => {
+                    if external_cancel.load(Ordering::Acquire) {
+                        continue;
+                    }
+
                     send_memory_ranges(guest_memory, &table, socket)
                         .inspect_err(|_| {
                             worker_error.store(true, Ordering::Relaxed);
@@ -643,6 +764,7 @@ impl SendAdditionalConnections {
         &mut self,
         table: MemoryRangeTable,
         socket: &mut SocketStream,
+        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> Result<(), MigratableError>,
     ) -> Result<bool, MigratableError> {
         if table.regions().is_empty() {
             return Ok(false);
@@ -650,17 +772,25 @@ impl SendAdditionalConnections {
 
         // If we use only one connection, we send the memory directly.
         if self.threads.is_empty() {
-            send_memory_ranges(&self.guest_memory, &table, socket)?;
+            for chunk in table.partition(Self::CHUNK_SIZE) {
+                return_if_cancelled_cb(socket)
+                    .inspect_err(|_| info!("cancelling migration during memory iteration"))?;
+                send_memory_ranges(&self.guest_memory, &chunk, socket)?;
+            }
             return Ok(true);
         }
 
         // The chunk size is chosen to be big enough so that even very fast links need some
         // milliseconds to send it.
         for chunk in table.partition(Self::CHUNK_SIZE) {
+            return_if_cancelled_cb(socket).inspect_err(|_| {
+                info!("cancelling migration during memory iteration");
+                self.external_cancel.store(true, Ordering::Release);
+            })?;
             self.send_chunk(chunk)?;
         }
 
-        self.wait_for_pending_data()?;
+        self.wait_for_pending_data(socket, return_if_cancelled_cb)?;
         Ok(true)
     }
 
@@ -695,7 +825,11 @@ impl SendAdditionalConnections {
     }
 
     /// Wait until all data that is in-flight has actually been sent and acknowledged.
-    fn wait_for_pending_data(&mut self) -> Result<(), MigratableError> {
+    fn wait_for_pending_data(
+        &mut self,
+        socket: &mut SocketStream,
+        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> Result<(), MigratableError>,
+    ) -> Result<(), MigratableError> {
         let gate = Arc::new(Gate::new());
         for _ in 0..self.threads.len() {
             self.message_tx
@@ -709,25 +843,33 @@ impl SendAdditionalConnections {
         // they arrived at the gate.
         let mut seen_threads = 0;
         loop {
-            match self
-                .notify_rx
-                .recv()
-                .context("Error receiving message from workers")
-                .map_err(MigratableError::MigrateSend)?
-            {
-                SendMemoryThreadNotify::Gate => {
+            return_if_cancelled_cb(socket).inspect_err(|_| {
+                gate.open();
+                self.external_cancel.store(true, Ordering::Release);
+            })?;
+
+            thread::sleep(Duration::from_millis(2));
+
+            match self.notify_rx.try_recv() {
+                Ok(SendMemoryThreadNotify::Gate) => {
                     seen_threads += 1;
                     if seen_threads == self.threads.len() {
                         gate.open();
                         return Ok(());
                     }
                 }
-                SendMemoryThreadNotify::Error => {
+                Ok(SendMemoryThreadNotify::Error) => {
                     // If an error occurred in one of the worker threads, we open
                     // the gate to make sure that no thread hangs. After that, we
                     // receive the error from Self::cleanup() and return it.
                     gate.open();
                     return self.cleanup();
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "All senders died unexpectedly."
+                    )));
                 }
             }
         }
@@ -784,9 +926,40 @@ fn socket_url_to_path(url: &str) -> Result<PathBuf, anyhow::Error> {
         .map(|s| s.into())
 }
 
+/// Extract the server name from a TCP address. This function assumes that
+/// `tcp:` has already been stripped.
+fn tcp_address_to_server_name(address: &str) -> Result<&str, anyhow::Error> {
+    if let Some(rest) = address.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow!("Could not extract host from TCP address: {address}"))?;
+
+        if host.is_empty() || !port.starts_with(':') || port.len() == 1 {
+            return Err(anyhow!(
+                "Could not extract host from TCP address: {address}"
+            ));
+        }
+
+        Ok(host)
+    } else {
+        let (host, port) = address
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow!("Could not extract host from TCP address: {address}"))?;
+
+        if host.is_empty() || port.is_empty() {
+            return Err(anyhow!(
+                "Could not extract host from TCP address: {address}"
+            ));
+        }
+
+        Ok(host)
+    }
+}
+
 /// Connect to a migration endpoint and return the established stream.
 pub(crate) fn send_migration_socket(
     destination_url: &str,
+    tls_dir: Option<&Path>,
 ) -> Result<SocketStream, MigratableError> {
     if let Some(address) = destination_url.strip_prefix("tcp:") {
         info!("Connecting to TCP socket at {address}");
@@ -794,8 +967,20 @@ pub(crate) fn send_migration_socket(
         let socket = TcpStream::connect(address).map_err(|e| {
             MigratableError::MigrateSend(anyhow!("Error connecting to TCP socket: {e}"))
         })?;
+        set_migration_socket_timeouts(&socket).map_err(MigratableError::MigrateSend)?;
 
-        Ok(SocketStream::Tcp(socket))
+        if let Some(tls_dir) = tls_dir {
+            let server_name = tcp_address_to_server_name(address)
+                .context("Error extracting TLS server name from destination URL")
+                .map_err(MigratableError::MigrateSend)?;
+            TlsStream::new_client(socket, tls_dir, server_name)
+                .map(Box::new)
+                .map(SocketStream::Tls)
+                .context("Error creating TLS migration stream")
+                .map_err(MigratableError::MigrateSend)
+        } else {
+            Ok(SocketStream::Tcp(socket))
+        }
     } else {
         let path = socket_url_to_path(destination_url).map_err(MigratableError::MigrateSend)?;
         info!("Connecting to UNIX socket at {path:?}");
@@ -808,15 +993,41 @@ pub(crate) fn send_migration_socket(
     }
 }
 
+/// Connect to the main migration endpoint and keep the connection active while
+/// memory is transferred over additional streams.
+pub(crate) fn send_migration_socket_with_keep_alive(
+    destination_url: &str,
+    tls_dir: Option<&Path>,
+) -> Result<SocketStream, MigratableError> {
+    match send_migration_socket(destination_url, tls_dir)? {
+        socket @ (SocketStream::Tcp(_) | SocketStream::Tls(_)) => {
+            KeepAliveStream::new(socket, MIGRATION_WRITE_TIMEOUT_DURATION, true)
+                .map(SocketStream::KeepAlive)
+                .context("Error creating keep-alive migration stream")
+                .map_err(MigratableError::MigrateSend)
+        }
+        socket => Ok(socket),
+    }
+}
+
 /// Bind a migration listener for the receiver side.
 pub(crate) fn receive_migration_listener(
     receiver_url: &str,
+    tls_dir: Option<&Path>,
 ) -> Result<ReceiveListener, MigratableError> {
     if let Some(address) = receiver_url.strip_prefix("tcp:") {
-        TcpListener::bind(address)
-            .map(ReceiveListener::Tcp)
+        let listener = TcpListener::bind(address)
             .context("Error binding to TCP socket")
-            .map_err(MigratableError::MigrateReceive)
+            .map_err(MigratableError::MigrateReceive)?;
+
+        if let Some(tls_dir) = tls_dir {
+            let config = TlsServerConfig::new(tls_dir)
+                .context("Error creating TLS server config")
+                .map_err(MigratableError::MigrateReceive)?;
+            Ok(ReceiveListener::Tls(listener, config))
+        } else {
+            Ok(ReceiveListener::Tcp(listener))
+        }
     } else {
         let path = socket_url_to_path(receiver_url).map_err(MigratableError::MigrateReceive)?;
         UnixListener::bind(&path)
@@ -831,9 +1042,7 @@ pub(crate) fn expect_ok_response(
     socket: &mut SocketStream,
     error: MigratableError,
 ) -> Result<(), MigratableError> {
-    Response::read_from(socket)?
-        .ok_or_abandon(socket, error)
-        .map(|_| ())
+    Response::read_from(socket)?.ok_or_error(error).map(|_| ())
 }
 
 /// Send a request and validate that the peer responds with OK.
@@ -976,4 +1185,33 @@ pub(crate) fn receive_memory_ranges(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tcp_address_to_server_name;
+
+    #[test]
+    fn test_tcp_address_to_server_name() {
+        assert_eq!(
+            tcp_address_to_server_name("example.com:1234").unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            tcp_address_to_server_name("192.0.2.1:1234").unwrap(),
+            "192.0.2.1"
+        );
+        assert_eq!(
+            tcp_address_to_server_name("[2001:db8::1]:1234").unwrap(),
+            "2001:db8::1"
+        );
+    }
+
+    #[test]
+    fn test_tcp_address_to_server_name_rejects_invalid_addresses() {
+        tcp_address_to_server_name("example.com").unwrap_err();
+        tcp_address_to_server_name(":1234").unwrap_err();
+        tcp_address_to_server_name("[2001:db8::1]").unwrap_err();
+        tcp_address_to_server_name("[2001:db8::1]1234").unwrap_err();
+    }
 }

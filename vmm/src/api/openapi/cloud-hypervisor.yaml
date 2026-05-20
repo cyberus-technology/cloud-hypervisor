@@ -109,6 +109,16 @@ paths:
         405:
           description: The VM instance could not resume because it is not paused.
 
+  /vm.post-migration-announce:
+    put:
+      summary: Trigger post-migration announcements for a running VM instance.
+      operationId: postMigrationAnnounceVM
+      responses:
+        204:
+          description: The VM instance successfully triggered post-migration announcements.
+        500:
+          description: The VM instance could not trigger post-migration announcements because it is not running.
+
   /vm.shutdown:
     put:
       summary: Shut the VM instance down.
@@ -784,14 +794,32 @@ components:
         iommu_address_width:
           type: integer
           format: uint8
+        system_serial_number:
+          type: string
         serial_number:
+          type: string
+          deprecated: true
+        system_uuid:
           type: string
         uuid:
           type: string
+          deprecated: true
         oem_strings:
           type: array
           items:
             type: string
+        system_manufacturer:
+          type: string
+        system_product_name:
+          type: string
+        system_version:
+          type: string
+        system_family:
+          type: string
+        system_sku_number:
+          type: string
+        chassis_asset_tag:
+          type: string
         tdx:
           type: boolean
           default: false
@@ -1452,6 +1480,12 @@ components:
       properties:
         receiver_url:
           type: string
+        tls_dir:
+          type: string
+          description: >
+            Directory containing the TLS server certificate (server-cert.pem), the TLS
+            server key (server-key.pem), and the client TLS root CA certificate (ca-cert.pem).
+            TLS is only supported with tcp:<host>:<port> receiver URLs.
 
     TimeoutStrategy:
       type: string
@@ -1499,6 +1533,12 @@ components:
             The number of parallel TCP connections to use for migration.
             Must be between 1 and 128. Multiple connections are not supported
             with local UNIX-socket migration.
+        tls_dir:
+          type: string
+          description: >
+            Directory containing the TLS root CA certificate (ca-cert.pem), the TLS client
+            certificate (client-cert.pem), and TLS client key (client-key.pem).
+            TLS is only supported with tcp:<host>:<port> destination URLs.
 
     VmAddUserDevice:
       required:

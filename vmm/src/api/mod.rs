@@ -35,29 +35,31 @@ pub mod http;
 
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::mpsc::{RecvError, SendError, Sender, channel};
 use std::time::Duration;
 
-use log::info;
+use log::{info, trace};
 use micro_http::Body;
 use option_parser::{OptionParser, OptionParserError, Toggle};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vm_migration::MigratableError;
+use vm_migration::progress::MigrationProgress;
 use vmm_sys_util::eventfd::EventFd;
 
 #[cfg(feature = "dbus_api")]
 pub use self::dbus::start_dbus_thread;
 pub use self::http::{start_http_fd_thread, start_http_path_thread};
 use crate::Error as VmmError;
-use crate::config::RestoreConfig;
+use crate::config::{RestoreConfig, RestoredNetConfig};
 use crate::device_tree::DeviceTree;
 use crate::migration_transport::MAX_MIGRATION_CONNECTIONS;
 use crate::vm::{Error as VmError, VmState};
 use crate::vm_config::{
-    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, NetConfig, PmemConfig,
-    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, MemoryZoneConfig, NetConfig,
+    PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
 };
 
 /// API errors are sent back from the VMM API server through the ApiResponse.
@@ -102,6 +104,10 @@ pub enum ApiError {
     /// The VM could not resume.
     #[error("The VM could not resume")]
     VmResume(#[source] VmError),
+
+    /// The VM could not perform the post-migration announcement.
+    #[error("The VM could not perform the post-migration announcement")]
+    VmPostMigrationAnnounce(#[source] VmError),
 
     /// The VM is not booted.
     #[error("The VM is not booted")]
@@ -203,6 +209,10 @@ pub enum ApiError {
     #[error("Error starting migration sender")]
     VmSendMigration(#[source] MigratableError),
 
+    /// Error cancelling migration
+    #[error("Error cancelling migration")]
+    VmCancelMigration(#[source] MigratableError),
+
     /// Error triggering power button
     #[error("Error triggering power button")]
     VmPowerButton(#[source] VmError),
@@ -210,6 +220,10 @@ pub enum ApiError {
     /// Error triggering NMI
     #[error("Error triggering NMI")]
     VmNmi(#[source] VmError),
+
+    /// Error fetching the migration progress
+    #[error("Error fetching the migration progress")]
+    VmMigrationProgress(#[source] VmError),
 }
 pub type ApiResult<T> = Result<T, ApiError>;
 
@@ -266,9 +280,164 @@ pub struct VmCoredumpData {
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct VmReceiveMigrationData {
     /// URL for the reception of migration state
     pub receiver_url: String,
+    /// Directory containing the TLS server certificate (server-cert.pem), the TLS server key (server-key.pem), and the client TLS root CA certificate (ca-cert.pem).
+    #[serde(default)]
+    pub tls_dir: Option<PathBuf>,
+    /// Map with new network FDs on the new host.
+    #[serde(default)]
+    pub net_fds: Vec<RestoredNetConfig>,
+    /// Optional URL if the TCP serial configuration must be changed during
+    /// migration. Example: "192.168.1.1:2222".
+    #[serde(default)]
+    pub tcp_serial_url: Option<String>,
+    /// Optional memory zone reconfiguration data.
+    #[serde(default)]
+    pub zones: Vec<MemoryZoneConfig>,
+}
+
+#[derive(Debug, Error)]
+pub enum VmReceiveMigrationConfigError {
+    #[error("Error parsing receive migration parameters")]
+    ParseError(#[source] OptionParserError),
+
+    #[error("Error validating receive migration parameters")]
+    ValidationError(String),
+}
+
+/// Validates the host and port portion of a TCP migration URL.
+///
+/// The expected format is `<host>:<port>` for hostnames and IPv4 addresses, or
+/// `[<ipv6-address>]:<port>` for IPv6 addresses. The host and port must both be
+/// present, and the port must parse as a `u16`.
+fn validate_tcp_migration_address(address: &str) -> Result<(), String> {
+    let (host, port) = if let Some(rest) = address.strip_prefix('[') {
+        let (host, rest) = rest
+            .split_once(']')
+            .ok_or_else(|| "missing closing ']' for bracketed IPv6 address".to_string())?;
+
+        let port = rest
+            .strip_prefix(':')
+            .ok_or_else(|| "missing port separator after bracketed host".to_string())?;
+
+        (host, port)
+    } else {
+        address
+            .rsplit_once(':')
+            .ok_or_else(|| "missing TCP port".to_string())?
+    };
+
+    if host.is_empty() {
+        return Err("host must not be empty".to_string());
+    }
+
+    if port.is_empty() {
+        return Err("port must not be empty".to_string());
+    }
+
+    port.parse::<u16>()
+        .map_err(|_| format!("invalid TCP port: {port}"))?;
+
+    Ok(())
+}
+
+impl VmReceiveMigrationData {
+    pub const SYNTAX: &'static str = "VM receive migration parameters \
+        \"<receiver_url>\" or \"receiver_url=<url>[,tls_dir=<path>,tcp_serial_url=<host:port>]\"";
+
+    pub fn parse(migration: &str) -> Result<Self, VmReceiveMigrationConfigError> {
+        let uses_key_value_syntax = migration.split(',').any(
+            |part| matches!(part, p if p.starts_with("receiver_url=") || p.starts_with("tls_dir=")),
+        );
+
+        if !uses_key_value_syntax {
+            let data = Self {
+                receiver_url: migration.to_owned(),
+                tls_dir: None,
+                net_fds: vec![],
+                tcp_serial_url: None,
+                zones: vec![],
+            };
+
+            data.validate()?;
+
+            return Ok(data);
+        }
+
+        let mut parser = OptionParser::new();
+        parser
+            .add("receiver_url")
+            .add("tls_dir")
+            .add("tcp_serial_url");
+        parser
+            .parse(migration)
+            .map_err(VmReceiveMigrationConfigError::ParseError)?;
+
+        let receiver_url = parser.get("receiver_url").ok_or_else(|| {
+            VmReceiveMigrationConfigError::ParseError(OptionParserError::InvalidSyntax(
+                "receiver_url is required".to_string(),
+            ))
+        })?;
+        let tls_dir = parser
+            .convert::<String>("tls_dir")
+            .map_err(VmReceiveMigrationConfigError::ParseError)?
+            .map(|path| PathBuf::from(&path));
+        let tcp_serial_url = parser
+            .convert::<String>("tcp_serial_url")
+            .map_err(VmReceiveMigrationConfigError::ParseError)?;
+
+        let data = Self {
+            receiver_url,
+            tls_dir,
+            net_fds: vec![],
+            tcp_serial_url,
+            zones: vec![],
+        };
+
+        data.validate()?;
+
+        Ok(data)
+    }
+
+    pub fn validate(&self) -> Result<(), VmReceiveMigrationConfigError> {
+        if let Some(addr) = self.receiver_url.strip_prefix("tcp:") {
+            validate_tcp_migration_address(addr).map_err(|e| {
+                VmReceiveMigrationConfigError::ValidationError(format!(
+                    "receiver_url must use tcp:<host>:<port> or unix:<path>: {e}."
+                ))
+            })?;
+        } else if self
+            .receiver_url
+            .strip_prefix("unix:")
+            .is_some_and(|path| !path.is_empty())
+        {
+            if self.tls_dir.is_some() {
+                return Err(VmReceiveMigrationConfigError::ValidationError(
+                    "UNIX sockets and TLS encryption cannot be used at the same time.".to_string(),
+                ));
+            }
+        } else {
+            return Err(VmReceiveMigrationConfigError::ValidationError(
+                "receiver_url must use tcp:<host>:<port> or unix:<path>.".to_string(),
+            ));
+        }
+
+        // The TLS implementation checks for all necessary files. Here we only
+        // check whether the path exists and points to a directory.
+        if let Some(tls_dir) = &self.tls_dir
+            && !tls_dir.is_dir()
+        {
+            return Err(VmReceiveMigrationConfigError::ValidationError(format!(
+                "tls_dir must point to a directory. Path: {}",
+                tls_dir.display()
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Default, Deserialize, Serialize, Debug, PartialEq, Eq)]
@@ -330,13 +499,19 @@ pub struct VmSendMigrationData {
     /// Must be between 1 and `MAX_MIGRATION_CONNECTIONS` inclusive.
     #[serde(default = "VmSendMigrationData::default_connections")]
     pub connections: NonZeroU32,
+    /// Path to the directory containing the TLS root CA certificate (ca-cert.pem), the TLS client certificate (client-cert.pem), and TLS client key (client-key.pem).
+    #[serde(default)]
+    pub tls_dir: Option<PathBuf>,
+    /// Keep the VMM alive.
+    pub keep_alive: bool,
 }
 
 impl VmSendMigrationData {
     pub const SYNTAX: &'static str = "VM send migration parameters \
         \"destination_url=<url>[,local=on|off,\
         downtime_ms=<milliseconds>,timeout_s=<seconds>,\
-        timeout_strategy=cancel|ignore,connections=<amount>]\"";
+        timeout_strategy=cancel|ignore,connections=<amount>,\
+        tls_dir=<path>]\"";
 
     // Same as QEMU.
     pub const DEFAULT_DOWNTIME: Duration = Duration::from_millis(300);
@@ -364,7 +539,9 @@ impl VmSendMigrationData {
             .add("downtime_ms")
             .add("timeout_s")
             .add("timeout_strategy")
-            .add("connections");
+            .add("connections")
+            .add("tls_dir")
+            .add("keep_alive");
         parser
             .parse(migration)
             .map_err(VmSendMigrationConfigError::ParseError)?;
@@ -416,6 +593,15 @@ impl VmSendMigrationData {
             })?,
             None => Self::default_connections(),
         };
+        let tls_dir = parser
+            .convert::<String>("tls_dir")
+            .map_err(VmSendMigrationConfigError::ParseError)?
+            .map(|path| PathBuf::from(&path));
+        let keep_alive = parser
+            .convert::<Toggle>("keep_alive")
+            .map_err(VmSendMigrationConfigError::ParseError)?
+            .unwrap_or(Toggle(false))
+            .0;
 
         let data = Self {
             destination_url,
@@ -424,6 +610,8 @@ impl VmSendMigrationData {
             timeout_s,
             timeout_strategy,
             connections,
+            tls_dir,
+            keep_alive,
         };
 
         data.validate()?;
@@ -440,26 +628,32 @@ impl VmSendMigrationData {
     }
 
     pub fn validate(&self) -> Result<(), VmSendMigrationConfigError> {
-        match self.destination_url.as_str() {
-            url if url
-                .strip_prefix("tcp:")
-                .is_some_and(|addr| !addr.is_empty()) => {}
-            url if url
-                .strip_prefix("unix:")
-                .is_some_and(|path| !path.is_empty()) =>
-            {
-                if self.connections.get() > 1 {
-                    return Err(VmSendMigrationConfigError::ValidationError(
-                        "UNIX sockets and connections option cannot be used at the same time."
-                            .to_string(),
-                    ));
-                }
-            }
-            _ => {
+        if let Some(addr) = self.destination_url.strip_prefix("tcp:") {
+            validate_tcp_migration_address(addr).map_err(|e| {
+                VmSendMigrationConfigError::ValidationError(format!(
+                    "destination_url must use tcp:<host>:<port> or unix:<path>: {e}."
+                ))
+            })?;
+        } else if self
+            .destination_url
+            .strip_prefix("unix:")
+            .is_some_and(|path| !path.is_empty())
+        {
+            if self.connections.get() > 1 {
                 return Err(VmSendMigrationConfigError::ValidationError(
-                    "destination_url must use tcp:<host>:<port> or unix:<path>.".to_string(),
+                    "UNIX sockets and connections option cannot be used at the same time."
+                        .to_string(),
                 ));
             }
+            if self.tls_dir.is_some() {
+                return Err(VmSendMigrationConfigError::ValidationError(
+                    "UNIX sockets and TLS encryption cannot be used at the same time.".to_string(),
+                ));
+            }
+        } else {
+            return Err(VmSendMigrationConfigError::ValidationError(
+                "destination_url must use tcp:<host>:<port> or unix:<path>.".to_string(),
+            ));
         }
 
         if self.connections.get() > MAX_MIGRATION_CONNECTIONS {
@@ -483,6 +677,17 @@ impl VmSendMigrationData {
             }
         }
 
+        // The TLS implementation checks for all necessary files. Here we only
+        // check whether the path exists and points to a directory.
+        if let Some(tls_dir) = &self.tls_dir
+            && !tls_dir.is_dir()
+        {
+            return Err(VmSendMigrationConfigError::ValidationError(format!(
+                "tls_dir must point to a directory. Path: {}",
+                tls_dir.display()
+            )));
+        }
+
         Ok(())
     }
 }
@@ -493,6 +698,9 @@ pub enum ApiResponsePayload {
 
     /// Virtual machine information
     VmInfo(VmInfoResponse),
+
+    /// The progress of a possibly ongoing live migration.
+    VmMigrationProgress(Box<Option<MigrationProgress>>),
 
     /// Vmm ping response
     VmmPing(VmmPingResponse),
@@ -512,6 +720,8 @@ pub trait RequestHandler {
     fn vm_pause(&mut self) -> Result<(), VmError>;
 
     fn vm_resume(&mut self) -> Result<(), VmError>;
+
+    fn vm_post_migration_announce(&mut self) -> Result<(), VmError>;
 
     fn vm_snapshot(&mut self, destination_url: &str) -> Result<(), VmError>;
 
@@ -578,12 +788,23 @@ pub trait RequestHandler {
         receive_data_migration: VmReceiveMigrationData,
     ) -> Result<(), MigratableError>;
 
+    /// Dispatches the migration.
     fn vm_send_migration(
         &mut self,
         send_data_migration: VmSendMigrationData,
     ) -> Result<(), MigratableError>;
 
+    /// Triggers a migration cancellation.
+    ///
+    /// The cancellation is not guaranteed to succeed, as the migration may have
+    /// succeeded already.
+    fn vm_cancel_migration(&mut self) -> Result<(), MigratableError>;
+
     fn vm_nmi(&mut self) -> Result<(), VmError>;
+
+    /// Returns the progress of the currently active migration or any previous
+    /// failed or canceled migration.
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress>;
 }
 
 /// It would be nice if we could pass around an object like this:
@@ -1062,7 +1283,7 @@ impl ApiAction for VmCounters {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            info!("API request event: VmCounters");
+            trace!("API request event: VmCounters");
 
             let response = vmm
                 .vm_counters()
@@ -1167,7 +1388,7 @@ impl ApiAction for VmInfo {
 
     fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
         Box::new(move |vmm| {
-            info!("API request event: VmInfo");
+            trace!("API request event: VmInfo");
 
             let response = vmm
                 .vm_info()
@@ -1309,6 +1530,39 @@ impl ApiAction for VmReceiveMigration {
             let response = vmm
                 .vm_receive_migration(data)
                 .map_err(ApiError::VmReceiveMigration)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmCancelMigration;
+
+impl ApiAction for VmCancelMigration {
+    type RequestBody = ();
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmCancelMigration {data:?}");
+
+            let response = vmm
+                .vm_cancel_migration()
+                .map_err(ApiError::VmCancelMigration)
                 .map(|_| ApiResponsePayload::Empty);
 
             response_sender
@@ -1549,6 +1803,39 @@ impl ApiAction for VmResume {
     }
 }
 
+pub struct VmPostMigrationAnnounce;
+
+impl ApiAction for VmPostMigrationAnnounce {
+    type RequestBody = ();
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmPostMigrationAnnounce");
+
+            let response = vmm
+                .vm_post_migration_announce()
+                .map_err(ApiError::VmPostMigrationAnnounce)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
 pub struct VmSendMigration;
 
 impl ApiAction for VmSendMigration {
@@ -1754,9 +2041,145 @@ impl ApiAction for VmNmi {
     }
 }
 
+pub struct VmMigrationProgress;
+
+impl ApiAction for VmMigrationProgress {
+    type RequestBody = ();
+    type ResponseBody = Box<Option<MigrationProgress>>;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            trace!("API request event: VmMigrationProgress");
+
+            let snapshot = Ok(vmm.vm_migration_progress());
+            let response = snapshot
+                .map(Box::new)
+                .map(ApiResponsePayload::VmMigrationProgress)
+                .map_err(ApiError::VmMigrationProgress);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        let info = get_response(self, api_evt, api_sender, data)?;
+
+        match info {
+            ApiResponsePayload::VmMigrationProgress(info) => Ok(info),
+            _ => Err(ApiError::ResponsePayloadType),
+        }
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn test_validate_tcp_migration_address() {
+        for address in [
+            "192.168.1.1:8080",
+            "destination.example:8080",
+            "[2001:db8::1]:8080",
+            "[::1]:0",
+            "localhost:65535",
+        ] {
+            validate_tcp_migration_address(address)
+                .unwrap_or_else(|e| panic!("expected {address} to be valid, got: {e}"));
+        }
+
+        assert_eq!(
+            validate_tcp_migration_address("192.168.1.1").unwrap_err(),
+            "missing TCP port"
+        );
+        assert_eq!(
+            validate_tcp_migration_address(":8080").unwrap_err(),
+            "host must not be empty"
+        );
+        assert_eq!(
+            validate_tcp_migration_address("host:").unwrap_err(),
+            "port must not be empty"
+        );
+        assert_eq!(
+            validate_tcp_migration_address("host:not-a-port").unwrap_err(),
+            "invalid TCP port: not-a-port"
+        );
+        assert_eq!(
+            validate_tcp_migration_address("[2001:db8::1").unwrap_err(),
+            "missing closing ']' for bracketed IPv6 address"
+        );
+        assert_eq!(
+            validate_tcp_migration_address("[]:8080").unwrap_err(),
+            "host must not be empty"
+        );
+        assert_eq!(
+            validate_tcp_migration_address("[2001:db8::1]").unwrap_err(),
+            "missing port separator after bracketed host"
+        );
+        assert_eq!(
+            validate_tcp_migration_address("[2001:db8::1]:").unwrap_err(),
+            "port must not be empty"
+        );
+        assert_eq!(
+            validate_tcp_migration_address("[2001:db8::1]:99999").unwrap_err(),
+            "invalid TCP port: 99999"
+        );
+    }
+
+    #[test]
+    fn test_vm_receive_migration_data_parse() {
+        let data = VmReceiveMigrationData::parse("tcp:192.168.1.1:8080").unwrap();
+        assert_eq!(
+            data,
+            VmReceiveMigrationData {
+                receiver_url: "tcp:192.168.1.1:8080".to_string(),
+                tls_dir: None,
+                net_fds: vec![],
+                tcp_serial_url: None,
+                zones: vec![],
+            }
+        );
+
+        let data = VmReceiveMigrationData::parse("tcp:[2001:db8::1]:8080").unwrap();
+        assert_eq!(data.receiver_url, "tcp:[2001:db8::1]:8080");
+
+        let data = VmReceiveMigrationData::parse("tcp:destination.example:8080").unwrap();
+        assert_eq!(data.receiver_url, "tcp:destination.example:8080");
+
+        let data = VmReceiveMigrationData::parse("unix:/tmp/ch=migrate.sock").unwrap();
+        assert_eq!(data.receiver_url, "unix:/tmp/ch=migrate.sock");
+
+        let tls_dir = std::env::temp_dir();
+        let data = VmReceiveMigrationData::parse(&format!(
+            "receiver_url=tcp:192.168.1.1:8080,tls_dir={},tcp_serial_url=1.2.3.4:6789",
+            tls_dir.display(),
+        ))
+        .unwrap();
+        assert_eq!(
+            data,
+            VmReceiveMigrationData {
+                receiver_url: "tcp:192.168.1.1:8080".to_string(),
+                tls_dir: Some(tls_dir),
+                net_fds: vec![],
+                tcp_serial_url: Some("1.2.3.4:6789".to_string()),
+                zones: vec![],
+            }
+        );
+
+        VmReceiveMigrationData::parse("receiver_url=file:///tmp/migration").unwrap_err();
+        VmReceiveMigrationData::parse("tcp:192.168.1.1").unwrap_err();
+        VmReceiveMigrationData::parse("tcp:[2001:db8::1]").unwrap_err();
+        VmReceiveMigrationData::parse("receiver_url=unix:/tmp/sock,tls_dir=/tmp").unwrap_err();
+    }
 
     #[test]
     fn test_vm_send_migration_data_parse() {
@@ -1780,6 +2203,14 @@ mod unit_tests {
         assert_eq!(data.timeout_s, VmSendMigrationData::default_timeout_s());
         assert_eq!(data.timeout_strategy, TimeoutStrategy::default());
         assert_eq!(data.connections, VmSendMigrationData::default_connections());
+
+        let data = VmSendMigrationData::parse("destination_url=tcp:[2001:db8::1]:8080")
+            .expect("IPv6 migration string should parse");
+        assert_eq!(data.destination_url, "tcp:[2001:db8::1]:8080");
+
+        let data = VmSendMigrationData::parse("destination_url=tcp:destination.example:8080")
+            .expect("hostname migration string should parse");
+        assert_eq!(data.destination_url, "tcp:destination.example:8080");
 
         // Missing destination_url is an error
         VmSendMigrationData::parse("local=on,downtime_ms=200").unwrap_err();
@@ -1817,6 +2248,8 @@ mod unit_tests {
 
         // Invalid destination URL scheme is rejected
         VmSendMigrationData::parse("destination_url=file:///tmp/migration").unwrap_err();
+        VmSendMigrationData::parse("destination_url=tcp:192.168.1.1").unwrap_err();
+        VmSendMigrationData::parse("destination_url=tcp:[2001:db8::1]").unwrap_err();
 
         // Local migration requires a UNIX socket destination
         VmSendMigrationData::parse("destination_url=tcp:192.168.1.1:8080,local=yes").unwrap_err();
@@ -1838,12 +2271,15 @@ mod unit_tests {
                 timeout_s: VmSendMigrationData::default_timeout_s(),
                 timeout_strategy: Default::default(),
                 connections: VmSendMigrationData::default_connections(),
+                tls_dir: None,
+                keep_alive: false,
             }
         );
 
         // Happy path, fully specified
+        let tls_dir = std::env::temp_dir();
         let data =
-            VmSendMigrationData::parse("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4")
+            VmSendMigrationData::parse(&format!("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4,tls_dir={},keep_alive=true", tls_dir.display()))
                 .unwrap();
         assert_eq!(
             data,
@@ -1854,6 +2290,8 @@ mod unit_tests {
                 timeout_s: NonZeroU64::new(900).unwrap(),
                 timeout_strategy: TimeoutStrategy::Ignore,
                 connections: NonZeroU32::new(4).unwrap(),
+                tls_dir: Some(tls_dir),
+                keep_alive: true
             }
         );
     }

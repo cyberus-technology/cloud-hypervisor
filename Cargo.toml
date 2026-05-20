@@ -6,7 +6,20 @@
 codegen-units = 1
 lto = true
 opt-level = "s"
-strip = true
+
+# Tradeof between performance and fast compilation times for local testing and
+# development with frequent rebuilds.
+[profile.optimized-dev]
+codegen-units = 16
+inherits = "release"
+lto = false
+opt-level = 2
+strip = false
+
+# Optimize more for dependencies: They don't require frequent rebuilds.
+[profile.optimized-dev.package."*"]
+codegen-units = 1
+opt-level = 3
 
 [profile.profiling]
 debug = true
@@ -90,11 +103,21 @@ dhat = "0.3.3"
 dirs = "6.0.0"
 env_logger = "0.11.10"
 epoll = "4.4.0"
+# Used for (de-) compressing CPU profiles
+flate2 = "1.1.9"
 flume = "0.12.0"
 itertools = "0.14.0"
-jiff = { version = "0.2", default-features = false, features = ["std"] }
+jiff = { version = "0.2.23", default-features = false, features = [
+  "std",
+  "tz-system",
+] }
 libc = "0.2.186"
 log = "0.4.29"
+rustls = { version = "0.23.38", default-features = false, features = [
+  "aws-lc-rs",
+  "std",
+  "tls12",
+] }
 sha2 = "0.11.0"
 signal-hook = "0.4.4"
 thiserror = "2.0.18"

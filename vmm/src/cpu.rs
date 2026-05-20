@@ -19,6 +19,7 @@ use std::mem::size_of;
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::{Duration, Instant};
 use std::{cmp, io, result, thread};
 
 use acpi_tables::sdt::Sdt;
@@ -46,7 +47,7 @@ use hypervisor::arch::aarch64::gic::Vgic;
 use hypervisor::arch::aarch64::regs::{ID_AA64MMFR0_EL1, TCR_EL1, TTBR1_EL1};
 #[cfg(target_arch = "x86_64")]
 use hypervisor::arch::x86::CpuIdEntry;
-#[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
+#[cfg(target_arch = "x86_64")]
 use hypervisor::arch::x86::MsrEntry;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use hypervisor::arch::x86::SpecialRegisters;
@@ -80,6 +81,8 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{SIGRTMIN, register_signal_handler};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
+#[cfg(feature = "kvm")]
+use {kvm_bindings::kvm_run, std::cell::Cell, std::os::fd::RawFd, std::sync::RwLock};
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
@@ -94,6 +97,16 @@ use crate::seccomp_filters::{Thread, get_seccomp_filter};
 use crate::vm::physical_bits;
 use crate::vm_config::{CoreScheduling, CpusConfig};
 use crate::{CPU_MANAGER_SNAPSHOT_ID, GuestMemoryMmap};
+
+#[cfg(feature = "kvm")]
+thread_local! {
+    static KVM_RUN: Cell<*mut kvm_run> = const {Cell::new(core::ptr::null_mut())};
+}
+#[cfg(feature = "kvm")]
+/// Tell signal handler to not access certain stuff anymore during shutdown.
+/// Otherwise => panics.
+/// Better alternative would be to prevent signals there at all.
+pub static IS_IN_SHUTDOWN: RwLock<bool> = RwLock::new(false);
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -129,6 +142,12 @@ pub enum Error {
 
     #[error("Error generating common CPUID")]
     CommonCpuId(#[source] arch::Error),
+
+    #[error("Error computing required MSR updates")]
+    RequiredMsrUpdates(#[source] arch::Error),
+
+    #[error("Error applying MSR filter")]
+    MsrFilter(#[source] arch::Error),
 
     #[error("Error configuring vCPU")]
     VcpuConfiguration(#[source] arch::Error),
@@ -512,15 +531,17 @@ impl Vcpu {
     /// * `vm` - The virtual machine this vcpu will get attached to.
     /// * `vm_ops` - Optional object for exit handling.
     /// * `cpu_vendor` - CPU vendor as reported by __cpuid(0x0)
+    /// * `msr_buffer`(x86_64 only) - A buffer for supported MSRs.
     pub fn new(
         id: u32,
         apic_id: u32,
         vm: &dyn hypervisor::Vm,
         vm_ops: Option<Arc<dyn VmOps>>,
         #[cfg(target_arch = "x86_64")] cpu_vendor: CpuVendor,
+        #[cfg(target_arch = "x86_64")] msr_buffer: Vec<MsrEntry>,
     ) -> Result<Self> {
         let vcpu = vm
-            .create_vcpu(apic_id, vm_ops)
+            .create_vcpu(apic_id, vm_ops, msr_buffer)
             .map_err(|e| Error::VcpuCreate(e.into()))?;
         // Initially the cpuid per vCPU is the one supported by this VM.
         Ok(Vcpu {
@@ -541,11 +562,13 @@ impl Vcpu {
     /// * `kernel_entry_point` - Kernel entry point address in guest memory and boot protocol used.
     /// * `guest_memory` - Guest memory.
     /// * `cpuid` - (x86_64) CpuId, wrapper over the `kvm_cpuid2` structure.
+    #[cfg_attr(feature = "igvm", expect(clippy::too_many_arguments))]
     pub fn configure(
         &mut self,
         #[cfg(target_arch = "aarch64")] vm: &dyn hypervisor::Vm,
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(target_arch = "x86_64")] cpuid: Vec<CpuIdEntry>,
+        #[cfg(target_arch = "x86_64")] feature_msr_updates: &[MsrEntry],
         #[cfg(target_arch = "x86_64")] kvm_hyperv: bool,
         #[cfg(target_arch = "x86_64")] topology: (u16, u16, u16, u16),
         #[cfg(target_arch = "x86_64")] nested: bool,
@@ -580,6 +603,7 @@ impl Vcpu {
                 self.id,
                 boot_setup,
                 cpuid,
+                feature_msr_updates,
                 kvm_hyperv,
                 self.vendor,
                 topology,
@@ -670,6 +694,13 @@ impl Vcpu {
             .map_err(Error::VcpuSetGicrBaseAddr)?;
         Ok(())
     }
+
+    #[cfg(feature = "kvm")]
+    pub fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        // SAFETY: We happen to know that all current uses respect the safety contract.
+        // TODO find a better way to keep this safe and/or express its fragile state.
+        unsafe { self.vcpu.get_kvm_vcpu_raw_fd() }
+    }
 }
 
 impl Pausable for Vcpu {}
@@ -698,6 +729,11 @@ pub struct CpuManager {
     interrupt_controller: Option<Arc<Mutex<dyn InterruptController>>>,
     #[cfg(target_arch = "x86_64")]
     cpuid: Vec<CpuIdEntry>,
+    #[cfg(target_arch = "x86_64")]
+    /// A buffer for MSRs supported by the hardware and hypervisor
+    msr_buffer: Vec<MsrEntry>,
+    #[cfg(target_arch = "x86_64")]
+    profile_msr_based_features: Vec<MsrEntry>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     vm: Arc<dyn hypervisor::Vm>,
     vcpus_kill_signalled: Arc<AtomicBool>,
@@ -798,30 +834,52 @@ impl VcpuState {
         }
     }
 
-    /// Blocks until the vCPU thread has acknowledged the signal. It retries to send
-    /// the signal every 10ms. Times out after 1000ms.
+    /// Blocks until the vCPU thread has acknowledged the signal.
+    ///
+    /// The signal is resent every ms until the vCPU thread acknowledges it.
+    /// A warning is emitted every 100ms while the acknowledgment is pending.
+    ///
+    /// The wait is bounded by a total timeout of 10 seconds. If the vCPU thread
+    /// does not acknowledge the signal within this time window,
+    /// [`Error::SignalAcknowledgeTimeout`] is returned.
     ///
     /// This is the counterpart of [`Self::signal_thread`].
     fn wait_until_signal_acknowledged(&self) -> Result<()> {
-        if let Some(_handle) = self.handle.as_ref() {
-            let mut count = 0;
-            loop {
-                if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-                // This is more effective than thread::yield_now() at
-                // avoiding a priority inversion with the vCPU thread
-                thread::sleep(std::time::Duration::from_millis(1));
-                count += 1;
-                if count >= 1000 {
-                    return Err(Error::SignalAcknowledgeTimeout);
-                } else if count % 10 == 0 {
-                    warn!("vCPU thread did not respond in {count}ms to signal - retrying");
-                    self.signal_thread();
-                }
-            }
+        if self.handle.is_none() {
+            return Ok(());
         }
-        Ok(())
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+        let retry_interval = Duration::from_millis(1);
+        let warn_interval = Duration::from_millis(100);
+
+        let mut next_warn = warn_interval;
+        loop {
+            if self.vcpu_run_interrupted.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            // Re-signal: it is cheap and idempotent.
+            self.signal_thread();
+
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::SignalAcknowledgeTimeout);
+            }
+
+            // Emit warning every 100ms
+            if elapsed >= next_warn {
+                warn!(
+                    "vCPU thread did not respond in {}ms to signal - retrying (timeout: {}s)",
+                    elapsed.as_millis(),
+                    timeout.as_secs(),
+                );
+                next_warn += warn_interval;
+            }
+
+            thread::sleep(retry_interval);
+        }
     }
 
     fn join_thread(&mut self) -> Result<()> {
@@ -909,6 +967,10 @@ impl CpuManager {
             interrupt_controller: None,
             #[cfg(target_arch = "x86_64")]
             cpuid: Vec::new(),
+            #[cfg(target_arch = "x86_64")]
+            msr_buffer: Self::construct_msr_buffer(hypervisor.as_ref())?,
+            #[cfg(target_arch = "x86_64")]
+            profile_msr_based_features: Vec::new(),
             vm,
             vcpus_kill_signalled: Arc::new(AtomicBool::new(false)),
             vcpus_pause_signalled: Arc::new(AtomicBool::new(false)),
@@ -937,6 +999,20 @@ impl CpuManager {
     }
 
     #[cfg(target_arch = "x86_64")]
+    fn construct_msr_buffer(hypervisor: &dyn hypervisor::Hypervisor) -> Result<Vec<MsrEntry>> {
+        let msr_indices = hypervisor
+            .get_msr_index_list()
+            .map_err(|e| Error::VcpuCreate(e.into()))?;
+        Ok(msr_indices
+            .into_iter()
+            .map(|index| MsrEntry {
+                index,
+                ..Default::default()
+            })
+            .collect())
+    }
+
+    #[cfg(target_arch = "x86_64")]
     pub fn populate_cpuid(
         &mut self,
         hypervisor: &dyn hypervisor::Hypervisor,
@@ -952,11 +1028,69 @@ impl CpuManager {
                     #[cfg(feature = "tdx")]
                     tdx,
                     amx: self.config.features.amx,
+                    profile: self.config.profile,
                 },
             )
             .map_err(Error::CommonCpuId)?
         };
 
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    /// Prepares common MSR-based feature value updates that will be set when vCPUs are configured.
+    ///
+    /// This is only relevant when (non-host) CPU profiles are present, otherwise it is infallible
+    /// and we set an empty vector.
+    pub fn apply_msr_updates(&mut self) -> Result<()> {
+        let profile_msr_based_features = {
+            if let Some(arch::x86_64::cpu_profile::RequiredMsrUpdates {
+                msr_based_features,
+                denied_msrs,
+            }) = arch::x86_64::compute_required_msr_updates(
+                self.hypervisor.as_ref(),
+                self.config.profile,
+                self.config.kvm_hyperv,
+            )
+            .map_err(Error::RequiredMsrUpdates)?
+            {
+                // Remove denied MSRS from the MSR buffer
+                self.msr_buffer.retain(|entry| {
+                    !denied_msrs
+                        .contains(&arch::x86_64::msr_definitions::RegisterAddress(entry.index))
+                });
+
+                // Assert that all required msr_based_features to be set are part of the MSR buffer.
+                // It is a bug if this is not the case
+                for msr in &msr_based_features {
+                    if !self
+                        .msr_buffer
+                        .iter()
+                        .any(|msr_container| msr_container.index == msr.index)
+                    {
+                        error!(
+                            "BUG: feature based MSR:={:#x} is not contained in the set MSR buffer for the CPU manager",
+                            msr.index
+                        );
+                        panic!(
+                            "Broken invariant: The CPU Manager's MSR buffer does not have an entry for the computed MSR-based feature update"
+                        );
+                    }
+                }
+
+                // Create and apply a filter to prevent guests from accessing the denied MSRs
+                // TODO: Better error!
+                arch::x86_64::filter_denied_msrs(
+                    denied_msrs.into_iter().map(|reg| reg.0).collect(),
+                    self.vm.as_ref(),
+                )
+                .map_err(Error::MsrFilter)?;
+                msr_based_features
+            } else {
+                Vec::new()
+            }
+        };
+        self.profile_msr_based_features = profile_msr_based_features;
         Ok(())
     }
 
@@ -981,6 +1115,8 @@ impl CpuManager {
             Some(self.vm_ops.clone()),
             #[cfg(target_arch = "x86_64")]
             self.hypervisor.get_cpu_vendor(),
+            #[cfg(target_arch = "x86_64")]
+            self.msr_buffer.clone(),
         )?;
 
         if let Some(snapshot) = snapshot {
@@ -1052,6 +1188,7 @@ impl CpuManager {
         vcpu.configure(
             boot_setup,
             self.cpuid.clone(),
+            &self.profile_msr_based_features,
             self.config.kvm_hyperv,
             topology,
             self.config.nested,
@@ -1185,6 +1322,28 @@ impl CpuManager {
             thread::Builder::new()
                 .name(format!("vcpu{vcpu_id}"))
                 .spawn(move || {
+                    // init thread-local kvm_run structure
+                    #[cfg(feature = "kvm")]
+                    {
+                        let raw_kvm_fd = vcpu.lock().unwrap().get_kvm_vcpu_raw_fd();
+
+                        // SAFETY: We know the FD is valid and have the proper args.
+                        let buffer = unsafe {
+                            libc::mmap(
+                                core::ptr::null_mut(),
+                                4096,
+                                libc::PROT_WRITE | libc::PROT_READ,
+                                libc::MAP_SHARED,
+                                raw_kvm_fd,
+                                0,
+                            )
+                        };
+                        assert!(!buffer.is_null());
+                        assert_ne!(buffer, libc::MAP_FAILED);
+                        let kvm_run = buffer.cast::<kvm_run>();
+                        KVM_RUN.set(kvm_run);
+                    }
+
                     // Schedule the thread to run on the expected CPU set
                     if let Some(cpuset) = cpuset.as_ref() {
                         let cpuset: *const libc::cpu_set_t = cpuset;
@@ -1276,7 +1435,35 @@ impl CpuManager {
                             return;
                         }
 
+                    #[cfg(not(feature = "kvm"))]
                     extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {}
+                    #[cfg(feature = "kvm")]
+                    extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {
+                        // We do not need a self-pipe for safe UNIX signal handling here as in this
+                        // signal handler, we only expect the same signal over and over again. While
+                        // different signals can interrupt a signal being handled, the same signal
+                        // again can't by default. Therefore, this is safe.
+
+                        // This lock prevents accessing thread locals when a signal is received
+                        // in the teardown phase of the Rust standard library. Otherwise, we would
+                        // panic.
+                        //
+                        // Masking signals would be a nicer approach but this is the pragmatic
+                        // solution.
+                        //
+                        // We don't have lock contention in normal operation. When the writer
+                        // sets the bool to true, the lock is only held for a couple of µs.
+                        let lock = IS_IN_SHUTDOWN.read().unwrap();
+                        if *lock {
+                            return;
+                        }
+
+                        let kvm_run = KVM_RUN.get();
+                        // SAFETY: the mapping is valid
+                        let kvm_run = unsafe {
+                            kvm_run.as_mut().expect("kvm_run should have been mapped as part of vCPU setup") };
+                        kvm_run.immediate_exit = 1;
+                    }
                     // This uses an async signal safe handler to kill the vcpu handles.
                     register_signal_handler(SIGRTMIN(), handle_signal)
                         .expect("Failed to register vcpu signal handler");
@@ -1315,12 +1502,14 @@ impl CpuManager {
 
                                 #[cfg(feature = "kvm")]
                                 if matches!(hypervisor_type, HypervisorType::Kvm) {
-                                    vcpu.lock().unwrap().vcpu.set_immediate_exit(true);
-                                    if !matches!(vcpu.lock().unwrap().run(), Ok(VmExit::Ignore)) {
+                                    let lock = vcpu.lock();
+                                    let mut lock = lock.unwrap();
+                                    lock.vcpu.set_immediate_exit(true);
+                                    if !matches!(lock.run(), Ok(VmExit::Ignore)) {
                                         error!("Unexpected VM exit on \"immediate_exit\" run");
                                         break;
                                     }
-                                    vcpu.lock().unwrap().vcpu.set_immediate_exit(false);
+                                    lock.vcpu.set_immediate_exit(false);
                                 }
 
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
@@ -2216,6 +2405,11 @@ impl CpuManager {
         &self.vcpus_kill_signalled
     }
 
+    pub(crate) fn vcpus_pause_signalled(&self) -> &Arc<AtomicBool> {
+        &self.vcpus_pause_signalled
+    }
+
+    #[cfg(feature = "igvm")]
     #[cfg(all(feature = "igvm", feature = "mshv"))]
     pub(crate) fn get_cpuid_leaf(
         &self,
@@ -3297,7 +3491,7 @@ mod unit_tests {
         hv.check_required_extensions().unwrap();
         // Calling get_lapic will fail if there is no irqchip before hand.
         vm.create_irq_chip().unwrap();
-        let vcpu = vm.create_vcpu(0, None).unwrap();
+        let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
         let klapic_before: LapicState = vcpu.get_lapic().unwrap();
 
         // Compute the value that is expected to represent LVT0 and LVT1.
@@ -3322,7 +3516,7 @@ mod unit_tests {
         let vm = hv
             .create_vm(HypervisorVmConfig::default())
             .expect("new VM fd creation failed");
-        let vcpu = vm.create_vcpu(0, None).unwrap();
+        let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
         setup_fpu(vcpu.as_ref()).unwrap();
 
         let expected_fpu: FpuState = FpuState {
@@ -3348,8 +3542,9 @@ mod unit_tests {
         let vm = hv
             .create_vm(HypervisorVmConfig::default())
             .expect("new VM fd creation failed");
-        let vcpu = vm.create_vcpu(0, None).unwrap();
-        setup_msrs(vcpu.as_ref()).unwrap();
+        // TODO: Use a proper MSR buffer here
+        let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
+        setup_msrs(vcpu.as_ref(), &[]).unwrap();
 
         // This test will check against the last MSR entry configured (the tenth one).
         // See create_msr_entries for details.
@@ -3376,7 +3571,7 @@ mod unit_tests {
         let vm = hv
             .create_vm(HypervisorVmConfig::default())
             .expect("new VM fd creation failed");
-        let vcpu = vm.create_vcpu(0, None).unwrap();
+        let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
 
         let mut expected_regs: StandardRegisters = vcpu.create_standard_regs();
         expected_regs.set_rflags(0x0000000000000002u64);
@@ -3402,7 +3597,7 @@ mod unit_tests {
         let vm = hv
             .create_vm(HypervisorVmConfig::default())
             .expect("new VM fd creation failed");
-        let vcpu = vm.create_vcpu(0, None).unwrap();
+        let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
 
         let mut expected_regs: StandardRegisters = vcpu.create_standard_regs();
         expected_regs.set_rflags(0x0000000000000002u64);

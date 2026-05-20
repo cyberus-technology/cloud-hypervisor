@@ -8,10 +8,12 @@ version = "0.1.0"
 [dependencies]
 anyhow = { workspace = true }
 itertools = { workspace = true }
+rustls = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 vm-memory = { workspace = true, features = ["backend-atomic", "backend-mmap"] }
+zerocopy = { workspace = true, features = ["derive", "std"] }
 
 [lints]
 workspace = true

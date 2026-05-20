@@ -11,6 +11,7 @@ use std::result;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
+use arch::CpuProfile;
 use block::ImageType;
 use clap::ArgMatches;
 use log::{debug, warn};
@@ -222,6 +223,9 @@ pub enum ValidationError {
     /// Missing file value for console
     #[error("Path missing when using file console mode")]
     ConsoleFileMissing,
+    /// Missing TCP address for console
+    #[error("Address missing when using TCP console mode")]
+    ConsoleTcpAddressMissing,
     /// Missing socket path for console
     #[error("Path missing when using socket console mode")]
     ConsoleSocketPathMissing,
@@ -691,7 +695,8 @@ impl CpusConfig {
             .add("affinity")
             .add("features")
             .add("nested")
-            .add("core_scheduling");
+            .add("core_scheduling")
+            .add("profile");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u32 = parser
@@ -723,6 +728,12 @@ impl CpusConfig {
                     })
                     .collect()
             });
+
+        let profile = parser
+            .convert::<CpuProfile>("profile")
+            .map_err(Error::ParseCpus)?
+            .unwrap_or_default();
+
         let features_list = parser
             .convert::<StringList>("features")
             .map_err(Error::ParseCpus)?
@@ -765,6 +776,7 @@ impl CpusConfig {
             features,
             nested,
             core_scheduling,
+            profile,
         })
     }
 }
@@ -832,9 +844,11 @@ impl PlatformConfig {
         static SYNTAX: LazyLock<String> = LazyLock::new(|| {
             let mut syntax = "Platform configuration parameters \
             \"num_pci_segments=<num_pci_segments>,iommu_segments=<list_of_segments>,\
-            iommu_address_width=<bits>,serial_number=<dmi_device_serial_number>,\
-            uuid=<dmi_device_uuid>,oem_strings=<list_of_strings>,iommufd=on|off,\
-            vfio_p2p_dma=on|off"
+            iommu_address_width=<bits>,iommufd=on|off,vfio_p2p_dma=on|off,system_manufacturer=<dmi_system_manufacturer>,\
+            system_product_name=<dmi_system_product_name>,system_version=<dmi_system_version>,\
+            system_serial_number=<dmi_system_serial_number>,system_uuid=<dmi_system_uuid>,\
+            system_sku_number=<dmi_system_sku_number>,system_family=<dmi_system_family>,\
+            oem_strings=<list_of_strings>,chassis_asset_tag=<dmi_chassis_asset_tag>"
                 .to_string();
 
             if cfg!(feature = "tdx") {
@@ -854,16 +868,61 @@ impl PlatformConfig {
     }
 
     pub fn parse(platform: &str) -> Result<Self> {
+        struct StringField {
+            key: &'static str,
+            apply: fn(&mut PlatformConfig, String),
+        }
+
+        const SMBIOS_STRING_FIELDS: &[StringField] = &[
+            StringField {
+                key: "system_manufacturer",
+                apply: |config, value| config.system_manufacturer = Some(value),
+            },
+            StringField {
+                key: "system_product_name",
+                apply: |config, value| config.system_product_name = Some(value),
+            },
+            StringField {
+                key: "system_version",
+                apply: |config, value| config.system_version = Some(value),
+            },
+            StringField {
+                key: "system_serial_number",
+                apply: |config, value| config.system_serial_number = Some(value),
+            },
+            StringField {
+                key: "system_uuid",
+                apply: |config, value| config.system_uuid = Some(value),
+            },
+            StringField {
+                key: "system_sku_number",
+                apply: |config, value| config.system_sku_number = Some(value),
+            },
+            StringField {
+                key: "system_family",
+                apply: |config, value| config.system_family = Some(value),
+            },
+            StringField {
+                key: "chassis_asset_tag",
+                apply: |config, value| config.chassis_asset_tag = Some(value),
+            },
+        ];
+
         let mut parser = OptionParser::new();
         parser
             .add("num_pci_segments")
             .add("iommu_segments")
             .add("iommu_address_width")
+            .add("oem_strings")
             .add("serial_number")
             .add("uuid")
             .add("oem_strings")
             .add("iommufd")
-            .add("vfio_p2p_dma");
+            .add("vfio_p2p_dma")
+            .add("uuid");
+        for field in SMBIOS_STRING_FIELDS {
+            parser.add(field.key);
+        }
         #[cfg(feature = "tdx")]
         parser.add("tdx");
         #[cfg(feature = "sev_snp")]
@@ -882,14 +941,11 @@ impl PlatformConfig {
             .convert("iommu_address_width")
             .map_err(Error::ParsePlatform)?
             .unwrap_or(MAX_IOMMU_ADDRESS_WIDTH_BITS);
-        let serial_number = parser
-            .convert("serial_number")
-            .map_err(Error::ParsePlatform)?;
-        let uuid = parser.convert("uuid").map_err(Error::ParsePlatform)?;
         let oem_strings = parser
             .convert::<StringList>("oem_strings")
             .map_err(Error::ParsePlatform)?
-            .map(|v| v.0);
+            .map(|v| v.0)
+            .unwrap_or_default();
         let iommufd = parser
             .convert::<Toggle>("iommufd")
             .map_err(Error::ParsePlatform)?
@@ -912,20 +968,77 @@ impl PlatformConfig {
             .map_err(Error::ParsePlatform)?
             .unwrap_or(Toggle(false))
             .0;
-        Ok(PlatformConfig {
+
+        let mut platform_config = PlatformConfig {
             num_pci_segments,
             iommu_segments,
             iommu_address_width_bits,
-            serial_number,
-            uuid,
+            system_serial_number: None,
+            system_uuid: None,
             oem_strings,
+            system_manufacturer: None,
+            system_product_name: None,
+            system_version: None,
+            system_family: None,
+            system_sku_number: None,
+            chassis_asset_tag: None,
             iommufd,
-            vfio_p2p_dma,
             #[cfg(feature = "tdx")]
             tdx,
             #[cfg(feature = "sev_snp")]
             sev_snp,
-        })
+            vfio_p2p_dma,
+        };
+
+        for field in SMBIOS_STRING_FIELDS {
+            if let Some(value) = parser
+                .convert::<String>(field.key)
+                .map_err(Error::ParsePlatform)?
+            {
+                (field.apply)(&mut platform_config, value);
+            }
+        }
+
+        let legacy_serial_number = parser
+            .convert::<String>("serial_number")
+            .map_err(Error::ParsePlatform)?;
+        if legacy_serial_number.is_some() {
+            warn!("'serial_number' in --platform is deprecated; use 'system_serial_number'.");
+        }
+        platform_config.system_serial_number = platform_config
+            .system_serial_number
+            .or(legacy_serial_number);
+
+        let legacy_uuid = parser
+            .convert::<String>("uuid")
+            .map_err(Error::ParsePlatform)?;
+        if legacy_uuid.is_some() {
+            warn!("'uuid' in --platform is deprecated; use 'system_uuid'.");
+        }
+        platform_config.system_uuid = platform_config.system_uuid.or(legacy_uuid);
+        #[cfg(feature = "tdx")]
+        let tdx = parser
+            .convert::<Toggle>("tdx")
+            .map_err(Error::ParsePlatform)?
+            .unwrap_or(Toggle(false))
+            .0;
+        #[cfg(feature = "sev_snp")]
+        let sev_snp = parser
+            .convert::<Toggle>("sev_snp")
+            .map_err(Error::ParsePlatform)?
+            .unwrap_or(Toggle(false))
+            .0;
+
+        #[cfg(feature = "tdx")]
+        {
+            platform_config.tdx = tdx;
+        }
+        #[cfg(feature = "sev_snp")]
+        {
+            platform_config.sev_snp = sev_snp;
+        }
+
+        Ok(platform_config)
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
@@ -2141,7 +2254,7 @@ impl PmemConfig {
 }
 
 impl CommonConsoleConfig {
-    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null"];
+    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null", "tcp"];
     const VALUE_OPTIONS: &[&str] = &["file", "socket"];
 
     fn parse(console: &str, map_err: impl Fn(OptionParserError) -> Error) -> Result<Self> {
@@ -2153,6 +2266,7 @@ impl CommonConsoleConfig {
 
         let mut file: Option<PathBuf> = None;
         let mut socket: Option<PathBuf> = None;
+        let mut url: Option<String> = None;
         let mut mode: ConsoleOutputMode = ConsoleOutputMode::Off;
 
         if parser.is_set("off") {
@@ -2168,6 +2282,19 @@ impl CommonConsoleConfig {
                 Some(PathBuf::from(parser.get("file").ok_or(
                     Error::Validation(ValidationError::ConsoleFileMissing),
                 )?));
+        } else if parser.is_set("tcp") {
+            mode = ConsoleOutputMode::Tcp;
+            url = Some(
+                parser
+                    .get("tcp")
+                    .ok_or(Error::Validation(ValidationError::ConsoleTcpAddressMissing))?,
+            );
+            if parser.is_set("file") {
+                file =
+                    Some(PathBuf::from(parser.get("file").ok_or(
+                        Error::Validation(ValidationError::ConsoleFileMissing),
+                    )?));
+            }
         } else if parser.is_set("socket") {
             mode = ConsoleOutputMode::Socket;
             socket = Some(PathBuf::from(parser.get("socket").ok_or(
@@ -2177,7 +2304,12 @@ impl CommonConsoleConfig {
             return Err(Error::ParseConsoleInvalidModeGiven);
         }
 
-        Ok(Self { mode, file, socket })
+        Ok(Self {
+            mode,
+            file,
+            socket,
+            url,
+        })
     }
 }
 
@@ -2556,6 +2688,27 @@ pub struct RestoredNetConfig {
     // and will be populated into this struct on the destination VMM eventually.
     #[serde(default, deserialize_with = "deserialize_restorednetconfig_fds")]
     pub fds: Option<Vec<i32>>,
+}
+
+impl RestoredNetConfig {
+    // Ensure all net devices from 'VmConfig' backed by FDs have a
+    // corresponding 'RestoreNetConfig' with a matched 'id' and expected
+    // number of FDs.
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        let found = vm_config
+            .net
+            .iter()
+            .flatten()
+            .any(|net| net.pci_common.id.as_ref() == Some(&self.id));
+
+        if found {
+            Ok(())
+        } else {
+            Err(ValidationError::RestoreMissingRequiredNetId(
+                self.id.clone(),
+            ))
+        }
+    }
 }
 
 fn deserialize_restorednetconfig_fds<'de, D>(
@@ -3560,6 +3713,8 @@ impl VmConfig {
     /// To use this safely, the caller must guarantee that the input
     /// fds are all valid.
     pub unsafe fn add_preserved_fds(&mut self, mut fds: Vec<i32>) {
+        debug!("adding preserved FDs to VM list: {fds:?}");
+
         if fds.is_empty() {
             return;
         }
@@ -3614,7 +3769,16 @@ impl Clone for VmConfig {
                 .preserved_fds
                 .as_ref()
                 // SAFETY: FFI call with valid FDs
-                .map(|fds| fds.iter().map(|fd| unsafe { libc::dup(*fd) }).collect()),
+                .map(|fds| {
+                    fds.iter()
+                        .map(|fd| {
+                            // SAFETY: Trivially safe.
+                            let fd_duped = unsafe { libc::dup(*fd) };
+                            warn!("Cloning VM config: duping preserved FD {fd} => {fd_duped}");
+                            fd_duped
+                        })
+                        .collect()
+                }),
             landlock_rules: self.landlock_rules.clone(),
             #[cfg(feature = "ivshmem")]
             ivshmem: self.ivshmem.clone(),
@@ -3626,6 +3790,7 @@ impl Clone for VmConfig {
 impl Drop for VmConfig {
     fn drop(&mut self) {
         if let Some(mut fds) = self.preserved_fds.take() {
+            debug!("Closing preserved FDs from VM: fds={fds:?}");
             for fd in fds.drain(..) {
                 // SAFETY: FFI call with valid FDs
                 unsafe { libc::close(fd) };
@@ -4412,7 +4577,12 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
     #[test]
     fn test_console_parsing() -> Result<()> {
         let console_config = |mode, file, socket, iommu| ConsoleConfig {
-            common: CommonConsoleConfig { file, mode, socket },
+            common: CommonConsoleConfig {
+                file,
+                mode,
+                socket,
+                url: None,
+            },
             pci_common: PciDeviceCommonConfig {
                 iommu,
                 ..Default::default()
@@ -4977,11 +5147,17 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             num_pci_segments: MAX_NUM_PCI_SEGMENTS,
             iommu_segments: None,
             iommu_address_width_bits: MAX_IOMMU_ADDRESS_WIDTH_BITS,
-            serial_number: None,
-            uuid: None,
-            oem_strings: None,
+            system_serial_number: None,
+            system_uuid: None,
+            oem_strings: Vec::new(),
             iommufd: false,
             vfio_p2p_dma: default_platformconfig_vfio_p2p_dma(),
+            system_manufacturer: None,
+            system_product_name: None,
+            system_version: None,
+            system_family: None,
+            system_sku_number: None,
+            chassis_asset_tag: None,
             #[cfg(feature = "tdx")]
             tdx: false,
             #[cfg(feature = "sev_snp")]
@@ -5051,6 +5227,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     file: None,
                     mode: ConsoleOutputMode::Null,
                     socket: None,
+                    url: None,
                 },
             },
             console: ConsoleConfig {
@@ -5058,6 +5235,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     file: None,
                     mode: ConsoleOutputMode::Tty,
                     socket: None,
+                    url: None,
                 },
                 pci_common: PciDeviceCommonConfig::default(),
             },

@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{cmp, result, str, thread};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use arch::PciSpaceInfo;
 #[cfg(target_arch = "x86_64")]
@@ -100,11 +100,9 @@ use crate::landlock::LandlockError;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
 };
-#[cfg(target_arch = "x86_64")]
-use crate::migration::get_vm_snapshot;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::migration::url_to_file;
-use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, url_to_path};
+use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, get_vm_snapshot, url_to_path};
 #[cfg(all(
     feature = "kvm",
     feature = "sev_snp",
@@ -112,6 +110,7 @@ use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, url_to_path};
     target_arch = "x86_64"
 ))]
 use crate::sev::MeasuredBootInfo;
+use crate::vcpu_throttling::ThrottleThreadHandle;
 #[cfg(feature = "fw_cfg")]
 use crate::vm_config::FwCfgConfig;
 use crate::vm_config::{
@@ -197,6 +196,9 @@ pub enum Error {
 
     #[error("VM is not running")]
     VmNotRunning,
+
+    #[error("VM is currently migrating and can't be modified")]
+    VmMigrating,
 
     #[error("Cannot clone EventFd")]
     EventFdClone(#[source] io::Error),
@@ -540,6 +542,14 @@ pub struct Vm {
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    vcpu_throttler: ThrottleThreadHandle,
+    post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PostMigrationLifecycleEvent {
+    VmReboot,
+    VmShutdown,
 }
 
 impl Vm {
@@ -698,6 +708,19 @@ impl Vm {
         } else {
             VmState::Created
         };
+        let post_migration_lifecycle_event = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                get_vm_snapshot(snapshot)
+                    .map(|vm_snapshot| vm_snapshot.post_migration_lifecycle_event)
+                    .map_err(Error::Restore)
+            })
+            .transpose()?
+            .flatten();
+
+        // TODO we could also spawn the thread when a migration with auto-converge starts.
+        // Probably this is the better design.
+        let vcpu_throttler = ThrottleThreadHandle::new_from_cpu_manager(&cpu_manager);
 
         Ok(Vm {
             #[cfg(feature = "tdx")]
@@ -718,6 +741,8 @@ impl Vm {
             hypervisor,
             stop_on_boot,
             load_payload_handle,
+            vcpu_throttler,
+            post_migration_lifecycle_event,
         })
     }
 
@@ -796,15 +821,23 @@ impl Vm {
         .map_err(Error::CpuManager)?;
 
         #[cfg(target_arch = "x86_64")]
-        cpu_manager
-            .lock()
-            .unwrap()
-            .populate_cpuid(
-                hypervisor.as_ref(),
-                #[cfg(feature = "tdx")]
-                tdx_enabled,
-            )
-            .map_err(Error::CpuManager)?;
+        {
+            cpu_manager
+                .lock()
+                .unwrap()
+                .populate_cpuid(
+                    hypervisor.as_ref(),
+                    #[cfg(feature = "tdx")]
+                    tdx_enabled,
+                )
+                .map_err(Error::CpuManager)?;
+
+            cpu_manager
+                .lock()
+                .unwrap()
+                .apply_msr_updates()
+                .map_err(Error::CpuManager)?;
+        }
 
         Ok(cpu_manager)
     }
@@ -940,6 +973,7 @@ impl Vm {
                 console_info,
                 console_resize_pipe,
                 original_termios,
+                snapshot,
             )?;
         }
 
@@ -980,6 +1014,7 @@ impl Vm {
                 console_info.cloned(),
                 console_resize_pipe.cloned(),
                 original_termios.clone(),
+                snapshot,
             )?;
         }
 
@@ -1039,10 +1074,11 @@ impl Vm {
         };
 
         // Create interrupt controller and devices for MSHV
+        let dm_snapshot = snapshot_from_id(snapshot, DEVICE_MANAGER_SNAPSHOT_ID);
         let ic = device_manager
             .lock()
             .unwrap()
-            .create_interrupt_controller()
+            .create_interrupt_controller(dm_snapshot)
             .map_err(Error::DeviceManager)?;
 
         #[cfg(target_arch = "aarch64")]
@@ -1056,6 +1092,7 @@ impl Vm {
                 console_resize_pipe.cloned(),
                 original_termios.clone(),
                 ic,
+                dm_snapshot,
             )
             .map_err(Error::DeviceManager)?;
 
@@ -1073,11 +1110,13 @@ impl Vm {
         console_info: Option<&ConsoleInfo>,
         console_resize_pipe: Option<&Arc<File>>,
         original_termios: &Arc<Mutex<Option<termios>>>,
+        snapshot: Option<&Snapshot>,
     ) -> Result<()> {
+        let dm_snapshot = snapshot_from_id(snapshot, DEVICE_MANAGER_SNAPSHOT_ID);
         let ic = device_manager
             .lock()
             .unwrap()
-            .create_interrupt_controller()
+            .create_interrupt_controller(dm_snapshot)
             .map_err(Error::DeviceManager)?;
 
         #[cfg(target_arch = "aarch64")]
@@ -1091,6 +1130,7 @@ impl Vm {
                 console_resize_pipe.cloned(),
                 original_termios.clone(),
                 ic,
+                dm_snapshot,
             )
             .map_err(Error::DeviceManager)?;
 
@@ -1105,13 +1145,15 @@ impl Vm {
         console_info: Option<ConsoleInfo>,
         console_resize_pipe: Option<Arc<File>>,
         original_termios: Arc<Mutex<Option<termios>>>,
+        snapshot: Option<&Snapshot>,
     ) -> Result<()> {
         // For KVM, create interrupt controller after boot vcpus
         // because GIC state is restored from snapshot during vcpu creation
+        let dm_snapshot = snapshot_from_id(snapshot, DEVICE_MANAGER_SNAPSHOT_ID);
         let ic = device_manager
             .lock()
             .unwrap()
-            .create_interrupt_controller()
+            .create_interrupt_controller(dm_snapshot)
             .map_err(Error::DeviceManager)?;
 
         vm.init().map_err(Error::InitializeVm)?;
@@ -1119,7 +1161,13 @@ impl Vm {
         device_manager
             .lock()
             .unwrap()
-            .create_devices(console_info, console_resize_pipe, original_termios, ic)
+            .create_devices(
+                console_info,
+                console_resize_pipe,
+                original_termios,
+                ic,
+                dm_snapshot,
+            )
             .map_err(Error::DeviceManager)?;
 
         Ok(())
@@ -1317,6 +1365,42 @@ impl Vm {
         }
 
         Ok(numa_nodes)
+    }
+
+    /// Set's the throttle percentage to a value in range `0..=99`.
+    ///
+    /// Setting the value back to `0` brings the thread back into a waiting
+    /// state.
+    ///
+    /// # Panic
+    /// Panics, if `percent_new` is not in range `0..=99`.
+    pub fn set_throttle_percent(&self, percent: u8 /* 1..=99 */) {
+        self.vcpu_throttler.set_throttle_percent(percent);
+    }
+
+    /// Get the current throttle percentage in range `0..=99`.
+    ///
+    /// Please note that the value is not synchronized.
+    pub fn throttle_percent(&self) -> u8 {
+        self.vcpu_throttler.throttle_percent()
+    }
+
+    /// Stops and terminates the thread gracefully.
+    ///
+    /// Waits for the thread to finish.
+    pub fn stop_vcpu_throttling(&mut self) {
+        self.vcpu_throttler.shutdown();
+    }
+
+    pub fn set_post_migration_lifecycle_event(
+        &mut self,
+        event: Option<PostMigrationLifecycleEvent>,
+    ) {
+        self.post_migration_lifecycle_event = event;
+    }
+
+    pub fn post_migration_lifecycle_event(&self) -> Option<PostMigrationLifecycleEvent> {
+        self.post_migration_lifecycle_event
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1838,33 +1922,13 @@ impl Vm {
 
         let boot_vcpus = self.cpu_manager.lock().unwrap().boot_vcpus();
 
-        let serial_number = self
+        let smbios = self
             .config
             .lock()
             .unwrap()
             .platform
             .as_ref()
-            .and_then(|p| p.serial_number.clone());
-
-        let uuid = self
-            .config
-            .lock()
-            .unwrap()
-            .platform
-            .as_ref()
-            .and_then(|p| p.uuid.clone());
-
-        let oem_strings = self
-            .config
-            .lock()
-            .unwrap()
-            .platform
-            .as_ref()
-            .and_then(|p| p.oem_strings.clone());
-
-        let oem_strings = oem_strings
-            .as_deref()
-            .map(|strings| strings.iter().map(|s| s.as_ref()).collect::<Vec<&str>>());
+            .and_then(|p| p.smbios_config());
 
         let topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
 
@@ -1876,9 +1940,7 @@ impl Vm {
             boot_vcpus,
             entry_addr.setup_header,
             rsdp_addr,
-            serial_number.as_deref(),
-            uuid.as_deref(),
-            oem_strings.as_deref(),
+            smbios.as_ref(),
             topology,
         )
         .map_err(Error::ConfigureSystem)?;
@@ -2997,6 +3059,10 @@ impl Vm {
             .try_lock_disks()
             .map_err(Error::LockingError)?;
 
+        // TODO for upstreaming probably relevant
+        // Advertise new VM location to network switches.
+        // self.post_migration_announce();
+
         // Now we can start all vCPUs from here.
         self.cpu_manager
             .lock()
@@ -3044,19 +3110,16 @@ impl Vm {
         {
             Request::memory_fd(std::mem::size_of_val(&slot) as u64)
                 .write_to(socket)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!("Error sending memory fd request: {e}"))
-                })?;
+                .context("Error sending memory fd request")
+                .map_err(MigratableError::MigrateSend)?;
             socket
                 .send_with_fd(&slot.to_le_bytes()[..], fd)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!("Error sending memory fd: {e}"))
-                })?;
+                .context("Error sending memory fd")
+                .map_err(MigratableError::MigrateSend)?;
 
-            Response::read_from(socket)?.ok_or_abandon(
-                socket,
-                MigratableError::MigrateSend(anyhow!("Error during memory fd migration")),
-            )?;
+            Response::read_from(socket)?.ok_or_error(MigratableError::MigrateSend(anyhow!(
+                "Error during memory fd migration (got bad response)"
+            )))?;
         }
 
         Ok(())
@@ -3090,6 +3153,10 @@ impl Vm {
             .release_disk_locks()
             .map_err(Error::LockingError)?;
         Ok(())
+    }
+
+    pub fn device_manager(&self) -> &Arc<Mutex<DeviceManager>> {
+        &self.device_manager
     }
 
     pub fn activate_virtio_devices(&self) -> Result<()> {
@@ -3233,6 +3300,14 @@ impl Vm {
             .nmi()
             .map_err(Error::ErrorNmi);
     }
+
+    /// Calls [`DeviceManager::post_migration_announce`].
+    pub fn post_migration_announce(&self) {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .post_migration_announce();
+    }
 }
 
 impl Pausable for Vm {
@@ -3310,6 +3385,8 @@ impl Pausable for Vm {
 
 #[derive(Serialize, Deserialize)]
 pub struct VmSnapshot {
+    #[serde(default)]
+    pub post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
     #[cfg(target_arch = "x86_64")]
     pub clock: Option<hypervisor::ClockData>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -3342,19 +3419,22 @@ impl Snapshottable for Vm {
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         let common_cpuid = {
-            let amx = self.config.lock().unwrap().cpus.features.amx;
-            let phys_bits = physical_bits(
-                self.hypervisor.as_ref(),
-                self.config.lock().unwrap().cpus.max_phys_bits,
-            );
+            let guard = self.config.lock().unwrap();
+            let amx = guard.cpus.features.amx;
+            let phys_bits = physical_bits(self.hypervisor.as_ref(), guard.cpus.max_phys_bits);
+            let kvm_hyperv = guard.cpus.kvm_hyperv;
+            let profile = guard.cpus.profile;
+            // Drop the guard before function call
+            core::mem::drop(guard);
             arch::generate_common_cpuid(
                 self.hypervisor.as_ref(),
                 &arch::CpuidConfig {
                     phys_bits,
-                    kvm_hyperv: self.config.lock().unwrap().cpus.kvm_hyperv,
+                    kvm_hyperv,
                     #[cfg(feature = "tdx")]
                     tdx: false,
                     amx,
+                    profile,
                 },
             )
             .map_err(|e| {
@@ -3363,6 +3443,7 @@ impl Snapshottable for Vm {
         };
 
         let vm_snapshot_state = VmSnapshot {
+            post_migration_lifecycle_event: self.post_migration_lifecycle_event(),
             #[cfg(target_arch = "x86_64")]
             clock: self.saved_clock,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -3407,15 +3488,18 @@ impl Transportable for Vm {
             .write(true)
             .create_new(true)
             .open(snapshot_config_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error creating config snapshot file")
+            .map_err(MigratableError::MigrateSend)?;
 
         // Serialize and write the snapshot config
         let vm_config = serde_json::to_string(self.config.lock().unwrap().deref())
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error serializing VM config")
+            .map_err(MigratableError::MigrateSend)?;
 
         snapshot_config_file
             .write(vm_config.as_bytes())
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error writing serialized VM config")
+            .map_err(MigratableError::MigrateSend)?;
 
         let mut snapshot_state_path = url_to_path(destination_url)?;
         snapshot_state_path.push(SNAPSHOT_STATE_FILE);
@@ -3426,15 +3510,18 @@ impl Transportable for Vm {
             .write(true)
             .create_new(true)
             .open(snapshot_state_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error creating state snapshot file")
+            .map_err(MigratableError::MigrateSend)?;
 
         // Serialize and write the snapshot state
-        let vm_state =
-            serde_json::to_vec(snapshot).map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        let vm_state = serde_json::to_vec(snapshot)
+            .context("Error serializing state snapshot")
+            .map_err(MigratableError::MigrateSend)?;
 
         snapshot_state_file
             .write(&vm_state)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error writing serialized state snapshot")
+            .map_err(MigratableError::MigrateSend)?;
 
         // Tell the memory manager to also send/write its own snapshot.
         if let Some(memory_manager_snapshot) = snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID) {
@@ -3942,7 +4029,7 @@ mod unit_tests {
         mem.write_slice(&code, load_addr)
             .expect("Writing code to memory failed");
 
-        let mut vcpu = vm.create_vcpu(0, None).expect("new Vcpu failed");
+        let mut vcpu = vm.create_vcpu(0, None, vec![]).expect("new Vcpu failed");
 
         let mut vcpu_sregs = vcpu.get_sregs().expect("get sregs failed");
         vcpu_sregs.cs.base = 0;
@@ -4079,7 +4166,7 @@ pub fn test_vm() {
     mem.write_slice(&code, load_addr)
         .expect("Writing code to memory failed");
 
-    let mut vcpu = vm.create_vcpu(0, None).expect("new Vcpu failed");
+    let mut vcpu = vm.create_vcpu(0, None, vec![]).expect("new Vcpu failed");
 
     let mut vcpu_sregs = vcpu.get_sregs().expect("get sregs failed");
     vcpu_sregs.cs.base = 0;

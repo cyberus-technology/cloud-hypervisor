@@ -49,6 +49,8 @@ pub mod x86_64;
 // aarch64 dependencies
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+#[cfg(feature = "kvm")]
+use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 #[cfg(target_arch = "aarch64")]
 use std::sync::Mutex;
@@ -391,6 +393,17 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             });
         }
         Ok(cpuid)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn get_msr_index_list(&self) -> hypervisor::Result<Vec<u32>> {
+        // TODO: We need to implement this before upstreaming
+        unimplemented!()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn get_msr_based_features(&self) -> hypervisor::Result<Vec<MsrEntry>> {
+        unimplemented!()
     }
 
     /// Get maximum number of vCPUs
@@ -1661,6 +1674,11 @@ impl cpu::Vcpu for MshvVcpu {
 
         Ok(())
     }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        unimplemented!()
+    }
 }
 
 impl MshvVcpu {
@@ -1931,6 +1949,7 @@ impl vm::Vm for MshvVm {
         &self,
         id: u32,
         vm_ops: Option<Arc<dyn VmOps>>,
+        #[cfg(target_arch = "x86_64")] _msrs: Vec<MsrEntry>,
     ) -> vm::Result<Box<dyn cpu::Vcpu>> {
         let id: u8 = id.try_into().unwrap();
         let vcpu_fd = self
@@ -2600,5 +2619,14 @@ impl vm::Vm for MshvVm {
             self.msrs.store(Arc::new(msrs));
         }
         Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn msr_filter<'a>(
+        &self,
+        _filter: &[crate::MsrFilterRange<'a>],
+        _default_deny: bool,
+    ) -> vm::Result<()> {
+        todo!()
     }
 }

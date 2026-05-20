@@ -11,17 +11,20 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
 use std::process;
+use std::thread::sleep;
+use std::time::Duration;
 
 use api_client::{
-    Error as ApiClientError, simple_api_command, simple_api_command_with_fds,
-    simple_api_full_command,
+    Error as ApiClientError, StatusCode, simple_api_command, simple_api_command_with_fds,
+    simple_api_full_command, simple_api_full_command_and_response,
 };
 #[cfg(feature = "dbus_api")]
 use clap::ArgAction;
 use clap::{Arg, ArgMatches, Command};
-use log::error;
+use log::{error, info};
 use option_parser::{ByteSized, ByteSizedParseError};
 use thiserror::Error;
+use vm_migration::progress::{MigrationProgress, MigrationState};
 use vmm::config::RestoreConfig;
 use vmm::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, NetConfig, PmemConfig,
@@ -71,6 +74,8 @@ enum Error {
     ReadingFile(#[source] std::io::Error),
     #[error("Invalid disk size")]
     InvalidDiskSize(#[source] ByteSizedParseError),
+    #[error("Error parsing receive migration configuration")]
+    ReceiveMigrationConfig(#[from] vmm::api::VmReceiveMigrationConfigError),
     #[error("Error parsing send migration configuration")]
     SendMigrationConfig(#[from] vmm::api::VmSendMigrationConfigError),
 }
@@ -105,6 +110,7 @@ trait DBusApi1 {
     fn vm_delete(&self) -> zbus::Result<()>;
     fn vm_info(&self) -> zbus::Result<String>;
     fn vm_pause(&self) -> zbus::Result<()>;
+    fn vm_post_migration_announce(&self) -> zbus::Result<()>;
     fn vm_power_button(&self) -> zbus::Result<()>;
     fn vm_reboot(&self) -> zbus::Result<()>;
     fn vm_remove_device(&self, vm_remove_device: &str) -> zbus::Result<()>;
@@ -220,6 +226,11 @@ impl<'a> DBusApi1ProxyBlocking<'a> {
         self.vm_pause().map_err(Error::DBusApiClient)
     }
 
+    fn api_vm_post_migration_announce(&self) -> ApiResult {
+        self.vm_post_migration_announce()
+            .map_err(Error::DBusApiClient)
+    }
+
     fn api_vm_power_button(&self) -> ApiResult {
         self.vm_power_button().map_err(Error::DBusApiClient)
     }
@@ -294,6 +305,10 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
         Some("resume") => {
             simple_api_command(socket, "PUT", "resume", None).map_err(Error::HttpApiClient)
         }
+        Some("post-migration-announce") => {
+            simple_api_command(socket, "PUT", "post-migration-announce", None)
+                .map_err(Error::HttpApiClient)
+        }
         Some("power-button") => {
             simple_api_command(socket, "PUT", "power-button", None).map_err(Error::HttpApiClient)
         }
@@ -315,6 +330,8 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
         Some("shutdown") => {
             simple_api_command(socket, "PUT", "shutdown", None).map_err(Error::HttpApiClient)
         }
+        Some("migration-progress") => simple_api_command(socket, "GET", "migration-progress", None)
+            .map_err(Error::HttpApiClient),
         Some("nmi") => simple_api_command(socket, "PUT", "nmi", None).map_err(Error::HttpApiClient),
         Some("resize") => {
             let resize = resize_config(
@@ -517,6 +534,14 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                 .map_err(Error::HttpApiClient)
         }
         Some("send-migration") => {
+            let just_dispatch = matches
+                .subcommand_matches("send-migration")
+                .unwrap()
+                .get_one::<bool>("dispatch")
+                .cloned()
+                .unwrap_or(false);
+            let wait_for_migration = !just_dispatch;
+
             let send_migration_data = send_migration_data(
                 matches
                     .subcommand_matches("send-migration")
@@ -525,7 +550,65 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .unwrap(),
             )?;
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
-                .map_err(Error::HttpApiClient)
+                .map_err(Error::HttpApiClient)?;
+
+            if !wait_for_migration {
+                return Ok(());
+            }
+            loop {
+                let response = simple_api_full_command_and_response(
+                    socket,
+                    "GET",
+                    "vm.migration-progress",
+                    None,
+                )
+                .map_err(Error::HttpApiClient)?
+                // should have response
+                .ok_or(Error::HttpApiClient(ApiClientError::ServerResponse(
+                    StatusCode::Ok,
+                    None,
+                )))?;
+
+                // This is guaranteed by the SendMigration call
+                assert_ne!(
+                    response, "null",
+                    "migration progress should be there immediately when the migration was dispatched"
+                );
+
+                let progress = serde_json::from_slice::<MigrationProgress>(response.as_bytes())
+                    .map_err(|e| {
+                        error!("failed to parse response as MigrationProgress: {e}");
+                        Error::HttpApiClient(ApiClientError::ServerResponse(
+                            StatusCode::Ok,
+                            Some(response),
+                        ))
+                    })?;
+
+                match progress.state {
+                    MigrationState::Cancelled { .. } => {
+                        info!("Migration was cancelled");
+                        break;
+                    }
+                    MigrationState::Failed {
+                        error_msg,
+                        error_msg_debug,
+                    } => {
+                        error!("Migration failed! {error_msg}\n{error_msg_debug}");
+                        break;
+                    }
+                    MigrationState::Finished { .. } => {
+                        info!("Migration finished successfully. Shutting down Cloud Hypervisor");
+                        simple_api_full_command(socket, "PUT", "vmm.shutdown", None)
+                            .map_err(Error::HttpApiClient)?;
+                        break;
+                    }
+                    MigrationState::Ongoing { .. } => {
+                        sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                }
+            }
+            Ok(())
         }
         Some("receive-migration") => {
             let receive_migration_data = receive_migration_data(
@@ -534,7 +617,7 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .unwrap()
                     .get_one::<String>("receive_migration_config")
                     .unwrap(),
-            );
+            )?;
             simple_api_command(
                 socket,
                 "PUT",
@@ -553,6 +636,8 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
             )?;
             simple_api_command(socket, "PUT", "create", Some(&data)).map_err(Error::HttpApiClient)
         }
+        Some("cancel-migration") => simple_api_command(socket, "PUT", "cancel-migration", None)
+            .map_err(Error::HttpApiClient),
         _ => unreachable!(),
     }
 }
@@ -564,6 +649,7 @@ fn dbus_api_do_command(matches: &ArgMatches, proxy: &DBusApi1ProxyBlocking<'_>) 
         Some("delete") => proxy.api_vm_delete(),
         Some("shutdown-vmm") => proxy.api_vmm_shutdown(),
         Some("resume") => proxy.api_vm_resume(),
+        Some("post-migration-announce") => proxy.api_vm_post_migration_announce(),
         Some("power-button") => proxy.api_vm_power_button(),
         Some("reboot") => proxy.api_vm_reboot(),
         Some("pause") => proxy.api_vm_pause(),
@@ -753,7 +839,7 @@ fn dbus_api_do_command(matches: &ArgMatches, proxy: &DBusApi1ProxyBlocking<'_>) 
                     .unwrap()
                     .get_one::<String>("receive_migration_config")
                     .unwrap(),
-            );
+            )?;
             proxy.api_vm_receive_migration(&receive_migration_data)
         }
         Some("create") => {
@@ -941,12 +1027,10 @@ fn coredump_config(destination_url: &str) -> String {
     serde_json::to_string(&coredump_config).unwrap()
 }
 
-fn receive_migration_data(url: &str) -> String {
-    let receive_migration_data = vmm::api::VmReceiveMigrationData {
-        receiver_url: url.to_owned(),
-    };
-
-    serde_json::to_string(&receive_migration_data).unwrap()
+fn receive_migration_data(config: &str) -> Result<String, Error> {
+    let receive_migration_data =
+        vmm::api::VmReceiveMigrationData::parse(config).map_err(Error::ReceiveMigrationConfig)?;
+    Ok(serde_json::to_string(&receive_migration_data).unwrap())
 }
 
 fn send_migration_data(config: &str) -> Result<String, Error> {
@@ -1050,6 +1134,7 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
             .about("Add vsock device")
             .arg(Arg::new("vsock_config").index(1).help(VsockConfig::SYNTAX)),
         Command::new("boot").about("Boot a created VM"),
+        Command::new("cancel-migration").about("Cancel any ongoing migration"),
         Command::new("coredump")
             .about("Create a coredump from VM")
             .arg(Arg::new("coredump_config").index(1).help("<file_path>")),
@@ -1059,9 +1144,11 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
             .arg(Arg::new("path").index(1).default_value("-")),
         Command::new("delete").about("Delete a VM"),
         Command::new("info").about("Info on the VM"),
+        Command::new("migration-progress"),
         Command::new("nmi").about("Trigger NMI"),
         Command::new("pause").about("Pause the VM"),
         Command::new("ping").about("Ping the VMM to check for API server availability"),
+        Command::new("post-migration-announce").about("Trigger post-migration announcements"),
         Command::new("power-button").about("Trigger a power button in the VM"),
         Command::new("reboot").about("Reboot the VM"),
         Command::new("receive-migration")
@@ -1069,7 +1156,7 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
             .arg(
                 Arg::new("receive_migration_config")
                     .index(1)
-                    .help("<receiver_url>"),
+                    .help(vmm::api::VmReceiveMigrationData::SYNTAX),
             ),
         Command::new("remove-device")
             .about("Remove VFIO and PCI device")
@@ -1132,6 +1219,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
         Command::new("resume").about("Resume the VM"),
         Command::new("send-migration")
             .about("Initiate a VM migration")
+            .arg(
+                Arg::new("dispatch")
+                    .long("dispatch")
+                    .help("just dispatch the migration without waiting for it to finish")
+                    .num_args(0),
+            )
             .arg(
                 Arg::new("send_migration_config")
                     .index(1)

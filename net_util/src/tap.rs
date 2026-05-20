@@ -13,6 +13,7 @@ use std::os::raw::*;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use libc::{__c_anonymous_ifr_ifru, ifreq};
+use log::debug;
 use thiserror::Error;
 use vmm_sys_util::ioctl::{ioctl_with_mut_ref, ioctl_with_ref, ioctl_with_val};
 
@@ -70,6 +71,16 @@ pub struct Tap {
     if_name: CString,
 }
 
+impl Drop for Tap {
+    fn drop(&mut self) {
+        debug!(
+            "Dropping Tap: if_name={}, FD={}",
+            self.if_name_as_str(),
+            self.tap_file.as_raw_fd()
+        );
+    }
+}
+
 impl PartialEq for Tap {
     fn eq(&self, other: &Tap) -> bool {
         self.if_name == other.if_name
@@ -117,6 +128,9 @@ fn ipv6_mask_to_prefix(mask: Ipv6Addr) -> Result<u8> {
 }
 
 impl Tap {
+    /// The default naming scheme for Tap devices that are created by Cloud Hypervisor.
+    pub const DEFAULT_NAME_SCHEME: &'static str = "vmtap%d";
+
     /// # Safety
     /// The caller should ensure to pass a valid file descriptor and valid
     /// arguments for the `ioctl()` syscall.
@@ -176,6 +190,7 @@ impl Tap {
         if fd < 0 {
             return Err(Error::OpenTun(IoError::last_os_error()));
         }
+        debug!("Opening Tap device with given name: ifname={if_name}, fd={fd}");
 
         // SAFETY: We just checked that the fd is valid.
         let tuntap = unsafe { File::from_raw_fd(fd) };
@@ -235,7 +250,7 @@ impl Tap {
 
     /// Create a new tap interface.
     pub fn new(num_queue_pairs: usize) -> Result<Tap> {
-        Self::open_named("vmtap%d", num_queue_pairs, None)
+        Self::open_named(Self::DEFAULT_NAME_SCHEME, num_queue_pairs, None)
     }
 
     pub fn from_tap_fd(fd: RawFd, num_queue_pairs: usize) -> Result<Tap> {

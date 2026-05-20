@@ -1,20 +1,21 @@
 // Copyright 2019 Intel Corporation. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{result, thread};
 
-use log::{error, info};
+use log::{error, info, warn};
 use net_util::{CtrlQueue, MacAddr, VirtioNetConfig, build_net_config_space};
 use seccompiler::SeccompAction;
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 use vhost::vhost_user::{FrontendReqHandler, VhostUserFrontend, VhostUserFrontendReqHandler};
 use virtio_bindings::virtio_net::{
-    VIRTIO_NET_F_CSUM, VIRTIO_NET_F_CTRL_VQ, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_ECN,
-    VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_GUEST_UFO,
-    VIRTIO_NET_F_HOST_ECN, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_TSO6, VIRTIO_NET_F_HOST_UFO,
-    VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF, VIRTIO_NET_F_MTU,
+    VIRTIO_NET_F_CSUM, VIRTIO_NET_F_CTRL_VQ, VIRTIO_NET_F_GUEST_ANNOUNCE, VIRTIO_NET_F_GUEST_CSUM,
+    VIRTIO_NET_F_GUEST_ECN, VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6,
+    VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_ECN, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_TSO6,
+    VIRTIO_NET_F_HOST_UFO, VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF, VIRTIO_NET_F_MTU,
+    VIRTIO_NET_F_STATUS, VIRTIO_NET_S_ANNOUNCE, VIRTIO_NET_S_LINK_UP,
 };
 use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::QueueT;
@@ -28,8 +29,8 @@ use crate::thread_helper::spawn_virtio_thread;
 use crate::vhost_user::vu_common_ctrl::{VhostUserConfig, VhostUserHandle};
 use crate::vhost_user::{DEFAULT_VIRTIO_FEATURES, Error, Result, VhostUserCommon, VhostUserState};
 use crate::{
-    ActivateResult, GuestMemoryMmap, GuestRegionMmap, NetCtrlEpollHandler,
-    VIRTIO_F_ACCESS_PLATFORM, VirtioCommon, VirtioDevice, VirtioDeviceType,
+    ActivateResult, GuestMemoryMmap, GuestRegionMmap, NetCtrlEpollHandler, PostMigrationAnnouncer,
+    VIRTIO_F_ACCESS_PLATFORM, VirtioCommon, VirtioDevice, VirtioDeviceType, VirtioInterrupt,
 };
 
 const DEFAULT_QUEUE_NUMBER: usize = 2;
@@ -43,6 +44,12 @@ pub struct Net {
     vu_common: VhostUserCommon,
     id: String,
     config: VirtioNetConfig,
+    /// Tracks whether the guest still needs to acknowledge a post-migration
+    /// announce request through the control queue.
+    announce_pending: Arc<AtomicBool>,
+    /// Generation counter used to invalidate active announcers created before a
+    /// reset or device teardown, so they stop sending notifications.
+    announce_generation: Arc<AtomicU64>,
     guest_memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     ctrl_queue_epoll_thread: Option<thread::JoinHandle<()>>,
     seccomp_action: SeccompAction,
@@ -51,6 +58,23 @@ pub struct Net {
 }
 
 impl Net {
+    /// Derive the guest-visible feature set from the backend-negotiated
+    /// features plus frontend-only bits that Cloud Hypervisor implements
+    /// locally, such as `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS`, and
+    /// `VIRTIO_NET_F_GUEST_ANNOUNCE`.
+    fn frontend_avail_features(backend_acked_features: u64) -> u64 {
+        let mut guest_avail_features = backend_acked_features | (1 << VIRTIO_NET_F_MAC);
+
+        // Guest announce is implemented by the frontend through config
+        // changes and the locally handled control queue.
+        if guest_avail_features & (1 << VIRTIO_NET_F_CTRL_VQ) != 0 {
+            guest_avail_features |= 1 << VIRTIO_NET_F_STATUS;
+            guest_avail_features |= 1 << VIRTIO_NET_F_GUEST_ANNOUNCE;
+        }
+
+        guest_avail_features
+    }
+
     /// Create a new vhost-user-net device
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -83,15 +107,18 @@ impl Net {
             acked_protocol_features,
             vu_num_queues,
             config,
+            announce_pending,
             paused,
             vring_bases,
         ) = if let Some(state) = state {
             info!("Restoring vhost-user-net {id}");
 
-            // The backend acknowledged features must not contain
-            // VIRTIO_NET_F_MAC since we don't expect the backend
-            // to handle it.
-            let backend_acked_features = state.acked_features & !(1 << VIRTIO_NET_F_MAC);
+            // The backend acknowledged features must not contain frontend-only
+            // bits since we don't expect the backend to handle them.
+            let backend_acked_features = state.acked_features
+                & !((1 << VIRTIO_NET_F_MAC)
+                    | (1 << VIRTIO_NET_F_STATUS)
+                    | (1 << VIRTIO_NET_F_GUEST_ANNOUNCE));
 
             vu.set_protocol_features_vhost_user(
                 backend_acked_features,
@@ -106,12 +133,15 @@ impl Net {
                 num_queues += 1;
             }
 
+            let announce_pending = (state.config.status & (VIRTIO_NET_S_ANNOUNCE as u16)) != 0;
+
             (
                 state.avail_features,
                 state.acked_features,
                 state.acked_protocol_features,
                 state.vu_num_queues,
                 state.config,
+                announce_pending,
                 true,
                 state.vring_bases,
             )
@@ -119,6 +149,7 @@ impl Net {
             // Filling device and vring features VMM supports.
             let mut avail_features = (1 << VIRTIO_NET_F_MRG_RXBUF)
                 | (1 << VIRTIO_NET_F_CTRL_VQ)
+                | (1 << VIRTIO_NET_F_GUEST_ANNOUNCE)
                 | DEFAULT_VIRTIO_FEATURES;
 
             if mtu.is_some() {
@@ -153,7 +184,7 @@ impl Net {
                 | VhostUserProtocolFeatures::LOG_SHMFD
                 | VhostUserProtocolFeatures::DEVICE_STATE;
 
-            let (mut acked_features, acked_protocol_features) =
+            let (acked_features, acked_protocol_features) =
                 vu.negotiate_features_vhost_user(avail_features, avail_protocol_features)?;
 
             let backend_num_queues =
@@ -179,12 +210,12 @@ impl Net {
                 num_queues += 1;
             }
 
-            // Make sure the virtio feature to set the MAC address is exposed to
-            // the guest, even if it hasn't been negotiated with the backend.
-            acked_features |= 1 << VIRTIO_NET_F_MAC;
+            // Build the feature set that gets exposed to the guest. Some frontend available
+            // features are dependent on the features the backend supports.
+            let guest_avail_features = Self::frontend_avail_features(acked_features);
 
             (
-                acked_features,
+                guest_avail_features,
                 // If part of the available features that have been acked,
                 // the PROTOCOL_FEATURES bit must be already set through
                 // the VIRTIO acked features as we know the guest would
@@ -193,6 +224,7 @@ impl Net {
                 acked_protocol_features,
                 vu_num_queues,
                 config,
+                false,
                 false,
                 None,
             )
@@ -220,6 +252,8 @@ impl Net {
                 ..Default::default()
             },
             config,
+            announce_pending: Arc::new(AtomicBool::new(announce_pending)),
+            announce_generation: Arc::new(AtomicU64::new(0)),
             guest_memory: None,
             ctrl_queue_epoll_thread: None,
             seccomp_action,
@@ -229,13 +263,60 @@ impl Net {
     }
 
     fn state(&self) -> std::result::Result<State, MigratableError> {
-        self.vu_common.state(self.config)
+        self.vu_common.state(self.config_with_status())
+    }
+
+    /// Return the guest-visible virtio-net config, recomputing `status` from the
+    /// current state of the device.
+    fn config_with_status(&self) -> VirtioNetConfig {
+        let mut config = self.config;
+
+        // We want to recompute the guest-visible status field from the current state of
+        // the device. We clear this field first to avoid showing stale data.
+        config.status = 0;
+
+        if self
+            .vu_common
+            .virtio_common
+            .feature_acked(VIRTIO_NET_F_STATUS.into())
+        {
+            config.status |= VIRTIO_NET_S_LINK_UP as u16;
+
+            if self.announce_pending.load(Ordering::Acquire) {
+                config.status |= VIRTIO_NET_S_ANNOUNCE as u16;
+            }
+        }
+
+        config
+    }
+
+    /// Re-notify the guest about a restored pending ANNOUNCE request once the
+    /// transport has installed an interrupt callback during activation.
+    fn notify_pending_guest_announce(&self) {
+        if self.announce_pending.load(Ordering::Acquire)
+            && self
+                .vu_common
+                .virtio_common
+                .feature_acked(VIRTIO_NET_F_GUEST_ANNOUNCE.into())
+            && let Some(interrupt_cb) = &self.vu_common.virtio_common.interrupt_cb
+        {
+            interrupt_cb
+                .trigger(crate::VirtioInterruptType::Config)
+                .inspect_err(|e| {
+                    warn!(
+                        "Unable to resend pending announce interrupt for virtio-net device {}: {e}",
+                        self.id
+                    );
+                })
+                .ok();
+        }
     }
 }
 
 impl Drop for Net {
     fn drop(&mut self) {
         self.vu_common.shutdown();
+        self.announce_generation.fetch_add(1, Ordering::AcqRel);
 
         if let Some(thread) = self.ctrl_queue_epoll_thread.take()
             && let Err(e) = thread.join()
@@ -267,7 +348,8 @@ impl VirtioDevice for Net {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        self.read_config_from_slice(self.config.as_slice(), offset, data);
+        let config = self.config_with_status();
+        self.read_config_from_slice(config.as_slice(), offset, data);
     }
 
     fn activate(&mut self, context: crate::device::ActivationContext) -> ActivateResult {
@@ -304,7 +386,7 @@ impl VirtioDevice for Net {
                 mem: mem.clone(),
                 kill_evt,
                 pause_evt,
-                ctrl_q: CtrlQueue::new(Vec::new()),
+                ctrl_q: CtrlQueue::new(Vec::new(), Arc::clone(&self.announce_pending)),
                 queue: ctrl_queue,
                 queue_evt: ctrl_queue_evt,
                 access_platform: None,
@@ -335,10 +417,12 @@ impl VirtioDevice for Net {
 
         let backend_req_handler: Option<FrontendReqHandler<BackendReqHandler>> = None;
 
-        // The backend acknowledged features must not contain VIRTIO_NET_F_MAC
-        // since we don't expect the backend to handle it.
-        let backend_acked_features =
-            self.vu_common.virtio_common.acked_features & !(1 << VIRTIO_NET_F_MAC);
+        // The backend acknowledged features must not contain frontend-only
+        // features since we don't expect the backend to handle them.
+        let backend_acked_features = self.vu_common.virtio_common.acked_features
+            & !((1 << VIRTIO_NET_F_MAC)
+                | (1 << VIRTIO_NET_F_STATUS)
+                | (1 << VIRTIO_NET_F_GUEST_ANNOUNCE));
 
         // Run a dedicated thread for handling potential reconnections with
         // the backend.
@@ -370,15 +454,22 @@ impl VirtioDevice for Net {
         )?;
         self.vu_common.epoll_thread = Some(epoll_threads.remove(0));
 
+        self.notify_pending_guest_announce();
         Ok(())
     }
 
     fn reset(&mut self) {
         self.vu_common.reset(&self.id);
+        self.announce_pending.store(false, Ordering::Release);
+        self.announce_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     fn shutdown(&mut self) {
         self.vu_common.shutdown();
+    }
+
+    fn post_migration_announcer(&self) -> Option<Box<dyn PostMigrationAnnouncer>> {
+        Some(Box::new(VhostUserNetPostMigrationAnnouncer::new(self)))
     }
 
     fn add_memory_region(
@@ -440,5 +531,279 @@ impl Migratable for Net {
 
     fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
         self.vu_common.complete_migration()
+    }
+}
+
+/// Announces this vhost-user-net device on the network.
+/// Most fields are cloned references to device state so retry rounds can run
+/// without borrowing the device itself.
+pub struct VhostUserNetPostMigrationAnnouncer {
+    id: String,
+    /// Remembers whether this device negotiated the guest-visible announce path.
+    guest_announce_negotiated: bool,
+    announce_pending: Arc<AtomicBool>,
+    announce_generation: Arc<AtomicU64>,
+    /// Captures the announce generation at creation time to invalidate stale
+    /// retry sessions after reset or teardown.
+    generation: u64,
+    interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
+}
+
+impl VhostUserNetPostMigrationAnnouncer {
+    pub fn new(dev: &Net) -> Self {
+        Self {
+            id: dev.id.clone(),
+            guest_announce_negotiated: dev
+                .vu_common
+                .virtio_common
+                .feature_acked(VIRTIO_NET_F_GUEST_ANNOUNCE.into()),
+            announce_pending: Arc::clone(&dev.announce_pending),
+            announce_generation: Arc::clone(&dev.announce_generation),
+            generation: dev.announce_generation.load(Ordering::Acquire),
+            interrupt_cb: dev.vu_common.virtio_common.interrupt_cb.clone(),
+        }
+    }
+}
+
+impl PostMigrationAnnouncer for VhostUserNetPostMigrationAnnouncer {
+    // Vhost-user-net relies on the guest-visible announce path: mark the
+    // request pending and re-trigger the config interrupt while this retry
+    // session remains valid.
+    fn announce(&mut self) {
+        // If the announce generations don't match, we don't send any announcements.
+        if self.announce_generation.load(Ordering::Acquire) != self.generation {
+            return;
+        }
+
+        if self.guest_announce_negotiated
+            && let Some(interrupt_cb) = &self.interrupt_cb
+        {
+            self.announce_pending.store(true, Ordering::Release);
+
+            interrupt_cb
+                .trigger(crate::VirtioInterruptType::Config)
+                .inspect_err(|e| {
+                    warn!(
+                        "Unable to send interrupt for virtio-net device {}: {e}",
+                        self.id
+                    );
+                })
+                .ok();
+        }
+    }
+}
+#[cfg(test)]
+mod unit_tests {
+    use std::mem::size_of;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use seccompiler::SeccompAction;
+    use virtio_bindings::virtio_net::{
+        VIRTIO_NET_F_GUEST_ANNOUNCE, VIRTIO_NET_F_STATUS, VIRTIO_NET_S_ANNOUNCE,
+        VIRTIO_NET_S_LINK_UP,
+    };
+    use vmm_sys_util::eventfd::EventFd;
+
+    use super::*;
+    use crate::device::{VirtioInterrupt, VirtioInterruptType};
+
+    struct TestInterrupt {
+        config_count: AtomicUsize,
+    }
+
+    impl TestInterrupt {
+        fn new() -> Self {
+            Self {
+                config_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl VirtioInterrupt for TestInterrupt {
+        fn trigger(
+            &self,
+            int_type: VirtioInterruptType,
+        ) -> std::result::Result<(), std::io::Error> {
+            if matches!(int_type, VirtioInterruptType::Config) {
+                self.config_count.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        }
+
+        fn set_notifier(
+            &self,
+            _int_type: u32,
+            _notifier: Option<EventFd>,
+            _vm: &dyn hypervisor::Vm,
+        ) -> std::io::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    fn test_net(acked_features: u64, interrupt_cb: Option<Arc<dyn VirtioInterrupt>>) -> Net {
+        Net {
+            vu_common: VhostUserCommon {
+                virtio_common: VirtioCommon {
+                    acked_features,
+                    interrupt_cb,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            id: "test-vu-net".to_string(),
+            config: VirtioNetConfig::default(),
+            announce_pending: Arc::new(AtomicBool::new(false)),
+            announce_generation: Arc::new(AtomicU64::new(0)),
+            guest_memory: None,
+            ctrl_queue_epoll_thread: None,
+            seccomp_action: SeccompAction::Allow,
+            exit_evt: EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            access_platform_enabled: false,
+        }
+    }
+
+    const STATUS_OFFSET: usize = std::mem::offset_of!(VirtioNetConfig, status);
+    fn read_status(device: &Net) -> u16 {
+        let mut data = vec![0; size_of::<VirtioNetConfig>()];
+        device.read_config(0, &mut data);
+
+        u16::from_le_bytes(
+            data[STATUS_OFFSET..STATUS_OFFSET + size_of::<u16>()]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_status_feature_reports_link_up() {
+        let net = test_net(1 << VIRTIO_NET_F_STATUS, None);
+
+        assert_eq!(read_status(&net), VIRTIO_NET_S_LINK_UP as u16);
+    }
+
+    #[test]
+    fn test_post_migration_sets_announce_and_triggers_config() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(
+            (1 << VIRTIO_NET_F_GUEST_ANNOUNCE) | (1 << VIRTIO_NET_F_STATUS),
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+
+        net.post_migration_announcer().unwrap().announce();
+
+        assert!(net.announce_pending.load(Ordering::Acquire));
+        assert_ne!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_frontend_avail_features_expose_guest_announce_and_status() {
+        let avail_features = Net::frontend_avail_features(1 << VIRTIO_NET_F_CTRL_VQ);
+
+        assert_ne!(avail_features & (1 << VIRTIO_NET_F_MAC), 0);
+        assert_ne!(avail_features & (1 << VIRTIO_NET_F_STATUS), 0);
+        assert_ne!(avail_features & (1 << VIRTIO_NET_F_GUEST_ANNOUNCE), 0);
+    }
+
+    #[test]
+    fn test_post_migration_without_feature_is_noop() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(0, Some(interrupt.clone() as Arc<dyn VirtioInterrupt>));
+
+        net.post_migration_announcer().unwrap().announce();
+
+        assert!(!net.announce_pending.load(Ordering::Acquire));
+        assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_restored_pending_announce_retriggers_config_interrupt() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(
+            (1 << VIRTIO_NET_F_GUEST_ANNOUNCE) | (1 << VIRTIO_NET_F_STATUS),
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+        net.announce_pending.store(true, Ordering::Release);
+
+        net.notify_pending_guest_announce();
+
+        assert!(net.announce_pending.load(Ordering::Acquire));
+        assert_ne!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_post_migration_with_ctrl_vq_but_without_guest_announce_is_noop() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let net = test_net(
+            1 << VIRTIO_NET_F_CTRL_VQ,
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+
+        net.post_migration_announcer().unwrap().announce();
+
+        assert!(!net.announce_pending.load(Ordering::Acquire));
+        assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_reset_clears_pending_announce() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let mut net = test_net(
+            (1 << VIRTIO_NET_F_GUEST_ANNOUNCE) | (1 << VIRTIO_NET_F_STATUS),
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+
+        net.post_migration_announcer().unwrap().announce();
+        assert!(net.announce_pending.load(Ordering::Acquire));
+
+        net.reset();
+
+        assert!(!net.announce_pending.load(Ordering::Acquire));
+        assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+    }
+
+    #[test]
+    fn test_reset_invalidates_old_announcer() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let mut net = test_net(
+            1 << VIRTIO_NET_F_GUEST_ANNOUNCE,
+            Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+        );
+        let mut announcer = net.post_migration_announcer().unwrap();
+
+        announcer.announce();
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+
+        net.reset();
+        announcer.announce();
+
+        assert!(!net.announce_pending.load(Ordering::Acquire));
+        assert_eq!(read_status(&net) & VIRTIO_NET_S_ANNOUNCE as u16, 0);
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_drop_invalidates_old_announcer() {
+        let interrupt = Arc::new(TestInterrupt::new());
+        let mut announcer = {
+            let net = test_net(
+                1 << VIRTIO_NET_F_GUEST_ANNOUNCE,
+                Some(interrupt.clone() as Arc<dyn VirtioInterrupt>),
+            );
+            let mut announcer = net.post_migration_announcer().unwrap();
+
+            announcer.announce();
+            assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
+
+            announcer
+        };
+
+        announcer.announce();
+
+        assert_eq!(interrupt.config_count.load(Ordering::Acquire), 1);
     }
 }

@@ -76,9 +76,10 @@
 
 use std::io::{Read, Write};
 
+use anyhow::anyhow;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use vm_memory::ByteValued;
+use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 use crate::MigratableError;
 use crate::bitpos_iterator::BitposIteratorExt;
@@ -108,34 +109,38 @@ use crate::bitpos_iterator::BitposIteratorExt;
 ///
 /// [live-migration protocol]: super::protocol
 #[repr(u16)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Copy, Clone, Default, PartialEq, Eq, Immutable, IntoBytes, KnownLayout, TryFromBytes,
+)]
 pub enum Command {
     #[default]
-    Invalid,
-    Start,
-    Config,
-    State,
-    Memory,
+    Invalid = 0,
+    Start = 1,
+    Config = 2,
+    State = 3,
+    Memory = 4,
     /// Finalizes the migration and resumes the VM on the destination.
     /// Sent when the source VM was running at migration time.
-    Complete,
-    Abandon,
-    MemoryFd,
+    Complete = 5,
+    Abandon = 6,
+    MemoryFd = 7,
     /// Finalizes the migration without resuming the VM on the destination.
     /// Sent when the source VM was paused at migration time.
-    CompletePaused,
+    CompletePaused = 9,
+    // We introduced this with discriminant eight but in the meantime,
+    // upstream introduced a new command with discriminant 8. For
+    // migration-compatibility we stick to this temporarily, until we have
+    // a solution for the discriminant collision.
+    KeepAlive = 8,
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
 pub struct Request {
     command: Command,
     padding: [u8; 6],
     length: u64, // Length of payload for command excluding the Request struct
 }
-
-// SAFETY: Request contains a series of integers with no implicit padding
-unsafe impl ByteValued for Request {}
 
 impl Request {
     pub fn new(command: Command, length: u64) -> Self {
@@ -180,6 +185,10 @@ impl Request {
         Self::new(Command::Abandon, 0)
     }
 
+    pub fn keep_alive() -> Self {
+        Self::new(Command::KeepAlive, 0)
+    }
+
     pub fn command(&self) -> Command {
         self.command
     }
@@ -189,38 +198,55 @@ impl Request {
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
-        let mut request = Request::default();
-        fd.read_exact(Self::as_mut_slice(&mut request))
-            .map_err(MigratableError::MigrateSocket)?;
+        /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
+        #[repr(C, align(8))]
+        struct RequestBuffer([u8; const { size_of::<Request>() }]);
+        const _: () = const {
+            // Check that the alignment of the buffer matches `Self`.
+            assert!(align_of::<RequestBuffer>() == align_of::<Request>());
+        };
+        let mut buffer = RequestBuffer([0; size_of::<Self>()]);
+        let RequestBuffer(request) = &mut buffer;
 
-        Ok(request)
+        loop {
+            fd.read_exact(request)
+                .map_err(MigratableError::MigrateSocket)?;
+
+            let request = Self::try_mut_from_bytes(request)
+                .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
+
+            // If we read a keep alive message, we throw it away and keep reading.
+            if request.command() == Command::KeepAlive {
+                *request = Request::default();
+                continue;
+            }
+            return Ok(*request);
+        }
     }
 
     pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
-        fd.write_all(Self::as_slice(self))
+        fd.write_all(self.as_bytes())
             .map_err(MigratableError::MigrateSocket)
     }
 }
 
 #[repr(u16)]
-#[derive(Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
 pub enum Status {
     #[default]
     Invalid,
     Ok,
     Error,
+    KeepAlive,
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
 pub struct Response {
     status: Status,
     padding: [u8; 6],
     length: u64, // Length of payload for command excluding the Response struct
 }
-
-// SAFETY: Response contains a series of integers with no implicit padding
-unsafe impl ByteValued for Response {}
 
 impl Response {
     pub fn new(status: Status, length: u64) -> Self {
@@ -239,6 +265,10 @@ impl Response {
         Self::new(Status::Error, 0)
     }
 
+    pub fn keep_alive() -> Self {
+        Self::new(Status::KeepAlive, 0)
+    }
+
     pub fn status(&self) -> Status {
         self.status
     }
@@ -248,31 +278,42 @@ impl Response {
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigratableError> {
-        let mut response = Response::default();
-        fd.read_exact(Self::as_mut_slice(&mut response))
-            .map_err(MigratableError::MigrateSocket)?;
+        /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
+        #[repr(C, align(8))]
+        struct ResponseBuffer([u8; const { size_of::<Response>() }]);
+        const _: () = const {
+            // Check that the alignment of the buffer matches `Self`.
+            assert!(align_of::<ResponseBuffer>() == align_of::<Response>());
+        };
+        let mut buffer = ResponseBuffer([0; size_of::<Self>()]);
+        let ResponseBuffer(response) = &mut buffer;
 
-        Ok(response)
+        loop {
+            fd.read_exact(response)
+                .map_err(MigratableError::MigrateSocket)?;
+
+            let response = Self::try_mut_from_bytes(response)
+                .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
+
+            // If we read a keep alive message, we throw it away and keep reading.
+            if response.status() == Status::KeepAlive {
+                *response = Response::default();
+                continue;
+            }
+            return Ok(*response);
+        }
     }
 
-    pub fn ok_or_abandon<T>(
-        self,
-        fd: &mut T,
-        error: MigratableError,
-    ) -> Result<Response, MigratableError>
-    where
-        T: Read + Write,
-    {
+    /// Return the response if its status is `Ok`; return the caller-provided error for any other status.
+    pub fn ok_or_error(self, error: MigratableError) -> Result<Response, MigratableError> {
         if self.status != Status::Ok {
-            Request::abandon().write_to(fd)?;
-            Response::read_from(fd)?;
             return Err(error);
         }
         Ok(self)
     }
 
     pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
-        fd.write_all(Self::as_slice(self))
+        fd.write_all(self.as_bytes())
             .map_err(MigratableError::MigrateSocket)
     }
 }

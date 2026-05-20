@@ -685,6 +685,11 @@ fn start_vmm(
         .map_err(Error::EventMonitorThread)?;
     }
 
+    info!(
+        "Cloud Hypervisor starting: build version: {}, date: {}",
+        env!("BUILD_VERSION"),
+        jiff::Zoned::now().strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
+    );
     event!("vmm", "starting");
 
     let vmm_thread_handle = vmm::start_vmm_thread(
@@ -975,6 +980,7 @@ mod unit_tests {
                 features: CpuFeatures::default(),
                 nested: true,
                 core_scheduling: CoreScheduling::Vm,
+                profile: Default::default(),
             },
             memory: MemoryConfig {
                 size: 536_870_912,
@@ -1017,6 +1023,7 @@ mod unit_tests {
                     file: None,
                     mode: ConsoleOutputMode::Null,
                     socket: None,
+                    url: None,
                 },
             },
             console: ConsoleConfig {
@@ -1024,6 +1031,7 @@ mod unit_tests {
                     file: None,
                     mode: ConsoleOutputMode::Tty,
                     socket: None,
+                    url: None,
                 },
                 pci_common: PciDeviceCommonConfig::default(),
             },

@@ -134,6 +134,10 @@ src $ ch-remote --api-socket=/tmp/api send-migration unix:/tmp/sock
 
 When the above commands completed, the VM should be successfully
 migrated to the destination machine without interrupting the workload.
+Cloud Hypervisor sends out RARP packages after the migration, to
+announce the new location of the VM to the network. For `virtio-net`
+devices, Cloud Hypervisor asks guests that negotiated
+`VIRTIO_NET_F_GUEST_ANNOUNCE` to also re-announce themselves.
 
 ### TCP Socket Migration
 
@@ -190,6 +194,40 @@ After completing the above commands, the source VM will be migrated to
 the destination host and continue running there. The source VM instance
 will terminate normally. All ongoing processes and connections within
 the VM should remain intact after the migration.
+Cloud Hypervisor sends out RARP packages after the migration, to
+announce the new location of the VM to the network. For `virtio-net`
+devices, Cloud Hypervisor asks guests that negotiated
+`VIRTIO_NET_F_GUEST_ANNOUNCE` to also re-announce themselves.
+
+#### Encryption
+
+TCP migration can be protected with TLS by passing `tls_dir=<path>` to
+both `receive-migration` and `send-migration`.
+
+The destination host needs a directory containing:
+
+- `server-cert.pem`: the certificate presented by the destination
+- `server-key.pem`: the private key for `server-cert.pem`
+
+The source host needs a directory containing:
+
+- `ca-cert.pem`: the CA certificate used to verify the destination
+  certificate
+
+Example receiver command:
+
+```console
+dst $ ch-remote --api-socket=/tmp/api receive-migration receiver_url=tcp:0.0.0.0:{port},tls_dir=/path/to/dst-tls
+```
+
+Example sender command:
+
+```console
+src $ ch-remote --api-socket=/tmp/api send-migration destination_url=tcp:{dst}:{port},tls_dir=/path/to/src-tls
+```
+
+TLS encryption is only supported with `tcp:<host>:<port>` migration
+URLs, not with local UNIX-socket migration.
 
 #### Migration Parameters
 

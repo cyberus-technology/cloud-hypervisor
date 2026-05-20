@@ -84,6 +84,7 @@ mod kvm {
     pub const KVM_CHECK_EXTENSION: u64 = 0xae03;
     pub const KVM_GET_VCPU_MMAP_SIZE: u64 = 0xae04;
     pub const KVM_CREATE_VCPU: u64 = 0xae41;
+    pub const KVM_X86_SET_MSR_FILTER: u64 = 0x4188aec6;
     pub const KVM_CREATE_IRQCHIP: u64 = 0xae60;
     pub const KVM_RUN: u64 = 0xae80;
     pub const KVM_SET_MP_STATE: u64 = 0x4004_ae99;
@@ -235,6 +236,7 @@ fn create_vmm_ioctl_seccomp_rule_common_kvm() -> Result<Vec<SeccompRule>, Backen
     Ok(or![
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CHECK_EXTENSION)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_DEVICE,)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, KVM_X86_SET_MSR_FILTER,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_IRQCHIP,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_VCPU)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_VM)?],
@@ -443,6 +445,7 @@ fn create_vmm_ioctl_seccomp_rule_kvm() -> Result<Vec<SeccompRule>, BackendError>
     const KVM_GET_FPU: u64 = 0x81a0_ae8c;
     const KVM_GET_LAPIC: u64 = 0x8400_ae8e;
     const KVM_GET_MSR_INDEX_LIST: u64 = 0xc004_ae02;
+    const KVM_GET_MSR_FEATURE_INDEX_LIST: u64 = 0xc004_ae0a;
     const KVM_GET_MSRS: u64 = 0xc008_ae88;
     const KVM_GET_SREGS: u64 = 0x8138_ae83;
     const KVM_GET_TSC_KHZ: u64 = 0xaea3;
@@ -472,6 +475,12 @@ fn create_vmm_ioctl_seccomp_rule_kvm() -> Result<Vec<SeccompRule>, BackendError>
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_FPU)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_LAPIC)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_MSR_INDEX_LIST)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            KVM_GET_MSR_FEATURE_INDEX_LIST
+        )?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_MSRS)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_SREGS)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_TSC_KHZ)?],
@@ -976,6 +985,9 @@ fn http_api_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError>
         (libc::SYS_sendto, vec![]),
         (libc::SYS_sigaltstack, vec![]),
         (libc::SYS_write, vec![]),
+        (libc::SYS_rt_sigprocmask, vec![]),
+        (libc::SYS_getcwd, vec![]),
+        (libc::SYS_clock_nanosleep, vec![]),
     ])
 }
 

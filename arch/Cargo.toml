@@ -5,29 +5,55 @@ name = "arch"
 rust-version.workspace = true
 version = "0.1.0"
 
+# TODO: Consider making this a binary of the main package instead
+[[bin]]
+name = "generate-cpu-profile"
+path = "src/bin/generate-cpu-profile.rs"
+required-features = ["cpu_profile_generation"]
+
 [features]
 default = []
 fw_cfg = []
 kvm = ["hypervisor/kvm"]
 sev_snp = []
 tdx = []
+# Currently cpu profiles can only be generated with KVM
+cpu_profile_generation = ["dep:clap", "kvm"]
 
 [dependencies]
 anyhow = { workspace = true }
 byteorder = { workspace = true }
+clap = { workspace = true, optional = true }
 hypervisor = { path = "../hypervisor" }
 libc = { workspace = true }
 linux-loader = { workspace = true, features = ["bzimage", "elf", "pe"] }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
+# We currently use this for (de-)serializing CPU profile data
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 vm-memory = { workspace = true, features = ["backend-bitmap", "backend-mmap"] }
 vmm-sys-util = { workspace = true, features = ["with-serde"] }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+flate2 = { workspace = true }
+
 [target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64"))'.dependencies]
 fdt_parser = { version = "0.1.5", package = "fdt" }
 vm-fdt = { workspace = true }
+
+[build-dependencies]
+anyhow = { workspace = true }
+flate2 = { workspace = true }
+prettyplease = "0.2.37"
+quote = "1.0.45"
+syn = "2.0.117"
+
+# Use this to test our custom serialization logic
+[dev-dependencies]
+proptest = "1.0.0"
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

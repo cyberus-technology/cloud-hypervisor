@@ -6,11 +6,11 @@
 
 //! # HTTP Endpoints of the Cloud Hypervisor API
 //!
-//! ## Special Handling for Devices Backed by Network File Descriptors (FDs) (e.g., virtio-net)
+//! ## Special Handling for Externally Provided File Descriptors (FDs) (e.g., virtio-net)
 //!
 //! Some of the HTTP handlers here implement special logic for devices
-//! **backed by network FDs** to enable live-migration, state save/resume
-//! (restore), and similar VM lifecycle events.
+//! **backed by externally opened FDs** to enable live-migration,
+//! state save/resume (restore), and similar VM lifecycle events.
 //!
 //! The utilized mechanism requires that the control software (e.g., libvirt)
 //! connects to Cloud Hypervisor by using a UNIX domain socket and that it
@@ -37,6 +37,7 @@
 use std::fs::File;
 use std::sync::mpsc::Sender;
 
+use log::info;
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -47,7 +48,8 @@ use crate::api::http::{EndpointHandler, HttpError, error_response};
 use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, NetConfig, VmAddDevice, VmAddFs,
     VmAddGenericVhostUser, VmAddNet, VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot,
-    VmConfig, VmCounters, VmDelete, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration,
+    VmCancelMigration, VmConfig, VmCounters, VmDelete, VmMigrationProgress, VmNmi, VmPause,
+    VmPostMigrationAnnounce, VmPowerButton, VmReboot, VmReceiveMigration, VmReceiveMigrationData,
     VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
     VmShutdown, VmSnapshot,
 };
@@ -414,8 +416,10 @@ vm_action_put_handler!(VmShutdown);
 vm_action_put_handler!(VmReboot);
 vm_action_put_handler!(VmPause);
 vm_action_put_handler!(VmResume);
+vm_action_put_handler!(VmPostMigrationAnnounce);
 vm_action_put_handler!(VmPowerButton);
 vm_action_put_handler!(VmNmi);
+vm_action_put_handler!(VmCancelMigration);
 
 vm_action_put_handler_body!(VmAddDevice);
 vm_action_put_handler_body!(AddDisk);
@@ -429,13 +433,11 @@ vm_action_put_handler_body!(VmRemoveDevice);
 vm_action_put_handler_body!(VmResizeDisk);
 vm_action_put_handler_body!(VmResizeZone);
 vm_action_put_handler_body!(VmSnapshot);
-vm_action_put_handler_body!(VmReceiveMigration);
-vm_action_put_handler_body!(VmSendMigration);
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 vm_action_put_handler_body!(VmCoredump);
 
-// Special handling for virtio-net devices backed by network FDs.
+// Special handling for externally provided FDs.
 // See module description for more info.
 impl PutHandler for VmAddNet {
     fn handle_request(
@@ -458,6 +460,63 @@ impl PutHandler for VmAddNet {
 }
 
 impl GetHandler for VmAddNet {}
+
+// Special handling for externally provided FDs.
+// See module description for more info.
+impl PutHandler for VmReceiveMigration {
+    fn handle_request(
+        &'static self,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+        body: &Option<Body>,
+        files: Vec<File>,
+    ) -> std::result::Result<Option<Body>, HttpError> {
+        if let Some(body) = body {
+            let mut net_cfg: VmReceiveMigrationData = serde_json::from_slice(body.raw())?;
+            if !net_cfg.net_fds.is_empty() {
+                let mut cfgs = net_cfg.net_fds.iter_mut().collect::<Vec<&mut _>>();
+                let cfgs = cfgs.as_mut_slice();
+                attach_fds_to_cfgs(files, cfgs)?;
+            }
+
+            self.send(api_notifier, api_sender, net_cfg)
+                .map_err(HttpError::ApiError)
+        } else {
+            Err(HttpError::BadRequest)
+        }
+    }
+}
+
+impl GetHandler for VmReceiveMigration {}
+
+// Special Handling for virtio-net Devices Backed by Network File Descriptors
+//
+// See above.
+impl PutHandler for VmSendMigration {
+    fn handle_request(
+        &'static self,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+        body: &Option<Body>,
+        _files: Vec<File>,
+    ) -> std::result::Result<Option<Body>, HttpError> {
+        if let Some(body) = body {
+            self.send(
+                api_notifier,
+                api_sender,
+                serde_json::from_slice(body.raw())?,
+            )
+            .inspect(|_| {
+                info!("live migration started (in background)");
+            })
+            .map_err(HttpError::ApiError)
+        } else {
+            Err(HttpError::BadRequest)
+        }
+    }
+}
+
+impl GetHandler for VmSendMigration {}
 
 impl PutHandler for VmResize {
     fn handle_request(
@@ -487,7 +546,7 @@ impl PutHandler for VmResize {
 
 impl GetHandler for VmResize {}
 
-// Special handling for virtio-net devices backed by network FDs.
+// Special handling for externally provided FDs.
 // See module description for more info.
 impl PutHandler for VmRestore {
     fn handle_request(
@@ -627,6 +686,32 @@ impl EndpointHandler for VmmShutdown {
                     Err(e) => error_response(e, StatusCode::InternalServerError),
                 }
             }
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+impl EndpointHandler for VmMigrationProgress {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Get => match crate::api::VmMigrationProgress
+                .send(api_notifier, api_sender, ())
+                .map_err(HttpError::ApiError)
+            {
+                Ok(info) => {
+                    let mut response = Response::new(Version::Http11, StatusCode::OK);
+                    let info_serialized = serde_json::to_string(&info).unwrap();
+
+                    response.set_body(Body::new(info_serialized));
+                    response
+                }
+                Err(e) => error_response(e, StatusCode::InternalServerError),
+            },
             _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
         }
     }

@@ -16,6 +16,8 @@ use thiserror::Error;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::CpuIdEntry;
 #[cfg(target_arch = "x86_64")]
+use crate::arch::x86::MsrEntry;
+#[cfg(target_arch = "x86_64")]
 use crate::cpu::CpuVendor;
 #[cfg(feature = "tdx")]
 use crate::kvm::TdxCapabilities;
@@ -59,6 +61,10 @@ pub enum HypervisorError {
     ///
     #[error("Failed to get the list of supported MSRs")]
     GetMsrList(#[source] anyhow::Error),
+    ///
+    /// Failed to get MSRs from the hypervisor.
+    #[error("Failed to get MSRs")]
+    GetMsr(#[source] anyhow::Error),
     ///
     /// API version is not compatible
     ///
@@ -128,6 +134,17 @@ pub trait Hypervisor: Send + Sync {
     /// Get the supported CpuID
     ///
     fn get_supported_cpuid(&self) -> Result<Vec<CpuIdEntry>>;
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Get the MSR-based features supported by the hardware and hypervisor
+    ///
+    fn get_msr_based_features(&self) -> Result<Vec<MsrEntry>>;
+
+    ///
+    /// Get the MSR indices supported by the hardware and hypervisor
+    ///
+    #[cfg(target_arch = "x86_64")]
+    fn get_msr_index_list(&self) -> Result<Vec<u32>>;
     ///
     /// Check particular extensions if any
     ///

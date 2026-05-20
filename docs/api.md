@@ -71,8 +71,8 @@ The Cloud Hypervisor API exposes the following actions through its endpoints:
 
 ##### Virtual Machine (VM) Actions
 
-| Action                             | Endpoint                | Request Body                    | Response Body            | Prerequisites                                          |
-| --------------------------------------- | ---------------------------- | --------------------------------- | ------------------------ | ------------------------------------------------------ |
+| Action                                  | Endpoint                | Request Body                    | Response Body            | Prerequisites                                          |
+|-----------------------------------------| ---------------------------- | --------------------------------- | ------------------------ | ------------------------------------------------------ |
 | Create the VM                           | `/vm.create`                 | `/schemas/VmConfig`               | N/A                      | The VM is not created yet                              |
 | Delete the VM                           | `/vm.delete`                 | N/A                               | N/A                      | N/A                                                    |
 | Boot the VM                             | `/vm.boot`                   | N/A                               | N/A                      | The VM is created but not booted                       |
@@ -81,6 +81,7 @@ The Cloud Hypervisor API exposes the following actions through its endpoints:
 | Trigger power button of the VM          | `/vm.power-button`           | N/A                               | N/A                      | The VM is booted                                       |
 | Pause the VM                            | `/vm.pause`                  | N/A                               | N/A                      | The VM is booted                                       |
 | Resume the VM                           | `/vm.resume`                 | N/A                               | N/A                      | The VM is paused                                       |
+| Trigger post-migration announce         | `/vm.post-migration-announce` | N/A                       | N/A                      | The VM is booted and not paused                        |
 | Take a snapshot of the VM               | `/vm.snapshot`               | `/schemas/VmSnapshotConfig`       | N/A                      | The VM is paused                                       |
 | Perform a coredump of the VM*           | `/vm.coredump`               | `/schemas/VmCoredumpData`         | N/A                      | The VM is paused                                       |
 | Restore the VM from a snapshot          | `/vm.restore`                | `/schemas/RestoreConfig`          | N/A                      | The VM is created but not booted                       |

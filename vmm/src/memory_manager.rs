@@ -19,7 +19,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::{ffi, result, thread};
 
 use acpi_tables::{Aml, aml};
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use arch::RegionType;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
@@ -439,6 +439,10 @@ pub enum Error {
     /// Memory size is misaligned with default page size or its hugepage size
     #[error("Memory size is misaligned with default page size or its hugepage size")]
     MisalignedMemorySize,
+
+    /// Failed to prefault memory
+    #[error("Failed to prefault memory")]
+    PrefaultMemory(#[source] io::Error),
 }
 
 impl From<UffdError> for Error {
@@ -1571,7 +1575,6 @@ impl MemoryManager {
                 .filter(|r| r.2 == RegionType::Ram)
                 .map(|r| (r.0, r.1))
                 .collect();
-
             let arch_mem_regions: Vec<ArchMemRegion> = arch_mem_regions
                 .iter()
                 .map(|(a, b, c)| ArchMemRegion {
@@ -1932,8 +1935,8 @@ impl MemoryManager {
             mmap_flags |= libc::MAP_SHARED;
             Some(Self::create_anonymous_file(size, hugepages, hugepage_size)?)
         } else {
-            mmap_flags |= libc::MAP_PRIVATE;
-            Some(Self::create_anonymous_file(size, hugepages, hugepage_size)?)
+            mmap_flags |= libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+            None
         };
 
         let region = MmapRegion::build(fo, size, libc::PROT_READ | libc::PROT_WRITE, mmap_flags)
@@ -1967,6 +1970,10 @@ impl MemoryManager {
             // MPOL_BIND is the selected mode as it specifies a strict policy
             // that restricts memory allocation to the nodes specified in the
             // nodemask.
+            info!(
+                "Creating raw memory region: host-addr={:018x}, len={len}, mode={mode}, host-node={node}",
+                addr as u64
+            );
             Self::mbind(addr, len, mode, &nodemask, maxnode, flags)
                 .map_err(Error::ApplyNumaPolicy)?;
         }
@@ -1988,29 +1995,49 @@ impl MemoryManager {
             let remainder = num_pages % num_threads;
 
             let barrier = Arc::new(Barrier::new(num_threads));
-            thread::scope(|s| {
+            thread::scope(|s| -> Result<(), Error> {
                 let r = &region;
+                let mut handles = Vec::new();
                 for i in 0..num_threads {
                     let barrier = Arc::clone(&barrier);
-                    s.spawn(move || {
-                        // Wait until all threads have been spawned to avoid contention
-                        // over mmap_sem between thread stack allocation and page faulting.
-                        barrier.wait();
-                        let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
-                        let offset =
-                            page_size * ((i * pages_per_thread) + std::cmp::min(i, remainder));
-                        // SAFETY: FFI call with correct arguments
-                        let ret = unsafe {
-                            let addr = r.as_ptr().add(offset);
-                            libc::madvise(addr.cast(), pages * page_size, libc::MADV_POPULATE_WRITE)
-                        };
-                        if ret != 0 {
-                            let e = io::Error::last_os_error();
-                            warn!("Failed to prefault pages: {e}");
-                        }
-                    });
+                    let h: thread::ScopedJoinHandle<'_, Result<(), io::Error>> =
+                        s.spawn(move || {
+                            // Wait until all threads have been spawned to avoid contention
+                            // over mmap_sem between thread stack allocation and page faulting.
+                            barrier.wait();
+                            let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
+                            let offset =
+                                page_size * ((i * pages_per_thread) + std::cmp::min(i, remainder));
+                            // SAFETY: FFI call with correct arguments
+                            let ret = unsafe {
+                                let addr = r.as_ptr().add(offset);
+                                libc::madvise(
+                                    addr.cast(),
+                                    pages * page_size,
+                                    libc::MADV_POPULATE_WRITE,
+                                )
+                            };
+                            if ret != 0 {
+                                let e = io::Error::last_os_error();
+                                warn!("Failed to prefault pages: {e}");
+                                return Err(e);
+                            }
+                            Ok(())
+                        });
+                    handles.push(h);
                 }
-            });
+
+                for handle in handles {
+                    handle
+                        .join()
+                        .map_err(|_| {
+                            Error::PrefaultMemory(io::Error::other("Prefault thread died"))
+                        })?
+                        .map_err(Error::PrefaultMemory)?;
+                }
+
+                Ok(())
+            })?;
         }
 
         info!(
@@ -3159,7 +3186,8 @@ impl Transportable for MemoryManager {
             .write(true)
             .create_new(true)
             .open(&memory_file_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            .context("Error creating snapshot file for memory")
+            .map_err(MigratableError::MigrateSend)?;
 
         let total_len: u64 = self
             .snapshot_memory_ranges
@@ -3221,7 +3249,8 @@ impl Transportable for MemoryManager {
                             &mut memory_file,
                             (range.length - offset) as usize,
                         )
-                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+                        .context("Error writing guest memory to snapshot file")
+                        .map_err(MigratableError::MigrateSend)?;
                     offset += bytes_written as u64;
                     if offset == range.length {
                         break;
@@ -3243,9 +3272,10 @@ impl Migratable for MemoryManager {
     // Just before we do a bulk copy we want to start/clear the dirty log so that
     // pages touched during our bulk copy are tracked.
     fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
-        self.vm.start_dirty_log().map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error starting VM dirty log {e}"))
-        })?;
+        self.vm
+            .start_dirty_log()
+            .context("Error starting VM dirty log")
+            .map_err(MigratableError::MigrateSend)?;
 
         for r in self.guest_memory.memory().iter() {
             (**r).bitmap().reset();
@@ -3255,9 +3285,10 @@ impl Migratable for MemoryManager {
     }
 
     fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
-        self.vm.stop_dirty_log().map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error stopping VM dirty log {e}"))
-        })?;
+        self.vm
+            .stop_dirty_log()
+            .context("Error stopping VM dirty log")
+            .map_err(MigratableError::MigrateSend)?;
 
         Ok(())
     }
@@ -3267,9 +3298,11 @@ impl Migratable for MemoryManager {
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
         let mut table = MemoryRangeTable::default();
         for r in &self.guest_ram_mappings {
-            let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.gpa, r.size).map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {e}"))
-            })?;
+            let vm_dirty_bitmap = self
+                .vm
+                .get_dirty_log(r.slot, r.gpa, r.size)
+                .context("Error getting VM dirty log")
+                .map_err(MigratableError::MigrateSend)?;
             let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
             {
                 Some(region) => {

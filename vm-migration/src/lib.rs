@@ -15,7 +15,10 @@ use crate::protocol::MemoryRangeTable;
 
 mod bitpos_iterator;
 mod context;
+pub mod keep_alive_stream;
+pub mod progress;
 pub mod protocol;
+pub mod tls;
 
 #[derive(Error, Debug)]
 pub enum UffdError {
@@ -48,7 +51,6 @@ pub enum UffdError {
     #[error("Handler failed after startup")]
     HandlerFailed(#[source] std::io::Error),
 }
-
 #[derive(Error, Debug)]
 pub enum MigratableError {
     #[error("Failed to pause migratable component")]
@@ -84,17 +86,29 @@ pub enum MigratableError {
     #[error("Failed to retrieve dirty ranges for migratable component")]
     DirtyLog(#[source] anyhow::Error),
 
+    #[error("Failed to cancel migration")]
+    CancelMigration(#[source] anyhow::Error),
+
     #[error("Failed to start migration for migratable component")]
     StartMigration(#[source] anyhow::Error),
 
     #[error("Failed to complete migration for migratable component")]
     CompleteMigration(#[source] anyhow::Error),
 
+    #[error("Failed to continue the migration as it was cancelled")]
+    Cancelled,
+
     #[error("Failed to release a disk lock")]
     UnlockError(#[source] anyhow::Error),
 
     #[error("Lifecycle operation skipped for disconnected component {0}")]
     DeviceDisconnected(String),
+
+    #[error("Failed to deserialize network data")]
+    DeserializeError(#[source] anyhow::Error),
+
+    #[error("Error setting up a TLS-encrypted connection")]
+    Tls(#[source] tls::TlsError),
 }
 
 /// A Pausable component can be paused and resumed.

@@ -29,9 +29,10 @@ use self::http_endpoint::{VmActionHandler, VmCreate, VmInfo, VmmPing, VmmShutdow
 use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
-    VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCounters, VmDelete, VmNmi,
-    VmPause, VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk,
-    VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
+    VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
+    VmDelete, VmMigrationProgress, VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton,
+    VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore,
+    VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::landlock::Landlock;
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
@@ -274,12 +275,24 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
         Box::new(VmActionHandler::new(&VmResume)),
     );
     r.routes.insert(
+        endpoint!("/vm.post-migration-announce"),
+        Box::new(VmActionHandler::new(&VmPostMigrationAnnounce)),
+    );
+    r.routes.insert(
         endpoint!("/vm.send-migration"),
         Box::new(VmActionHandler::new(&VmSendMigration)),
     );
     r.routes.insert(
+        endpoint!("/vm.cancel-migration"),
+        Box::new(VmActionHandler::new(&VmCancelMigration)),
+    );
+    r.routes.insert(
         endpoint!("/vm.shutdown"),
         Box::new(VmActionHandler::new(&VmShutdown)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.migration-progress"),
+        Box::new(VmMigrationProgress {}),
     );
     r.routes.insert(
         endpoint!("/vm.snapshot"),
