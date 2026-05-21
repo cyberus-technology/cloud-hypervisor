@@ -1,0 +1,72 @@
+name: Flake bump auto approve
+on:
+  pull_request:
+    paths:
+      - 'flake.lock'
+    branches:
+      - gardenlinux
+
+jobs:
+  gitlint:
+    name: Flake bump auto approve
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install --upgrade gitlint
+    # this rule checks the prerequisits and write the exit code in its output
+    - name: Lint git commit messages
+      id: gitlint
+      run: |
+        set +e
+        gitlint --commits origin/$GITHUB_BASE_REF.. -C .gitlint_auto_approve
+        code=$?
+        if [ $code -eq 0 ]; then
+          echo "this merge request is eligible for a flake bump auto approve and merge"
+        else
+          echo "this merge request will not be automatically approved."
+        fi
+        echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+        exit 0
+    # the following steps only run if gitlint run successful
+    - name: Create variables
+      if: steps.gitlint.outputs.exit_code == '0'
+      id: create_variable
+      run: |
+        REPO=$(echo ${GITHUB_REPOSITORY} | cut -f 2 -d '/')
+        OWNER=$(echo ${GITHUB_REPOSITORY} | cut -f 1 -d '/')
+        echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+        echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+    - name: Generate token
+      if: steps.gitlint.outputs.exit_code == '0' && steps.create_variable.outputs.repo != ''
+      id: generate_token
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ secrets.GH_AUTO_APPROVE_APP_ID }}
+        private-key: ${{ secrets.GH_AUTO_APPROVE_APP_PRIVATE_KEY }}
+        owner: ${{ steps.create_variable.outputs.owner }}
+        repositories: ${{ steps.create_variable.outputs.repo }}
+    - name: Merge Pull request
+      if: steps.gitlint.outputs.exit_code == '0' && steps.generate_token.outputs.token != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+      run: |
+        # GitHub CLI api
+        # https://cli.github.com/manual/gh_api
+        gh api \
+          --method PUT \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2026-03-10" \
+          /repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.number }}/merge \
+          -f 'merge_method=rebase'
