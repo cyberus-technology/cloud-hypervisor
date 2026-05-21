@@ -462,6 +462,21 @@ jobs:
         run: cargo build --locked --all --release --target=${{ matrix.target }}
       - name: Check build did not modify any files
         run: test -z "$(git status --porcelain)"
+  integration-x86-64-pr:
+    name: integration-x86-64-pr
+    needs: [preflight, dco, quality, build]
+    if: >-
+      needs.preflight.outputs.full == 'true' && needs.dco.result == 'success' && needs.quality.result == 'success' && needs.build.result == 'success'
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Run unit tests
+        run: scripts/dev_cli.sh tests --unit --libc gnu
+
   # The single required-status check. Branch protection requires this one job.
   all-green:
     name: all-green
@@ -473,6 +488,7 @@ jobs:
       - fuzz-build
       - gitlint
       - hadolint
+      - integration-x86-64-pr
       - openapi
       - package-consistency
       - preflight
