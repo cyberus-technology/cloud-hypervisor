@@ -1658,15 +1658,12 @@ impl Vmm {
             };
 
             ctx.update_metrics_before_transfer(iteration_begin, &iteration_table);
-            // Update before we might exit the loop.
+            // Update before we either exit the loop or transfer memory
             update_migration_progress(ctx, vm);
             if is_converged(ctx)? {
                 info!("Precopy converged: {ctx}");
                 break Ok(iteration_table);
             }
-
-            // Update with new metrics before transmission.
-            update_migration_progress(ctx, vm);
 
             // Send the current dirty pages
             let transfer_begin = Instant::now();
