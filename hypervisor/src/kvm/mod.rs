@@ -1318,7 +1318,7 @@ impl vm::Vm for KvmVm {
     ///
     fn start_dirty_log(&self) -> vm::Result<()> {
         let dirty_log_slots = self.dirty_log_slots.read().unwrap();
-        for (_, s) in dirty_log_slots.iter() {
+        for s in dirty_log_slots.values() {
             let region = kvm_userspace_memory_region2 {
                 slot: s.slot,
                 guest_phys_addr: s.guest_phys_addr,
@@ -1344,7 +1344,7 @@ impl vm::Vm for KvmVm {
     ///
     fn stop_dirty_log(&self) -> vm::Result<()> {
         let dirty_log_slots = self.dirty_log_slots.read().unwrap();
-        for (_, s) in dirty_log_slots.iter() {
+        for s in dirty_log_slots.values() {
             let region = kvm_userspace_memory_region2 {
                 slot: s.slot,
                 guest_phys_addr: s.guest_phys_addr,
