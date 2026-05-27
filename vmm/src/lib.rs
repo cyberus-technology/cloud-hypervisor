@@ -1596,6 +1596,12 @@ impl Vmm {
         postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<MemoryRangeTable /* remaining */, MigratableError> {
+        let total_memory_size_bytes = vm
+            .memory_range_table()?
+            .ranges()
+            .iter()
+            .map(|range| range.length)
+            .sum::<u64>();
         let update_migration_progress = |s: &mut MemoryMigrationContext, vm: &Vm| {
             let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
             lock.as_mut()
@@ -1605,7 +1611,7 @@ impl Vmm {
                     Some(MemoryTransmissionInfo {
                         memory_iteration: s.iteration as u64,
                         memory_transmission_bps: s.current_iteration_total_bytes,
-                        memory_bytes_total: s.bandwidth_bytes_per_second as u64,
+                        memory_bytes_total: total_memory_size_bytes,
                         memory_bytes_transmitted: s.total_sent_bytes,
                         memory_pages_4k_transmitted: s.total_sent_bytes.div_ceil(PAGE_SIZE as u64),
                         memory_pages_4k_remaining_iteration: s
