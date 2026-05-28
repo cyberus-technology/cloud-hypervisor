@@ -1040,6 +1040,7 @@ fn event_monitor_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendE
         (libc::SYS_prctl, vec![]),
         (libc::SYS_sched_yield, vec![]),
         (libc::SYS_write, vec![]),
+        (libc::SYS_madvise, vec![]),
     ])
 }
 
