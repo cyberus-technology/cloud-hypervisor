@@ -901,8 +901,7 @@ impl PlatformConfig {
         let oem_strings = parser
             .convert::<StringList>("oem_strings")
             .map_err(Error::ParsePlatform)?
-            .map(|v| v.0)
-            .unwrap_or_default();
+            .map(|v| v.0);
         let iommufd = parser
             .convert::<Toggle>("iommufd")
             .map_err(Error::ParsePlatform)?
@@ -5049,7 +5048,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             iommu_address_width_bits: MAX_IOMMU_ADDRESS_WIDTH_BITS,
             serial_number: None,
             uuid: None,
-            oem_strings: Vec::new(),
+            oem_strings: None,
             iommufd: false,
             vfio_p2p_dma: default_platformconfig_vfio_p2p_dma(),
             #[cfg(feature = "tdx")]
