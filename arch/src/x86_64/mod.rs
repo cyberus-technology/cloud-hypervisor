@@ -36,7 +36,7 @@ use linux_loader::loader::elf::start_info::{
 use log::{debug, error, info, trace};
 pub use msr_filter::{MAX_BITMAP_SIZE, filter_denied_msrs};
 use serde::{Deserialize, Serialize};
-pub use smbios::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};
+pub use smbios::SmbiosConfig;
 use thiserror::Error;
 use vm_memory::{
     Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
