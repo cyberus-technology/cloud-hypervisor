@@ -117,7 +117,9 @@ pub enum FwCfgContent {
     Bytes(Vec<u8>),
     Slice(&'static [u8]),
     File(u64, File),
+    U64(u64),
     U32(u32),
+    U16(u16),
 }
 
 struct FwCfgContentAccess<'a> {
@@ -140,7 +142,15 @@ impl Read for FwCfgContentAccess<'_> {
                 Some(mut s) => s.read(buf),
                 None => Err(ErrorKind::UnexpectedEof)?,
             },
+            FwCfgContent::U64(n) => match n.to_le_bytes().get(self.offset as usize..) {
+                Some(mut s) => s.read(buf),
+                None => Err(ErrorKind::UnexpectedEof)?,
+            },
             FwCfgContent::U32(n) => match n.to_le_bytes().get(self.offset as usize..) {
+                Some(mut s) => s.read(buf),
+                None => Err(ErrorKind::UnexpectedEof)?,
+            },
+            FwCfgContent::U16(n) => match n.to_le_bytes().get(self.offset as usize..) {
                 Some(mut s) => s.read(buf),
                 None => Err(ErrorKind::UnexpectedEof)?,
             },
@@ -162,7 +172,9 @@ impl FwCfgContent {
                 .ok_or::<IoError>(ErrorKind::UnexpectedEof.into())?
                 as usize,
             FwCfgContent::Slice(s) => s.len(),
+            FwCfgContent::U64(n) => size_of_val(n),
             FwCfgContent::U32(n) => size_of_val(n),
+            FwCfgContent::U16(n) => size_of_val(n),
         };
         u32::try_from(ret).map_err(|_| ErrorKind::InvalidInput.into())
     }
