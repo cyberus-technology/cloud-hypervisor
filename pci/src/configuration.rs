@@ -653,9 +653,9 @@ impl PciConfiguration {
         let mut mask = self.writable_bits[reg_idx];
 
         if (BAR0_REG..BAR0_REG + NUM_BAR_REGS).contains(&reg_idx) {
-            // Handle very specific case where the BAR is being written with
-            // all 1's to retrieve the BAR size during next BAR reading.
-            if value == 0xffff_ffff {
+            // Handle the case where all BAR address bits are set to retrieve
+            // the BAR size during the next BAR read.
+            if self.is_bar_size_probe(reg_idx, value) {
                 mask &= self.bars[reg_idx - 4].size;
             }
         } else if reg_idx == ROM_BAR_REG {
@@ -983,7 +983,7 @@ impl PciConfiguration {
         let mask = self.writable_bits[reg_idx];
         if (BAR0_REG..BAR0_REG + NUM_BAR_REGS).contains(&reg_idx) {
             // Ignore the case where the BAR size is being asked for.
-            if value == 0xffff_ffff {
+            if self.is_bar_size_probe(reg_idx, value) {
                 return None;
             }
 
@@ -1084,6 +1084,21 @@ impl PciConfiguration {
         }
 
         None
+    }
+
+    fn is_bar_size_probe(&self, reg_idx: usize, value: u32) -> bool {
+        if !(BAR0_REG..BAR0_REG + NUM_BAR_REGS).contains(&reg_idx) {
+            return false;
+        }
+
+        let bar_idx = reg_idx - BAR0_REG;
+        match self.bars[bar_idx].r#type {
+            Some(PciBarRegionType::IoRegion) => value & BAR_IO_ADDR_MASK == BAR_IO_ADDR_MASK,
+            Some(PciBarRegionType::Memory32BitRegion | PciBarRegionType::Memory64BitRegion) => {
+                value & BAR_MEM_ADDR_MASK == BAR_MEM_ADDR_MASK
+            }
+            None => self.bars[bar_idx].used && value == 0xffff_ffff,
+        }
     }
 
     pub(crate) fn pending_bar_reprogram(&self) -> Vec<BarReprogrammingParams> {
@@ -1342,5 +1357,38 @@ mod unit_tests {
         assert_eq!(class_code, 0x04);
         assert_eq!(subclass, 0x01);
         assert_eq!(prog_if, 0x5a);
+    }
+
+    #[test]
+    fn mem_bar_size_probe_ignores_all_address_bits_set() {
+        let mut cfg = PciConfiguration::new(
+            0x1234,
+            0x5678,
+            0x1,
+            PciClassCode::MultimediaController,
+            &PciMultimediaSubclass::AudioController,
+            None,
+            PciHeaderType::Device,
+            0xABCD,
+            0x2468,
+            None,
+            None,
+        );
+        let bar = PciBarConfiguration::new(
+            0,
+            0x80000,
+            PciBarRegionType::Memory32BitRegion,
+            PciBarPrefetchable::NotPrefetchable,
+        )
+        .set_address(0xc000_0000);
+
+        cfg.add_pci_bar(&bar).unwrap();
+        cfg.write_reg(COMMAND_REG, COMMAND_REG_MEMORY_SPACE_MASK);
+
+        let reprogram = cfg.write_config_register(BAR0_REG, 0, &0xffff_fff0u32.to_le_bytes());
+
+        assert!(reprogram.is_empty());
+        assert_eq!(cfg.read_reg(BAR0_REG), 0xfff8_0000);
+        assert_eq!(cfg.get_bar_addr(0), 0xc000_0000);
     }
 }
