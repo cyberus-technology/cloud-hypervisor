@@ -3,7 +3,7 @@
 
   inputs = {
     dried-nix-flakes.url = "github:cyberus-technology/dried-nix-flakes";
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-25.11";
+    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-26.05";
     # Convenient Nix tooling to build Rust projects.
     crane.url = "github:ipetkov/crane/master";
     # Get proper Rust toolchain, independent of pkgs.rustc.
