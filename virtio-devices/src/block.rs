@@ -150,6 +150,9 @@ pub enum MirrorError {
     /// Indicates that completion was requested before the mirror became ready.
     #[error("Mirror is not yet ready, cannot complete")]
     NotReady,
+    /// Indicates that cancellation was requested after completion started.
+    #[error("Mirror completion already in progress")]
+    CompletionInProgress,
     /// Reports a failure to register the new disk notifier.
     #[error("Failed to register new disk notifier")]
     RegisterNotifier(#[source] EpollHelperError),
@@ -1672,6 +1675,54 @@ impl Block {
         self.wait_for_mirror_queue_command_acks(&ack_rx)
     }
 
+    /// Cancels an active mirror and reverts the device to the source disk.
+    ///
+    /// Transitions the mirror to [`MirrorPhase::Cancelling`] to mark that
+    /// cancellation has started, reverts every virtqueue worker to a plain
+    /// [`AsyncIo`] on the source, then joins the copy worker and releases the
+    /// destination.
+    ///
+    /// Returns [`MirrorError::NotActive`] when no mirror is active, and
+    /// [`MirrorError::CompletionInProgress`] once a completion has been
+    /// attempted, because a queue may already write to the destination only
+    /// and reverting would lose acknowledged guest writes.
+    ///
+    /// If the revert fails the mirror stays in [`MirrorPhase::Cancelling`]
+    /// with the handle held, so calling this again retries the revert and
+    /// finishes the cancellation.
+    ///
+    /// Blocks until the copy worker finishes its current block and joins,
+    /// which can stall on a slow or hung destination.
+    pub fn cancel_mirror(&mut self) -> MirrorResult<()> {
+        let state = self
+            .mirror_handle
+            .as_ref()
+            .ok_or(MirrorError::NotActive)?
+            .state
+            .clone();
+
+        match state.phase() {
+            MirrorPhase::Running
+            | MirrorPhase::Ready
+            | MirrorPhase::Failed(_)
+            | MirrorPhase::Cancelling => {}
+            MirrorPhase::Completing | MirrorPhase::Completed => {
+                return Err(MirrorError::CompletionInProgress);
+            }
+        }
+
+        state.transition_to_phase(MirrorPhase::Cancelling);
+        self.revert_queues_to_source()?;
+
+        if let Some(handle) = self.mirror_handle.take()
+            && let Err(e) = handle.copy_worker.join()
+        {
+            error!("copy worker thread panicked: {e:?}");
+        }
+
+        Ok(())
+    }
+
     /// Returns a snapshot of the current mirror progress.
     pub fn mirror_status(&self) -> Option<MirrorStatus> {
         self.mirror_handle
@@ -1687,13 +1738,24 @@ impl Block {
 
 impl Drop for Block {
     fn drop(&mut self) {
+        let mirror_handle = self.mirror_handle.take();
+        if let Some(handle) = mirror_handle.as_ref() {
+            // Cancelling is not possible once completion has started.
+            if matches!(
+                handle.state.phase(),
+                MirrorPhase::Running | MirrorPhase::Ready | MirrorPhase::Failed(_)
+            ) {
+                handle.state.transition_to_phase(MirrorPhase::Cancelling);
+            }
+        }
+
         if let Some(kill_evt) = self.common.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
             let _ = kill_evt.write(1);
         }
         self.common.wait_for_epoll_threads();
 
-        let Some(handle) = self.mirror_handle.take() else {
+        let Some(handle) = mirror_handle else {
             return;
         };
 
