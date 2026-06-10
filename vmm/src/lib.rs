@@ -2471,6 +2471,10 @@ impl RequestHandler for Vmm {
     fn vm_snapshot(&mut self, destination_url: &str) -> result::Result<(), VmError> {
         match self.vm {
             VmOwnership::Owned(ref mut vm) => {
+                if vm.any_active_block_mirrors() {
+                    return Err(VmError::ActiveBlockMirror);
+                }
+
                 // Drain console_info so that FDs are not reused
                 let _ = self.console_info.take();
                 vm.snapshot()
@@ -2563,6 +2567,7 @@ impl RequestHandler for Vmm {
 
     fn vm_shutdown(&mut self) -> result::Result<(), VmError> {
         let mut vm = self.vm.take_owned_or(VmError::VmNotRunning)?;
+        vm.cancel_block_mirrors();
         // Drain console_info so that the FDs are not reused
         let _ = self.console_info.take();
         let r = vm.shutdown();
@@ -2576,6 +2581,12 @@ impl RequestHandler for Vmm {
 
     fn vm_reboot(&mut self) -> result::Result<(), VmError> {
         event!("vm", "rebooting");
+
+        if let Some(vm) = self.vm.as_mut()
+            && vm.any_active_block_mirrors()
+        {
+            return Err(VmError::ActiveBlockMirror);
+        }
 
         // Drop VM early to release disk locks and free other resources before
         // we reboot.
@@ -3237,8 +3248,14 @@ impl RequestHandler for Vmm {
         &mut self,
         send_data_migration: VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
-        match self.vm {
-            VmOwnership::Owned(_) => (),
+        match &self.vm {
+            VmOwnership::Owned(vm) => {
+                if vm.any_active_block_mirrors() {
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "Cannot start migration with active disk mirrors"
+                    )));
+                }
+            }
             VmOwnership::Migration { .. } => {
                 return Err(MigratableError::MigrateSend(anyhow!(
                     "There is already an ongoing migration"
