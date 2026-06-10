@@ -635,7 +635,8 @@ impl CopyWorker {
 
     /// Drives the block-by-block copy for predefined [`MirrorState::total_bytes`].
     ///
-    /// The caller records the result with [`MirrorState::finish_copy`].
+    /// Returns once all bytes are copied or the mirror left `Running`. The
+    /// caller records the result with [`MirrorState::finish_copy`].
     fn run(&mut self) -> io::Result<()> {
         let total_size = self.state.total_bytes;
         let max_length = self.block_size_bytes as u64;

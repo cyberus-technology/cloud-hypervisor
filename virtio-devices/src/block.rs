@@ -1737,6 +1737,56 @@ impl Block {
         self.wait_for_mirror_queue_command_acks(&ack_rx)
     }
 
+    /// Cancels an active mirror and reverts the device to the source disk.
+    ///
+    /// Drains the queues and stops new requests, transitions the mirror to
+    /// [`MirrorPhase::Cancelling`] to mark that cancellation has started,
+    /// reverts every virtqueue worker to a plain [`AsyncIo`] on the source,
+    /// then joins the copy worker and releases the destination.
+    ///
+    /// Returns [`MirrorError::NotActive`] when no mirror is active, and
+    /// [`MirrorError::CompletionInProgress`] once a completion has been
+    /// attempted, because a queue may already write to the destination only
+    /// and reverting would lose acknowledged guest writes.
+    ///
+    /// If the revert fails the mirror stays in [`MirrorPhase::Cancelling`]
+    /// with the handle held, so calling this again retries the revert and
+    /// finishes the cancellation.
+    ///
+    /// Blocks until the copy worker finishes its current block and joins,
+    /// which can stall on a slow or hung destination.
+    pub fn cancel_mirror(&mut self) -> MirrorResult<()> {
+        let state = &self
+            .mirror_handle
+            .as_ref()
+            .ok_or(MirrorError::NotActive)?
+            .state;
+
+        match state.phase() {
+            MirrorPhase::Running
+            | MirrorPhase::Ready
+            | MirrorPhase::Failed(_)
+            | MirrorPhase::Cancelling => {}
+            MirrorPhase::Completing | MirrorPhase::Completed => {
+                return Err(MirrorError::CompletionInProgress);
+            }
+        }
+
+        // Drain queues to avoid racing failures during cancellation.
+        self.drain_and_stall_queues()?;
+
+        state.transition_to_phase(MirrorPhase::Cancelling);
+        self.revert_queues_to_source()?;
+
+        if let Some(handle) = self.mirror_handle.take()
+            && let Err(e) = handle.copy_worker.join()
+        {
+            error!("copy worker thread panicked: {e:?}");
+        }
+
+        Ok(())
+    }
+
     /// Returns a snapshot of the current mirror progress.
     pub fn mirror_status(&self) -> Option<MirrorStatus> {
         self.mirror_handle
