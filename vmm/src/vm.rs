@@ -280,6 +280,9 @@ pub enum Error {
     #[error("Failed to complete disk mirror")]
     DiskMirrorComplete,
 
+    #[error("At least one disk mirror is active")]
+    ActiveBlockMirror,
+
     #[error("Cannot activate virtio devices")]
     ActivateVirtioDevices(#[source] DeviceManagerError),
 
@@ -3341,6 +3344,14 @@ impl Vm {
             .mirror_disk_complete(id)
             .map_err(Error::DeviceManager)?;
         Ok(())
+    }
+
+    /// Returns true if there is an active mirror in any of the block devices, false otherwise.
+    pub fn any_active_block_mirrors(&self) -> bool {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .any_active_block_mirrors()
     }
 
     /// Calls [`DeviceManager::post_migration_announce`].
