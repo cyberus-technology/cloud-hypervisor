@@ -33,9 +33,9 @@ use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
     VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
-    VmDelete, VmDiskMirrorComplete, VmDiskMirrorStart, VmDiskMirrorStatus, VmNmi, VmPause,
-    VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk,
-    VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
+    VmDelete, VmDiskMirrorCancel, VmDiskMirrorComplete, VmDiskMirrorStart, VmDiskMirrorStatus,
+    VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize,
+    VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::ValidationError;
 use crate::device_manager::DeviceManagerError;
@@ -137,7 +137,8 @@ fn api_error_status_code(error: &ApiError) -> StatusCode {
             | VmError::DeviceManager(
                 DeviceManagerError::UnknownDeviceId(_)
                 | DeviceManagerError::BlockMirrorNotActive(_)
-                | DeviceManagerError::BlockMirrorComplete(MirrorError::NotActive),
+                | DeviceManagerError::BlockMirrorComplete(MirrorError::NotActive)
+                | DeviceManagerError::BlockMirrorCancel(MirrorError::NotActive),
             ),
         ) => StatusCode::NotFound,
         Some(
@@ -150,6 +151,9 @@ fn api_error_status_code(error: &ApiError) -> StatusCode {
             | MirrorError::DestinationLock { .. }
             | MirrorError::DevicePaused
             | MirrorError::NotReady,
+        ))) => StatusCode::BadRequest,
+        Some(VmError::DeviceManager(DeviceManagerError::BlockMirrorCancel(
+            MirrorError::CompletionInProgress | MirrorError::DevicePaused,
         ))) => StatusCode::BadRequest,
         Some(VmError::ConfigValidation(e)) => match e {
             ValidationError::IdentifierNotUnique(_) | ValidationError::DuplicateDevicePath(_) => {
@@ -325,6 +329,10 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
     r.routes.insert(
         endpoint!("/vm.disk-mirror-complete"),
         Box::new(VmActionHandler::new(&VmDiskMirrorComplete)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-cancel"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorCancel)),
     );
     r.routes.insert(endpoint!("/vm.info"), Box::new(VmInfo {}));
     r.routes.insert(
@@ -760,6 +768,30 @@ mod tests {
         }
         assert_eq!(
             api_error_status_code(&ApiError::VmDiskMirrorComplete(VmError::VmMigrating)),
+            StatusCode::Conflict
+        );
+    }
+
+    #[test]
+    fn test_disk_mirror_cancel_error_codes() {
+        use block::error::BlockError;
+
+        for (error, expected) in [
+            (MirrorError::NotActive, StatusCode::NotFound),
+            (MirrorError::CompletionInProgress, StatusCode::BadRequest),
+            (MirrorError::DevicePaused, StatusCode::BadRequest),
+            (
+                MirrorError::Backend(BlockError::from_kind(BlockErrorKind::Io)),
+                StatusCode::InternalServerError,
+            ),
+        ] {
+            let error = ApiError::VmDiskMirrorCancel(VmError::DeviceManager(
+                DeviceManagerError::BlockMirrorCancel(error),
+            ));
+            assert_eq!(api_error_status_code(&error), expected, "{error:?}");
+        }
+        assert_eq!(
+            api_error_status_code(&ApiError::VmDiskMirrorCancel(VmError::VmMigrating)),
             StatusCode::Conflict
         );
     }
