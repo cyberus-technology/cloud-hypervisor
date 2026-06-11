@@ -705,6 +705,10 @@ pub enum DeviceManagerError {
     /// Reports a failure to complete block mirroring.
     #[error("Failed to complete block mirroring")]
     BlockMirrorComplete(#[source] MirrorError),
+
+    /// Cancelling the block mirror failed.
+    #[error("Failed to cancel block mirroring")]
+    BlockMirrorCancel(#[source] MirrorError),
 }
 
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
@@ -5456,6 +5460,24 @@ impl DeviceManager {
                 }
 
                 return Ok(());
+            }
+        }
+        Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))
+    }
+
+    /// Cancels the active block mirror for the disk identified by
+    /// `device_id`, reverting all virtqueue workers to the source disk
+    /// and releasing the destination.
+    ///
+    /// Returns an error if the disk is not attached, no mirror is active,
+    /// mirror completion has started, or reverting a virtqueue worker fails.
+    pub fn mirror_disk_cancel(&self, device_id: &str) -> DeviceManagerResult<()> {
+        for dev in &self.block_devices {
+            let mut disk = dev.lock().unwrap();
+            if disk.id() == device_id {
+                return disk
+                    .cancel_mirror()
+                    .map_err(DeviceManagerError::BlockMirrorCancel);
             }
         }
         Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))

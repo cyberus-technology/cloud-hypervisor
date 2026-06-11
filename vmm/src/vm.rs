@@ -280,6 +280,9 @@ pub enum Error {
     #[error("Failed to complete disk mirror")]
     DiskMirrorComplete,
 
+    #[error("Failed to cancel disk mirror")]
+    DiskMirrorCancel,
+
     #[error("At least one disk mirror is active")]
     ActiveBlockMirror,
 
@@ -3344,6 +3347,15 @@ impl Vm {
             .mirror_disk_complete(id)
             .map_err(Error::DeviceManager)?;
         Ok(())
+    }
+
+    /// Cancels the mirror for `id` and keeps its source backend.
+    pub fn mirror_disk_cancel(&self, id: &str) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_cancel(id)
+            .map_err(Error::DeviceManager)
     }
 
     /// Returns true if there is an active mirror in any of the block devices, false otherwise.

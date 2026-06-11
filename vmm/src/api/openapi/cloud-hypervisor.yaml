@@ -572,6 +572,26 @@ paths:
         500:
           description: The disk mirror could not be completed.
 
+  /vm.disk-mirror-cancel:
+    put:
+      summary: Cancel a disk mirror and keep the source disk
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorCancelData"
+        required: true
+      responses:
+        204:
+          description: The disk mirror was cancelled and the device keeps using the source.
+        400:
+          description: The mirror cannot be cancelled because completion is already in progress.
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        500:
+          description: The disk mirror could not be cancelled.
+
 components:
   schemas:
     VmmPingResponse:
@@ -1672,6 +1692,14 @@ components:
           type: string
 
     VmDiskMirrorCompleteData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
+          type: string
+
+    VmDiskMirrorCancelData:
       required:
         - id
       type: object

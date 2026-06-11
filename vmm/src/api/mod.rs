@@ -160,6 +160,10 @@ pub enum ApiError {
     #[error("Error completing disk mirror")]
     VmDiskMirrorComplete(#[source] VmError),
 
+    /// Error cancelling disk mirror
+    #[error("Error cancelling disk mirror")]
+    VmDiskMirrorCancel(#[source] VmError),
+
     /// The memory zone could not be resized.
     #[error("The memory zone could not be resized")]
     VmResizeZone(#[source] VmError),
@@ -259,6 +263,11 @@ pub struct VmDiskMirrorStatusData {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VmDiskMirrorCompleteData {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VmDiskMirrorCancelData {
     pub id: String,
 }
 
@@ -829,6 +838,8 @@ pub trait RequestHandler {
 
     fn vm_disk_mirror_status(&mut self, id: String) -> Result<Option<Vec<u8>>, VmError>;
     fn vm_disk_mirror_complete(&mut self, id: String) -> Result<(), VmError>;
+
+    fn vm_disk_mirror_cancel(&mut self, id: String) -> Result<(), VmError>;
 
     fn vm_add_device(&mut self, device_cfg: DeviceConfig) -> Result<Option<Vec<u8>>, VmError>;
 
@@ -1528,6 +1539,36 @@ impl ApiAction for VmDiskMirrorComplete {
             let response = vmm
                 .vm_disk_mirror_complete(data.id)
                 .map_err(ApiError::VmDiskMirrorComplete)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmDiskMirrorCancel;
+
+impl ApiAction for VmDiskMirrorCancel {
+    type RequestBody = VmDiskMirrorCancelData;
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            let response = vmm
+                .vm_disk_mirror_cancel(data.id)
+                .map_err(ApiError::VmDiskMirrorCancel)
                 .map(|_| ApiResponsePayload::Empty);
 
             response_sender
