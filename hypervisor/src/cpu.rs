@@ -338,6 +338,9 @@ pub enum HypervisorCpuError {
     GetNestedState(#[source] anyhow::Error),
     #[error("Failed to set nested guest state")]
     SetNestedState(#[source] anyhow::Error),
+
+    #[error("Failed to prefault guest memory")]
+    PrefaultMemory(#[source] anyhow::Error),
 }
 
 #[derive(Debug)]
@@ -618,4 +621,8 @@ pub trait Vcpu: Send + Sync {
     /// signal handler and only use it from there.
     #[cfg(feature = "kvm")]
     unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd;
+
+    fn prefault_memory(&self, _gpa: u64, _size: u64) -> Result<()> {
+        Ok(())
+    }
 }

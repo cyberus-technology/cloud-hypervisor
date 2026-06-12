@@ -245,6 +245,9 @@ pub enum Error {
 
     #[error("Error enabling core scheduling")]
     CoreScheduling(#[source] io::Error),
+
+    #[error("Error prefaulting guest memory")]
+    PrefaultGuestMemory(#[source] hypervisor::HypervisorCpuError),
 }
 pub type Result<T> = result::Result<T, Error>;
 

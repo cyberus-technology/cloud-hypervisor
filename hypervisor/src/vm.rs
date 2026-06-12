@@ -505,6 +505,12 @@ pub trait Vm: Send + Sync + Any {
     fn enable_x2apic_api(&self) -> Result<()> {
         unimplemented!("x2Apic is only supported on KVM/Linux hosts")
     }
+
+    /// Returns true if prefaulting memory into the level 2 page tables is supported
+    /// for this VM.
+    fn supports_prefault_memory(&self) -> bool {
+        false
+    }
 }
 
 pub trait VmOps: Send + Sync {

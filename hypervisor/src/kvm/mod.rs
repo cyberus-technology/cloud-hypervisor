@@ -17,6 +17,7 @@ use std::mem::offset_of;
 #[cfg(feature = "sev_snp")]
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
+use std::os::raw::c_ulong;
 #[cfg(any(feature = "kvm", feature = "sev_snp"))]
 use std::os::unix::io::AsRawFd;
 #[cfg(any(feature = "kvm", feature = "tdx"))]
@@ -34,11 +35,12 @@ use kvm_bindings::kvm_create_guest_memfd;
 use kvm_ioctls::{NoDatamatch, VcpuFd, VmFd};
 #[cfg(feature = "sev_snp")]
 use log::debug;
-use log::trace;
 #[cfg(target_arch = "x86_64")]
 use log::warn;
-use vmm_sys_util::errno;
+use log::{info, trace};
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::ioctl::ioctl_with_mut_ref;
+use vmm_sys_util::{errno, ioctl_iowr_nr};
 
 #[cfg(target_arch = "aarch64")]
 use crate::aarch64::gic::KvmGicV3Its;
@@ -129,10 +131,10 @@ pub use kvm_ioctls::{self, Cap, Kvm, VcpuExit};
 use log::error;
 use thiserror::Error;
 use vfio_ioctls::VfioDeviceFd;
+#[cfg(feature = "tdx")]
+use vmm_sys_util::ioctl::ioctl_with_val;
 #[cfg(target_arch = "x86_64")]
 use vmm_sys_util::{fam::FamStruct, ioctl_io_nr};
-#[cfg(feature = "tdx")]
-use vmm_sys_util::{ioctl::ioctl_with_val, ioctl_iowr_nr};
 
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use crate::RegList;
@@ -313,6 +315,13 @@ pub struct KvmTdxExitVmcall {
     pub out_r9: u64,
     pub out_rdx: u64,
 }
+
+ioctl_iowr_nr!(
+    KVM_PRE_FAULT_MEMORY,
+    kvm_bindings::KVMIO,
+    0xd5,
+    kvm_bindings::kvm_pre_fault_memory
+);
 
 impl From<kvm_userspace_memory_region2> for UserMemoryRegion {
     fn from(region: kvm_userspace_memory_region2) -> Self {
@@ -1469,6 +1478,12 @@ impl vm::Vm for KvmVm {
     /// Downcast to the underlying KvmVm type
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn supports_prefault_memory(&self) -> bool {
+        self.fd
+            .check_extension_raw(kvm_bindings::KVM_CAP_PRE_FAULT_MEMORY as c_ulong)
+            > 0
     }
 }
 
@@ -3566,6 +3581,37 @@ impl cpu::Vcpu for KvmVcpu {
         self.fd
             .set_regs(&regs)
             .map_err(|e: kvm_ioctls::Error| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+
+        Ok(())
+    }
+
+    /// Prefault the given memory range into KVMs level 2 page tables.
+    fn prefault_memory(&self, gpa: u64, size: u64) -> cpu::Result<()> {
+        let mut req = kvm_bindings::kvm_pre_fault_memory {
+            gpa,
+            size,
+            flags: 0,
+            padding: [0; 5],
+        };
+        info!(
+            "KVM_PRE_FAULT_MEMORY: GPA: {:#x}, SIZE: {:#x}",
+            req.gpa, req.size
+        );
+
+        // When KVM_PRE_FAULT_MEMORY returns, the input values are updated to point to
+        // the remaining range. If size > 0 on return, the ioctl can be issued again
+        // with the same argument.
+        while req.size > 0 {
+            // SAFETY: valid vCPU fd, valid in/out request buffer, return value is checked.
+            let ret = unsafe { ioctl_with_mut_ref(&self.fd, KVM_PRE_FAULT_MEMORY(), &mut req) };
+            if ret != 0 {
+                let err = std::io::Error::last_os_error();
+                error!("KVM_PRE_FAULT_MEMORY failed: ret={ret}, err={err}");
+                return Err(cpu::HypervisorCpuError::PrefaultMemory(anyhow!(
+                    "KVM_PRE_FAULT_MEMORY failed: ret={ret}, err={err}"
+                )));
+            }
+        }
 
         Ok(())
     }
