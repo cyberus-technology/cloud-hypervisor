@@ -589,6 +589,7 @@ impl CopyWorkerHandle {
 pub struct CopyWorker {
     source_io: CompletionIo,
     dest_io: CompletionIo,
+    dest_is_sparse: bool,
     state: Arc<MirrorState>,
     block_size_bytes: usize,
     /// Tracks the next user_data for request and completion notifications.
@@ -612,6 +613,7 @@ impl CopyWorker {
         let worker = Self {
             source_io,
             dest_io,
+            dest_is_sparse: destination_disk.supports_sparse_operations(),
             state,
             block_size_bytes,
             next_user_data: 0,
@@ -675,6 +677,8 @@ impl CopyWorker {
             iov_base: buf.as_mut_slice(length).as_mut_ptr().cast(),
             iov_len: length,
         }];
+        let expected_result =
+            i32::try_from(length).map_err(|_| io::Error::other("copy block is too large"))?;
 
         // Read from source into buf.
         buf.as_mut_slice(length).fill(0);
@@ -687,19 +691,42 @@ impl CopyWorker {
         if result < 0 {
             return Err(io::Error::from_raw_os_error(-result));
         }
+        if result != expected_result {
+            return Err(io::Error::other(format!(
+                "source read completed {result} bytes, expected {expected_result}"
+            )));
+        }
         debug_assert_eq!(user_data, read_id);
 
-        // Write buf to destination.
         let write_id = self.generate_user_data();
-        self.dest_io
-            .io_mut()
-            .write_vectored(offset as off_t, &iovecs, write_id)
-            .map_err(|error| {
-                io::Error::other(format!("async io write_vectored failed: {error}"))
-            })?;
+        let punch_hole = self.dest_is_sparse && buf.as_slice(length).iter().all(|&byte| byte == 0);
+        if punch_hole {
+            // Source block is all zeros: punch a hole to keep the destination sparse.
+            self.dest_io
+                .io_mut()
+                .punch_hole(offset, length as u64, write_id)
+                .map_err(|error| {
+                    io::Error::other(format!("async io punch_hole failed: {error}"))
+                })?;
+        } else {
+            // Write buf to destination.
+            self.dest_io
+                .io_mut()
+                .write_vectored(offset as off_t, &iovecs, write_id)
+                .map_err(|error| {
+                    io::Error::other(format!("async io write_vectored failed: {error}"))
+                })?;
+        }
+
         let (user_data, result) = self.dest_io.next_completion()?;
         if result < 0 {
             return Err(io::Error::from_raw_os_error(-result));
+        }
+        let expected_result = if punch_hole { 0 } else { expected_result };
+        if result != expected_result {
+            return Err(io::Error::other(format!(
+                "destination write completed {result} bytes, expected {expected_result}"
+            )));
         }
         debug_assert_eq!(user_data, write_id);
 
