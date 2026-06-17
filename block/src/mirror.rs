@@ -567,6 +567,7 @@ impl CopyWorkerHandle {
 pub struct CopyWorker {
     source_io: CompletionIo,
     dest_io: CompletionIo,
+    dest_is_sparse: bool,
     state: Arc<MirrorState>,
     block_size_bytes: usize,
     /// Tracks the next user_data for request and completion notifications.
@@ -617,6 +618,7 @@ impl CopyWorker {
         let worker = Self {
             source_io,
             dest_io,
+            dest_is_sparse: destination_disk.supports_sparse_operations(),
             state,
             block_size_bytes,
             next_user_data: 0,
@@ -682,15 +684,22 @@ impl CopyWorker {
             .buffer
             .ok_or_else(|| io::Error::other("Source read completed without a buffer"))?;
 
-        // Transfer ownership to the destination. Write completions do not return
-        // the buffer, so the next block allocates a new one.
         let write_id = self.generate_user_data();
+        let punch_hole = self.dest_is_sparse && buffer.as_slice().iter().all(|&byte| byte == 0);
+        if punch_hole {
+            // Source block is all zeros: punch a hole to keep the destination sparse.
+            self.dest_io
+                .io_mut()
+                .punch_hole(offset as u64, length as u64, write_id)
+                .map_err(io::Error::other)?;
+        } else {
+            self.dest_io
+                .io_mut()
+                .write_from_vec(offset, buffer, write_id)
+                .map_err(io::Error::other)?;
+        }
         self.dest_io
-            .io_mut()
-            .write_from_vec(offset, buffer, write_id)
-            .map_err(io::Error::other)?;
-        self.dest_io
-            .wait_for_completion(write_id, expected_result)?;
+            .wait_for_completion(write_id, if punch_hole { 0 } else { expected_result })?;
 
         self.state
             .copied_bytes
@@ -871,7 +880,15 @@ mod tests {
         for size in [0, 8192 + 17] {
             let source = TempFile::new().unwrap();
             let destination = TempFile::new().unwrap();
-            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let bytes: Vec<u8> = (0..size)
+                .map(|i| {
+                    if (4096..8192).contains(&i) {
+                        0
+                    } else {
+                        (i % 251) as u8
+                    }
+                })
+                .collect();
             source.as_file().write_all_at(&bytes, 0).unwrap();
             destination
                 .as_file()
