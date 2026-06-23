@@ -146,6 +146,9 @@ pub enum MirrorError {
     /// Indicates that a mirror operation was requested before device activation.
     #[error("Mirror operation rejected: the device is not active")]
     DeviceNotActive,
+    /// Indicates that a mirror operation was requested while the device is paused.
+    #[error("Mirror operation rejected: the device is paused")]
+    DevicePaused,
     /// Indicates that a mirror operation was requested without an active mirror.
     #[error("No active mirror for the device")]
     NotActive,
@@ -1416,6 +1419,7 @@ impl Block {
         if self.common.epoll_threads.is_none() || self.queue_cmd_senders.is_empty() {
             return Err(MirrorError::DeviceNotActive);
         }
+        self.ensure_not_paused_for_mirror()?;
         let source_size = self
             .disk_image
             .logical_size()
@@ -1460,6 +1464,8 @@ impl Block {
     /// to the destination only, and there is no revert that keeps
     /// acknowledged writes, so aborting is preferred over data loss.
     pub fn complete_mirror(&mut self) -> MirrorResult<PathBuf> {
+        self.ensure_not_paused_for_mirror()?;
+
         let handle = self.mirror_handle.as_ref().ok_or(MirrorError::NotActive)?;
 
         if !matches!(handle.state.phase(), MirrorPhase::Ready) {
@@ -1506,6 +1512,15 @@ impl Block {
         self.disk_image = destination;
         self.disk_path = destination_path.clone();
         Ok(destination_path)
+    }
+
+    /// Fails with [`MirrorError::DevicePaused`] when the device is paused, since a
+    /// parked worker cannot apply a staged mirror command.
+    fn ensure_not_paused_for_mirror(&self) -> MirrorResult<()> {
+        if self.common.paused.load(Ordering::SeqCst) {
+            return Err(MirrorError::DevicePaused);
+        }
+        Ok(())
     }
 
     /// Installs the mirror backends and starts the copy worker.
@@ -1667,6 +1682,7 @@ impl Block {
     /// Blocks until the copy worker finishes its current block and joins,
     /// which can stall on a slow or hung destination.
     pub fn cancel_mirror(&mut self) -> MirrorResult<()> {
+        self.ensure_not_paused_for_mirror()?;
         let state = self
             .mirror_handle
             .as_ref()
