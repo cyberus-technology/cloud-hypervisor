@@ -696,6 +696,10 @@ pub enum DeviceManagerError {
     )]
     BlockMirrorAlreadyActive(String),
 
+    /// The mirror destination path is already backing one of the VM's disks.
+    #[error("Cannot mirror to '{0}': it is already in use as a disk image by this VM")]
+    BlockMirrorDestinationInUse(String),
+
     /// Cannot perform given action, as the device is currently performing a block mirroring operation.
     #[error(
         "Failed to perform the requested action for the disk with identifier: {0} as it is currently performing a block mirroring operation"
@@ -5374,6 +5378,25 @@ impl DeviceManager {
         if disk.mirror_status().is_some() {
             return Err(DeviceManagerError::BlockMirrorAlreadyActive(
                 device_id.to_string(),
+            ));
+        }
+
+        // Refuse a destination that already backs one of this VM's disks, comparing canonicalized paths.
+        let canon =
+            |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let dest_canon = canon(dest_path);
+        let dest_in_use = self
+            .config
+            .lock()
+            .unwrap()
+            .disks
+            .iter()
+            .flatten()
+            .filter_map(|disk_config| disk_config.path.as_deref())
+            .any(|source_path| canon(source_path) == dest_canon);
+        if dest_in_use {
+            return Err(DeviceManagerError::BlockMirrorDestinationInUse(
+                dest_path.display().to_string(),
             ));
         }
 
