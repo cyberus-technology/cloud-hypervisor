@@ -1324,4 +1324,62 @@ mod tests {
         );
         locker.join().unwrap();
     }
+
+    /// A single-iovec `Out` batch entry backed by `buf`.
+    fn batch_write(offset: off_t, buf: &[u8], user_data: u64) -> BatchRequest {
+        BatchRequest {
+            offset,
+            iovecs: [iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            }]
+            .into_iter()
+            .collect(),
+            user_data,
+            request_type: RequestType::Out,
+        }
+    }
+
+    /// A mid-batch submit failure must still return `Ok` with one completion per
+    /// entry, including an error completion for the failed one.
+    ///
+    /// The worker records the batch as in-flight only on `Ok`, so aborting with
+    /// `Err` strands the completions already queued for earlier entries.
+    #[test]
+    fn failed_batch_submit_accounts_every_request() {
+        // Second write (index 1) fails at submit on the source; the first
+        // already went through.
+        let mut source = MockAsyncIo::new();
+        source.fail_on_nth_write = Some(1);
+        let mut mirror = mirror_from(source, MockAsyncIo::new(), MirrorState::new(1 << 20));
+        let buf = [0u8; 4096];
+
+        let batch = [batch_write(0, &buf, 1), batch_write(4096, &buf, 2)];
+
+        mirror
+            .submit_batch_requests(&batch)
+            .expect("a mid-batch submit failure must not fail the whole batch");
+
+        let mut completions = Vec::new();
+        while let Some(completion) = mirror.next_completed_request() {
+            completions.push(completion);
+        }
+        completions.sort_by_key(|(user_data, _)| *user_data);
+
+        assert_eq!(
+            completions.len(),
+            2,
+            "every batch entry owes exactly one completion"
+        );
+        assert_eq!(
+            completions[0],
+            (1, 4096),
+            "first write completes successfully"
+        );
+        assert_eq!(completions[1].0, 2, "second entry is still accounted");
+        assert!(
+            completions[1].1 < 0,
+            "second entry carries an error result (reported IOERR), not an orphan"
+        );
+    }
 }
