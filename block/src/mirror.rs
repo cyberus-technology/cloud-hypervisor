@@ -1382,4 +1382,119 @@ mod tests {
             "second entry carries an error result (reported IOERR), not an orphan"
         );
     }
+
+    /// The lifecycle advances Running -> Ready -> Completing -> Completed, each
+    /// state reached only from its documented predecessor.
+    #[test]
+    fn phase_advances_through_the_lifecycle() {
+        let state = MirrorState::new(1 << 20);
+        assert!(matches!(state.phase(), MirrorPhase::Running));
+        state.transition_to_phase(MirrorPhase::Ready);
+        state.transition_to_phase(MirrorPhase::Completing);
+        state.transition_to_phase(MirrorPhase::Completed);
+        assert!(matches!(state.phase(), MirrorPhase::Completed));
+    }
+
+    /// An invalid phase transition panics.
+    #[test]
+    #[should_panic(expected = "Invalid mirror phase transition attempted")]
+    fn invalid_phase_transition_panics() {
+        let state = MirrorState::new(1 << 20);
+        // Running -> Completed skips Ready and Completing, so it is rejected.
+        state.transition_to_phase(MirrorPhase::Completed);
+    }
+
+    /// `Completed` is terminal: no later transition is accepted.
+    #[test]
+    #[should_panic(expected = "Invalid mirror phase transition attempted")]
+    fn completed_phase_is_terminal() {
+        let state = MirrorState::new(1 << 20);
+        state.transition_to_phase(MirrorPhase::Ready);
+        state.transition_to_phase(MirrorPhase::Completing);
+        state.transition_to_phase(MirrorPhase::Completed);
+        state.transition_to_phase(MirrorPhase::Cancelling);
+    }
+
+    /// A failure keeps its first reason (transitions compare only the variant)
+    /// and can still move to `Cancelling` for cleanup.
+    #[test]
+    fn failed_keeps_first_reason_then_cancels() {
+        let state = MirrorState::new(1 << 20);
+        let first = Arc::new(MirrorFailure::SourceCompletion {
+            user_data: 1,
+            actual: -libc::EIO,
+            expected: 0,
+        });
+        state.transition_to_phase(MirrorPhase::Failed(first.clone()));
+        state.transition_to_phase(MirrorPhase::Failed(Arc::new(
+            MirrorFailure::SourceCompletion {
+                user_data: 2,
+                actual: -libc::EIO,
+                expected: 0,
+            },
+        )));
+        let MirrorPhase::Failed(reason) = state.phase() else {
+            panic!("mirror did not enter the failed phase");
+        };
+        assert!(Arc::ptr_eq(&reason, &first));
+        state.transition_to_phase(MirrorPhase::Cancelling);
+        assert!(matches!(state.phase(), MirrorPhase::Cancelling));
+    }
+
+    /// A tracked fsync (`Some`) flushes both backends and surfaces one guest
+    /// completion for its user_data.
+    #[test]
+    fn tracked_fsync_completes_to_guest() {
+        run_with_watchdog(Duration::from_secs(5), || {
+            let mut mirror = mirror_with_mocks();
+            mirror.fsync(Some(5)).unwrap();
+            assert_eq!(drain_n(&mut mirror, 1), vec![5]);
+        });
+    }
+
+    /// A barrier fsync (`None`) flushes both backends but owes the guest no
+    /// completion, so nothing surfaces.
+    #[test]
+    fn barrier_fsync_surfaces_no_completion() {
+        let mut mirror = mirror_with_mocks();
+        mirror.fsync(None).unwrap();
+        assert!(mirror.next_completed_request().is_none());
+    }
+
+    /// `write_zeroes` mirrors to both backends under the range lock and
+    /// surfaces one guest completion, like a write.
+    #[test]
+    fn write_zeroes_mirrors_and_completes() {
+        run_with_watchdog(Duration::from_secs(5), || {
+            let mut mirror = mirror_with_mocks();
+            mirror.write_zeroes(0, 4096, 3).unwrap();
+            assert_eq!(drain_n(&mut mirror, 1), vec![3]);
+        });
+    }
+
+    /// Once degraded to passthrough, every mutating op forwards to the source
+    /// alone and still completes, with no destination and no range lock.
+    #[test]
+    fn degraded_mirror_passes_all_ops_through_to_source() {
+        run_with_watchdog(Duration::from_secs(5), || {
+            let mut dest = MockAsyncIo::new();
+            dest.fail_on_nth_write = Some(0);
+            let mut mirror = mirror_from(MockAsyncIo::new(), dest, MirrorState::new(1 << 20));
+            let buf = [0u8; 4096];
+            let iov = iov_of(&buf);
+
+            // The first write fails on the destination and flips to passthrough.
+            mirror.write_vectored(0, &iov, 1).unwrap();
+            assert!(matches!(mirror.state.phase(), MirrorPhase::Failed(_)));
+
+            // Subsequent ops take the source-only passthrough branch.
+            mirror.fsync(Some(2)).unwrap();
+            mirror.punch_hole(0, 4096, 3).unwrap();
+            mirror.write_zeroes(0, 4096, 4).unwrap();
+
+            let mut acked = drain_n(&mut mirror, 4);
+            acked.sort();
+            assert_eq!(acked, vec![1, 2, 3, 4]);
+        });
+    }
 }
