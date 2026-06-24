@@ -16,20 +16,16 @@ use std::cmp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(feature = "sev_snp")]
 use std::fmt;
-#[cfg(feature = "kvm")]
-use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Seek, SeekFrom, stdout};
 use std::num::Wrapping;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
-#[cfg(not(target_arch = "riscv64"))]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
-use std::{iter, path, result, sync};
+use std::{fs, iter, path, result, sync};
 
 use acpi_tables::sdt::GenericAddress;
 use acpi_tables::{Aml, aml};
@@ -700,6 +696,10 @@ pub enum DeviceManagerError {
         "Failed to start block mirroring for the disk with identifier: {0} as mirroring is already active"
     )]
     BlockMirrorAlreadyActive(String),
+
+    /// The mirror destination path is already backing one of the VM's disks.
+    #[error("Cannot mirror to '{0}': it is already in use as a disk image by this VM")]
+    BlockMirrorDestinationInUse(String),
 
     /// Cannot perform given action, as the device is currently performing a block mirroring operation.
     #[error(
@@ -6342,6 +6342,24 @@ impl DeviceManager {
         if disk.mirror_status().is_some() {
             return Err(DeviceManagerError::BlockMirrorAlreadyActive(
                 device_id.to_string(),
+            ));
+        }
+
+        // Refuse a destination that already backs one of this VM's disks, comparing canonicalized paths.
+        let canon = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let dest_canon = canon(dest_path);
+        let dest_in_use = self
+            .config
+            .lock()
+            .unwrap()
+            .disks
+            .iter()
+            .flatten()
+            .filter_map(|disk_config| disk_config.path.as_deref())
+            .any(|source_path| canon(source_path) == dest_canon);
+        if dest_in_use {
+            return Err(DeviceManagerError::BlockMirrorDestinationInUse(
+                dest_path.display().to_string(),
             ));
         }
 
