@@ -20,7 +20,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
@@ -70,6 +70,7 @@ use crate::config::{MemoryRestoreMode, RestoreConfig, add_to_config};
 use crate::coredump::GuestDebuggable;
 #[cfg(feature = "kvm")]
 use crate::cpu::IS_IN_SHUTDOWN;
+use crate::device_manager::DeviceManager;
 use crate::landlock::Landlock;
 use crate::memory_manager::MemoryManager;
 use crate::migration::transport::{
@@ -643,13 +644,18 @@ pub struct VmmThreadHandle {
 
 /// Models the current ownership and associated state of the VM from the
 /// perspective of the VMM.
-pub enum VmOwnership {
+enum VmOwnership {
     Owned(Vm),
     /// The VM is temporarily owned by an ongoing migration worker.
+    ///
+    /// We deliberately do not use shared access to the VM to prevent a whole
+    /// class of race conditions.
     Migration {
         migration_worker_handle: MigrationWorkerHandle,
         /// Snapshot returned while the VMM cannot inspect the worker-owned VM.
         vm_info_response: VmInfoResponse,
+        /// Access to VM state needed during migration.
+        device_manager: Weak<Mutex<DeviceManager>>,
     },
     None,
 }
@@ -2225,12 +2231,27 @@ impl Vmm {
                         }
                     }
                     EpollDispatch::ActivateVirtioDevices => {
-                        // TODO: Future follow-up must resolve virtio activation handling while migrating.
                         let count = self.activate_evt.read().map_err(Error::EventFdRead)?;
-                        if let VmOwnership::Owned(ref vm) = self.vm {
-                            info!("Trying to activate pending virtio devices: count = {count}");
-                            vm.activate_virtio_devices()
-                                .map_err(Error::ActivateVirtioDevices)?;
+                        info!("Trying to activate pending virtio devices: count = {count}");
+                        match &self.vm {
+                            VmOwnership::Owned(vm) => {
+                                vm.activate_virtio_devices()
+                                    .map_err(Error::ActivateVirtioDevices)?;
+                            }
+                            VmOwnership::Migration { device_manager, .. } => {
+                                // If the VM (and thus the device manager) were
+                                // dropped at this point, we'd have a serious
+                                // programming bug.
+                                let device_manager = device_manager
+                                    .upgrade()
+                                    .expect("DeviceManager should remain alive during a migration");
+                                let device_manager = device_manager.lock().unwrap();
+                                device_manager
+                                    .activate_virtio_devices()
+                                    .map_err(VmError::ActivateVirtioDevices)
+                                    .map_err(Error::ActivateVirtioDevices)?;
+                            }
+                            VmOwnership::None => {}
                         }
                     }
                     EpollDispatch::Api => {
@@ -3323,6 +3344,8 @@ impl RequestHandler for Vmm {
             .take_owned_or(VmError::VmNotRunning)
             .expect("should have VM ownership as we just checked it");
 
+        let device_manager = Arc::downgrade(vm.device_manager());
+
         match MigrationWorker::spawn(
             vm,
             check_migration_evt,
@@ -3336,6 +3359,7 @@ impl RequestHandler for Vmm {
                 self.vm = VmOwnership::Migration {
                     migration_worker_handle: handle,
                     vm_info_response: vm_info_snapshot,
+                    device_manager,
                 };
                 Ok(())
             }
