@@ -1,6 +1,6 @@
 name: Flake bump auto approve
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - 'flake.lock'
     branches:
@@ -10,12 +10,18 @@ jobs:
   gitlint:
     name: Flake bump auto approve
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
       with:
-        ref: ${{ github.event.pull_request.head.sha }}
+        ref: ${{ github.event.pull_request.base.sha }}
         fetch-depth: 0
+    - name: Fetch pull request head
+      run: |
+        git fetch --no-tags origin \
+          +refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/origin/pr-head
     - name: Set up Python 3.11
       uses: actions/setup-python@v6
       with:
@@ -29,7 +35,7 @@ jobs:
       id: gitlint
       run: |
         set +e
-        gitlint --commits origin/$GITHUB_BASE_REF.. -C .gitlint_auto_approve
+        gitlint --commits ${{ github.event.pull_request.base.sha }}..refs/remotes/origin/pr-head -C .gitlint_auto_approve
         code=$?
         if [ $code -eq 0 ]; then
           echo "this merge request is eligible for a flake bump auto approve and merge"
@@ -68,5 +74,5 @@ jobs:
           --method PUT \
           -H "Accept: application/vnd.github+json" \
           -H "X-GitHub-Api-Version: 2026-03-10" \
-          /repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.number }}/merge \
+          /repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/merge \
           -f 'merge_method=rebase'
