@@ -66,7 +66,7 @@ use linux_loader::loader::bzimage::BzImage;
 use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use linux_loader::loader::pe::Error::InvalidImageMagicNumber;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -492,7 +492,8 @@ impl VmOps for VmOpsHandler {
     #[cfg(target_arch = "x86_64")]
     fn pio_read(&self, port: u64, data: &mut [u8]) -> result::Result<(), HypervisorVmError> {
         if let Err(vm_device::BusError::MissingAddressRange) = self.io_bus.read(port, data) {
-            info!("Guest PIO read to unregistered address 0x{port:x}");
+            // TODO: Make this `info!` again (see https://github.com/cobaltcore-dev/cobaltcore/issues/603)
+            debug!("Guest PIO read to unregistered address 0x{port:x}");
         }
         Ok(())
     }
@@ -501,7 +502,8 @@ impl VmOps for VmOpsHandler {
     fn pio_write(&self, port: u64, data: &[u8]) -> result::Result<(), HypervisorVmError> {
         match self.io_bus.write(port, data) {
             Err(vm_device::BusError::MissingAddressRange) => {
-                info!("Guest PIO write to unregistered address 0x{port:x}");
+                // TODO: Make this `info!` again (see https://github.com/cobaltcore-dev/cobaltcore/issues/603)
+                debug!("Guest PIO write to unregistered address 0x{port:x}");
             }
             Ok(Some(barrier)) => {
                 info!("Waiting for barrier");
