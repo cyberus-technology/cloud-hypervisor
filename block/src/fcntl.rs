@@ -144,7 +144,7 @@ impl FromStr for LockGranularityChoice {
 }
 
 /// Returns a [`struct@libc::flock`] structure for the whole file.
-const fn get_flock(lock_type: LockType, granularity: LockGranularity) -> libc::flock {
+const fn flock(lock_type: LockType, granularity: LockGranularity) -> libc::flock {
     libc::flock {
         l_type: lock_type.to_libc_val() as libc::c_short,
         l_whence: libc::SEEK_SET as libc::c_short,
@@ -170,7 +170,7 @@ pub fn try_acquire_lock<Fd: AsRawFd>(
     lock_type: LockType,
     granularity: LockGranularity,
 ) -> Result<(), LockError> {
-    let flock = get_flock(lock_type, granularity);
+    let flock = flock(lock_type, granularity);
 
     loop {
         let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock));
