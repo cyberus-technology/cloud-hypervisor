@@ -24,8 +24,6 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum LockError {
     /// The file is already locked.
-    ///
-    /// A call to [`get_lock_state`] can help to identify the reason.
     #[error("The file is already locked")]
     AlreadyLocked,
     /// IO error.
@@ -38,6 +36,7 @@ pub enum LockError {
 enum FcntlArg<'a> {
     /// Set an OFD lock from the given lock description.
     F_OFD_SETLK(&'a libc::flock),
+    #[expect(unused, reason = "will be used in the following commits")]
     /// Get the first OFD lock for the given lock description.
     F_OFD_GETLK(&'a mut libc::flock),
 }
@@ -70,34 +69,6 @@ impl LockType {
             Self::Unlock => libc::F_UNLCK as libc::c_int,
             Self::Write => libc::F_WRLCK as libc::c_int,
             Self::Read => libc::F_RDLCK as libc::c_int,
-        }
-    }
-}
-
-/// Describes the current state of a lock.
-#[derive(Debug)]
-pub enum LockState {
-    /// No lock set.
-    Unlocked,
-    /// Locked for reading (non-exclusive).
-    SharedRead,
-    /// Locked for writing (exclusive mode).
-    ExclusiveWrite,
-}
-
-impl LockState {
-    fn new(value: libc::c_int) -> Self {
-        const F_UNLCK: libc::c_int = libc::F_UNLCK as libc::c_int;
-        const F_WRLCK: libc::c_int = libc::F_WRLCK as libc::c_int;
-        const F_RDLCK: libc::c_int = libc::F_RDLCK as libc::c_int;
-        match value {
-            F_UNLCK => Self::Unlocked,
-            F_WRLCK => Self::ExclusiveWrite,
-            F_RDLCK => Self::SharedRead,
-            // This is so unlikely that we want to avoid the complexity of
-            // coping with this error case. Can only fail if either Linux
-            // is broken or memory is messed up.
-            other => panic!("Unexpected lock state: {other}"),
         }
     }
 }
@@ -228,30 +199,4 @@ pub fn try_acquire_lock<Fd: AsRawFd>(
 /// - `granularity`: The [`LockGranularity`].
 pub fn clear_lock<Fd: AsRawFd>(file: &Fd, granularity: LockGranularity) -> Result<(), LockError> {
     try_acquire_lock(file, LockType::Unlock, granularity)
-}
-
-/// Returns the current lock state using [`fcntl`] with respect to the given
-/// parameters.
-///
-/// # Parameters
-/// - `file`: The file for which to get the lock state.
-/// - `granularity`: The [`LockGranularity`].
-pub fn get_lock_state<Fd: AsRawFd>(
-    file: &Fd,
-    granularity: LockGranularity,
-) -> Result<LockState, LockError> {
-    let mut flock = get_flock(LockType::Write, granularity);
-    let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_GETLK(&mut flock));
-    match res {
-        0 => {
-            let state = flock.l_type as libc::c_int;
-            let state = LockState::new(state);
-            Ok(state)
-        }
-        -1 => {
-            let io_error = io::Error::last_os_error();
-            Err(LockError::Io(io_error))
-        }
-        val => panic!("Unexpected return value from fcntl(): {val}"),
-    }
 }
