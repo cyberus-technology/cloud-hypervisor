@@ -110,6 +110,62 @@ impl LockGranularity {
             LockGranularity::ByteRange(_, len) => len,
         }
     }
+
+    /// Tries to acquire a lock using [`fcntl`] with respect to the given
+    /// parameters.
+    ///
+    /// Please note that `fcntl()` OFD locks are **advisory locks**, which do not
+    /// prevent to `open()` a file if a lock is already placed.
+    ///
+    /// # Parameters
+    /// - `file`: The file to acquire a lock for [`LockType`]. The file's state will
+    ///   be logically mutated, but not technically.
+    /// - `lock_type`: The [`LockType`]
+    pub fn try_acquire_lock<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+    ) -> Result<(), LockError> {
+        let flock = self.flock(lock_type);
+
+        loop {
+            let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock));
+            match res {
+                0 => return Ok(()),
+                -1 => {
+                    let io_error = io::Error::last_os_error();
+                    let errno = io_error.raw_os_error().unwrap();
+                    match errno {
+                        // See man page for error code:
+                        // <https://man7.org/linux/man-pages/man2/fcntl.2.html>
+                        libc::EAGAIN | libc::EACCES => return Err(LockError::AlreadyLocked),
+                        libc::EINTR => continue,
+                        _ => return Err(LockError::Io(io_error)),
+                    }
+                }
+                val => panic!("Unexpected return value from fcntl(): {val}"),
+            }
+        }
+    }
+
+    /// Clears a lock.
+    ///
+    /// # Parameters
+    /// - `file`: The file to clear all locks for [`LockType`].
+    pub fn clear_lock<Fd: AsRawFd>(self, file: &Fd) -> Result<(), LockError> {
+        self.try_acquire_lock(file, LockType::Unlock)
+    }
+
+    /// Returns a [`struct@libc::flock`] structure for the whole file.
+    const fn flock(self, lock_type: LockType) -> libc::flock {
+        libc::flock {
+            l_type: lock_type.to_libc_val() as libc::c_short,
+            l_whence: libc::SEEK_SET as libc::c_short,
+            l_start: self.l_start() as libc::c_long,
+            l_len: self.l_len() as libc::c_long,
+            l_pid: 0, /* filled by callee */
+        }
+    }
 }
 
 /// User-facing choice for the lock granularity.
@@ -141,62 +197,4 @@ impl FromStr for LockGranularityChoice {
             _ => Err(LockGranularityParseError(s.to_owned())),
         }
     }
-}
-
-/// Returns a [`struct@libc::flock`] structure for the whole file.
-const fn flock(lock_type: LockType, granularity: LockGranularity) -> libc::flock {
-    libc::flock {
-        l_type: lock_type.to_libc_val() as libc::c_short,
-        l_whence: libc::SEEK_SET as libc::c_short,
-        l_start: granularity.l_start() as libc::c_long,
-        l_len: granularity.l_len() as libc::c_long,
-        l_pid: 0, /* filled by callee */
-    }
-}
-
-/// Tries to acquire a lock using [`fcntl`] with respect to the given
-/// parameters.
-///
-/// Please note that `fcntl()` OFD locks are **advisory locks**, which do not
-/// prevent to `open()` a file if a lock is already placed.
-///
-/// # Parameters
-/// - `file`: The file to acquire a lock for [`LockType`]. The file's state will
-///   be logically mutated, but not technically.
-/// - `lock_type`: The [`LockType`]
-/// - `granularity`: The [`LockGranularity`].
-pub fn try_acquire_lock<Fd: AsRawFd>(
-    file: &Fd,
-    lock_type: LockType,
-    granularity: LockGranularity,
-) -> Result<(), LockError> {
-    let flock = flock(lock_type, granularity);
-
-    loop {
-        let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock));
-        match res {
-            0 => return Ok(()),
-            -1 => {
-                let io_error = io::Error::last_os_error();
-                let errno = io_error.raw_os_error().unwrap();
-                match errno {
-                    // See man page for error code:
-                    // <https://man7.org/linux/man-pages/man2/fcntl.2.html>
-                    libc::EAGAIN | libc::EACCES => return Err(LockError::AlreadyLocked),
-                    libc::EINTR => continue,
-                    _ => return Err(LockError::Io(io_error)),
-                }
-            }
-            val => panic!("Unexpected return value from fcntl(): {val}"),
-        }
-    }
-}
-
-/// Clears a lock.
-///
-/// # Parameters
-/// - `file`: The file to clear all locks for [`LockType`].
-/// - `granularity`: The [`LockGranularity`].
-pub fn clear_lock<Fd: AsRawFd>(file: &Fd, granularity: LockGranularity) -> Result<(), LockError> {
-    try_acquire_lock(file, LockType::Unlock, granularity)
 }

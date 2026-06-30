@@ -26,7 +26,7 @@ use block::error::BlockError;
 use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType};
 use block::{
     ExecuteAsync, ExecuteError, MAX_DISCARD_WRITE_ZEROES_SEG, Request, RequestType,
-    VirtioBlockConfig, build_serial, fcntl,
+    VirtioBlockConfig, build_serial,
 };
 use event_monitor::event;
 use log::{debug, error, info, warn};
@@ -1017,19 +1017,21 @@ impl Block {
             self.disk_path.display()
         );
         let fd = self.disk_image.fd();
-        fcntl::try_acquire_lock(&fd, lock_type, granularity).map_err(|error| {
-            error!(
-                "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
-                self.id,
-                self.disk_path.display()
-            );
+        granularity
+            .try_acquire_lock(&fd, lock_type)
+            .map_err(|error| {
+                error!(
+                    "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
+                    self.id,
+                    self.disk_path.display()
+                );
 
-            Error::LockDiskImage {
-                path: self.disk_path.clone(),
-                error,
-                lock_type,
-            }
-        })?;
+                Error::LockDiskImage {
+                    path: self.disk_path.clone(),
+                    error,
+                    lock_type,
+                }
+            })?;
         info!(
             "Acquired {lock_type:?} lock for disk image id={},path={}",
             self.id,
@@ -1046,11 +1048,13 @@ impl Block {
         // Should we remove the Result to simplify the error propagation on
         // higher levels?
         let fd = self.disk_image.fd();
-        fcntl::clear_lock(&fd, granularity).map_err(|error| Error::LockDiskImage {
-            path: self.disk_path.clone(),
-            error,
-            lock_type: LockType::Unlock,
-        })
+        granularity
+            .clear_lock(&fd)
+            .map_err(|error| Error::LockDiskImage {
+                path: self.disk_path.clone(),
+                error,
+                lock_type: LockType::Unlock,
+            })
     }
 
     fn state(&self) -> BlockState {
