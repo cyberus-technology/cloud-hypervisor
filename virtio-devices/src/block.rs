@@ -23,7 +23,7 @@ use anyhow::anyhow;
 use block::async_io::{AsyncIo, AsyncIoError};
 use block::disk_file::AsyncFullDiskFile;
 use block::error::BlockError;
-use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType, get_lock_state};
+use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType};
 use block::{
     ExecuteAsync, ExecuteError, MAX_DISCARD_WRITE_ZEROES_SEG, Request, RequestType,
     VirtioBlockConfig, build_serial, fcntl,
@@ -1018,14 +1018,12 @@ impl Block {
         );
         let fd = self.disk_image.fd();
         fcntl::try_acquire_lock(&fd, lock_type, granularity).map_err(|error| {
-            let current_lock = get_lock_state(&fd, granularity);
-            // Don't propagate the error to the outside, as it is not useful at all. Instead,
-            // we try to log additional help to the user.
-            if let Ok(current_lock) = current_lock {
-                error!("Can't get {lock_type:?} lock for {} as there is already a {current_lock:?} lock", self.disk_path.display());
-            } else {
-                error!("Can't get {lock_type:?} lock for {}, but also can't determine the current lock state", self.disk_path.display());
-            }
+            error!(
+                "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
+                self.id,
+                self.disk_path.display()
+            );
+
             Error::LockDiskImage {
                 path: self.disk_path.clone(),
                 error,
