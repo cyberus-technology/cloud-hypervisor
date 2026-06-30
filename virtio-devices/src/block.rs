@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
@@ -25,10 +25,10 @@ use anyhow::anyhow;
 use block::async_io::{AsyncIo, AsyncIoError};
 use block::disk_file::AsyncFullDiskFile;
 use block::error::BlockError;
-use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType, get_lock_state};
+use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType};
 use block::{
     ExecuteAsync, ExecuteError, MAX_DISCARD_WRITE_ZEROES_SEG, Request, RequestType,
-    VirtioBlockConfig, build_serial, fcntl,
+    VirtioBlockConfig, build_serial,
 };
 use event_monitor::event;
 use log::{debug, error, info, warn};
@@ -757,6 +757,9 @@ pub struct Block {
     serial: Box<[u8]>,
     queue_affinity: BTreeMap<u16, Box<[usize]>>,
     lock_granularity_choice: LockGranularityChoice,
+    /// The current lock status.
+    // There is no way to query what locks are already held, so we need to cache that information.
+    held_lock: LockType,
     device_status: Arc<AtomicU8>,
     active_request_count: Arc<AtomicUsize>,
     draining_active_requests: Arc<AtomicBool>,
@@ -925,6 +928,7 @@ impl Block {
             serial,
             queue_affinity,
             lock_granularity_choice: lock_granularity,
+            held_lock: LockType::Unlock,
             device_status: Arc::new(AtomicU8::new(0)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             draining_active_requests: Arc::new(AtomicBool::new(false)),
@@ -963,16 +967,22 @@ impl Block {
         has_feature(self.features(), VIRTIO_BLK_F_RO.into())
     }
 
-    /// Returns the granularity for the advisory lock for this disk.
-    fn lock_granularity(&mut self) -> LockGranularity {
+    /// Returns the advisory lock granularity to use for `disk_image`.
+    ///
+    /// The granularity follows the `lock_granularity` choice in the block config.
+    fn lock_granularity(
+        &self,
+        disk_image: &dyn AsyncFullDiskFile,
+        disk_path: &Path,
+    ) -> LockGranularity {
         match self.lock_granularity_choice {
             LockGranularityChoice::Full => LockGranularity::WholeFile,
             LockGranularityChoice::ByteRange => {
                 // Byte range lock covering [0, max(logical, physical))
                 // logical > physical for sparse files, physical > logical
                 // for small dense files due to filesystem block rounding.
-                let logical = self.disk_image.logical_size();
-                let physical = self.disk_image.physical_size();
+                let logical = disk_image.logical_size();
+                let physical = disk_image.physical_size();
                 match (logical, physical) {
                     (Ok(l), Ok(p)) => LockGranularity::ByteRange(0, max(l, p)),
                     (Ok(l), Err(_)) => LockGranularity::ByteRange(0, l),
@@ -982,14 +992,53 @@ impl Block {
                         warn!(
                             "Can't get disk size for id={},path={}, falling back to {:?}: error: {e}",
                             self.id,
-                            self.disk_path.display(),
+                            disk_path.display(),
                             fallback
                         );
                         fallback
                     }
                 }
             }
+            LockGranularityChoice::QemuCompatible => LockGranularity::QemuCompatible,
         }
+    }
+
+    /// Tries to acquire an advisory lock for an arbitrary disk backend.
+    fn try_lock_disk_image(
+        &self,
+        disk_image: &dyn AsyncFullDiskFile,
+        disk_path: &Path,
+        lock_type: LockType,
+        current_lock: LockType,
+    ) -> Result<()> {
+        let granularity = self.lock_granularity(disk_image, disk_path);
+        debug!(
+            "Attempting to acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
+            self.id,
+            disk_path.display()
+        );
+        let fd = disk_image.fd();
+        granularity
+            .try_acquire_lock(&fd, lock_type, current_lock)
+            .map_err(|error| {
+                error!(
+                    "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
+                    self.id,
+                    disk_path.display()
+                );
+
+                Error::LockDiskImage {
+                    path: disk_path.to_path_buf(),
+                    error,
+                    lock_type,
+                }
+            })?;
+        info!(
+            "Acquired {lock_type:?} lock for disk image id={},path={}",
+            self.id,
+            disk_path.display()
+        );
+        Ok(())
     }
 
     /// Tries to set an advisory lock for the corresponding disk image.
@@ -998,49 +1047,33 @@ impl Block {
             true => LockType::Read,
             false => LockType::Write,
         };
-        let granularity = self.lock_granularity();
-        debug!(
-            "Attempting to acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
-            self.id,
-            self.disk_path.display()
-        );
-        let fd = self.disk_image.fd();
-        fcntl::try_acquire_lock(&fd, lock_type, granularity).map_err(|error| {
-            let current_lock = get_lock_state(&fd, granularity);
-            // Don't propagate the error to the outside, as it is not useful at all. Instead,
-            // we try to log additional help to the user.
-            if let Ok(current_lock) = current_lock {
-                error!("Can't get {lock_type:?} lock for {} as there is already a {current_lock:?} lock", self.disk_path.display());
-            } else {
-                error!("Can't get {lock_type:?} lock for {}, but also can't determine the current lock state", self.disk_path.display());
-            }
-            Error::LockDiskImage {
-                path: self.disk_path.clone(),
-                error,
-                lock_type,
-            }
-        })?;
-        info!(
-            "Acquired {lock_type:?} lock for disk image id={},path={}",
-            self.id,
-            self.disk_path.display()
-        );
+        self.try_lock_disk_image(
+            self.disk_image.as_ref(),
+            &self.disk_path,
+            lock_type,
+            self.held_lock,
+        )?;
+        self.held_lock = lock_type;
         Ok(())
     }
 
     /// Releases the advisory lock held for the corresponding disk image.
     pub fn unlock_image(&mut self) -> Result<()> {
-        let granularity = self.lock_granularity();
+        let granularity = self.lock_granularity(self.disk_image.as_ref(), &self.disk_path);
 
         // It is very unlikely that this fails;
         // Should we remove the Result to simplify the error propagation on
         // higher levels?
         let fd = self.disk_image.fd();
-        fcntl::clear_lock(&fd, granularity).map_err(|error| Error::LockDiskImage {
-            path: self.disk_path.clone(),
-            error,
-            lock_type: LockType::Unlock,
-        })
+        granularity
+            .clear_lock(&fd)
+            .map_err(|error| Error::LockDiskImage {
+                path: self.disk_path.clone(),
+                error,
+                lock_type: LockType::Unlock,
+            })?;
+        self.held_lock = LockType::Unlock;
+        Ok(())
     }
 
     fn state(&self) -> BlockState {

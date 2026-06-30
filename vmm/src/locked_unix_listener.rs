@@ -17,7 +17,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
-use block::fcntl::{LockError, LockGranularity, LockType, try_acquire_lock};
+use block::fcntl::{LockError, LockGranularity, LockType};
 use thiserror::Error;
 
 /// Errors associated with locked Unix sockets
@@ -49,7 +49,8 @@ impl SocketLock {
             .open(&path)
             .map_err(LockedUnixListenerError::Io)?;
 
-        match try_acquire_lock(&file, LockType::Write, LockGranularity::WholeFile) {
+        match LockGranularity::WholeFile.try_acquire_lock(&file, LockType::Write, LockType::Unlock)
+        {
             Ok(()) => Ok(Self { _file: file, path }),
             Err(LockError::AlreadyLocked) => {
                 Err(LockedUnixListenerError::InUse(socket_path.to_path_buf()))

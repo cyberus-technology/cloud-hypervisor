@@ -24,8 +24,6 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum LockError {
     /// The file is already locked.
-    ///
-    /// A call to [`get_lock_state`] can help to identify the reason.
     #[error("The file is already locked")]
     AlreadyLocked,
     /// IO error.
@@ -43,12 +41,36 @@ enum FcntlArg<'a> {
 }
 
 /// Wrapper for [`libc::fcntl`] that properly sets the function arguments.
-fn fcntl(fd: RawFd, arg: FcntlArg) -> libc::c_int {
-    // SAFETY: We use a valid FD.
-    unsafe {
-        match arg {
-            FcntlArg::F_OFD_SETLK(flock) => libc::fcntl(fd, libc::F_OFD_SETLK, flock),
-            FcntlArg::F_OFD_GETLK(flock) => libc::fcntl(fd, libc::F_OFD_GETLK, flock),
+fn fcntl(fd: RawFd, mut arg: FcntlArg) -> Result<(), LockError> {
+    loop {
+        // SAFETY:
+        // - `F_OFD_SETLK` and `F_OFD_GETLK` fcntl calls handle invalid file descriptors.
+        // - `F_OFD_SETLK` does not modify `flock`.
+        // - `F_OFD_GETLK` uses a mutable pointer to `flock`.
+        let result = unsafe {
+            match &mut arg {
+                FcntlArg::F_OFD_SETLK(flock) => {
+                    libc::fcntl(fd, libc::F_OFD_SETLK, *flock as *const libc::flock)
+                }
+                FcntlArg::F_OFD_GETLK(flock) => {
+                    libc::fcntl(fd, libc::F_OFD_GETLK, *flock as *mut libc::flock)
+                }
+            }
+        };
+        match result {
+            0 => return Ok(()),
+            -1 => {
+                let io_error = io::Error::last_os_error();
+                let errno = io_error.raw_os_error().unwrap();
+                match errno {
+                    // See man page for error code:
+                    // <https://man7.org/linux/man-pages/man2/fcntl.2.html>
+                    libc::EAGAIN | libc::EACCES => return Err(LockError::AlreadyLocked),
+                    libc::EINTR => continue,
+                    _ => return Err(LockError::Io(io_error)),
+                }
+            }
+            val => panic!("Unexpected return value from fcntl(): {val}"),
         }
     }
 }
@@ -74,33 +96,26 @@ impl LockType {
     }
 }
 
-/// Describes the current state of a lock.
-#[derive(Debug)]
-pub enum LockState {
-    /// No lock set.
-    Unlocked,
-    /// Locked for reading (non-exclusive).
-    SharedRead,
-    /// Locked for writing (exclusive mode).
-    ExclusiveWrite,
-}
+/// Amount of bytes by which the first lock is offset from the start of the file.
+const QEMU_LOCK_OFFSET: u64 = 100;
+/// Amount of bytes by which the first unshared lock is offset from the start of the file.
+///
+/// Unsharing is equivalent to marking lock as exclusive.
+///
+/// # Example
+///
+/// Setting `QEMU_LOCK_OFFSET` + `QEMU_READ_BYTE` indicates a reader lock that may be shared with
+/// other readers.
+/// Setting `QEMU_UNSHARE_LOCK_OFFSET` + `QEMU_READ_BYTE` additionally indicates, that the reader
+/// lock is "unshared" (exclusive) and may not be shared with others.
+const QEMU_UNSHARE_LOCK_OFFSET: u64 = 200;
 
-impl LockState {
-    fn new(value: libc::c_int) -> Self {
-        const F_UNLCK: libc::c_int = libc::F_UNLCK as libc::c_int;
-        const F_WRLCK: libc::c_int = libc::F_WRLCK as libc::c_int;
-        const F_RDLCK: libc::c_int = libc::F_RDLCK as libc::c_int;
-        match value {
-            F_UNLCK => Self::Unlocked,
-            F_WRLCK => Self::ExclusiveWrite,
-            F_RDLCK => Self::SharedRead,
-            // This is so unlikely that we want to avoid the complexity of
-            // coping with this error case. Can only fail if either Linux
-            // is broken or memory is messed up.
-            other => panic!("Unexpected lock state: {other}"),
-        }
-    }
-}
+/// Read permission lock index for QEMU.
+const QEMU_READ_BYTE: u64 = 0;
+/// Write permission lock index for QEMU.
+const QEMU_WRITE_BYTE: u64 = 1;
+/// Resize permission lock index for QEMU.
+const QEMU_RESIZE_BYTE: u64 = 3;
 
 /// The granularity of the advisory lock.
 ///
@@ -123,20 +138,226 @@ impl LockState {
 pub enum LockGranularity {
     WholeFile,
     ByteRange(u64 /* from, inclusive */, u64 /* len */),
+    QemuCompatible,
 }
 
 impl LockGranularity {
-    const fn l_start(self) -> u64 {
-        match self {
-            LockGranularity::WholeFile => 0,
-            LockGranularity::ByteRange(start, _) => start,
-        }
-    }
-
     const fn l_len(self) -> u64 {
         match self {
             LockGranularity::WholeFile => 0, /* EOF */
             LockGranularity::ByteRange(_, len) => len,
+            // QEMU uses multiple one byte long locks.
+            LockGranularity::QemuCompatible => 1,
+        }
+    }
+
+    /// Internal implementation of [`Self::try_acquire_lock`] for [`LockGranularity::WholeFile`] and
+    /// [`LockGranularity::ByteRange`].
+    fn try_acquire_lock_file<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+        l_start: u64,
+    ) -> Result<(), LockError> {
+        let flock = self.flock(lock_type.to_libc_val(), l_start);
+
+        fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock))
+    }
+
+    /// Releases all locks not required for `lock_type`.
+    ///
+    /// Used to roll back a lock acquisition attempt to a previously acquired lock.
+    fn release_unneeded_locks_qemu<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+    ) -> Result<(), LockError> {
+        let flocks = match lock_type {
+            LockType::Unlock => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+            ],
+            LockType::Write => vec![],
+            LockType::Read => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+            ],
+        };
+
+        let mut first_error = None;
+        for flock in flocks {
+            if let Err(error) = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock)) {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(first_error) = first_error {
+            return Err(first_error);
+        }
+        Ok(())
+    }
+
+    /// Internal implementation of [`Self::try_acquire_lock`] for [`LockGranularity::QemuCompatible`].
+    fn try_acquire_lock_qemu<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+        current_lock_status: LockType,
+    ) -> Result<(), LockError> {
+        let flocks = match lock_type {
+            LockType::Unlock => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+            ],
+            LockType::Write => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+            ],
+            LockType::Read => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+        };
+
+        for flock in flocks {
+            if let Err(error) = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock)) {
+                if let LockType::Unlock = lock_type {
+                    return Err(error);
+                }
+                let _ = self.release_unneeded_locks_qemu(file, current_lock_status);
+                return Err(error);
+            }
+        }
+
+        if let Err(error) = self.check_lock_success_qemu(file, lock_type) {
+            let _ = self.release_unneeded_locks_qemu(file, current_lock_status);
+            return Err(error);
+        }
+
+        // When downgrading a Write lock to a Read lock, the
+        // previously locked write marker needs to be unlocked.
+        self.release_unneeded_locks_qemu(file, lock_type)?;
+        Ok(())
+    }
+
+    /// Tries to acquire a lock using [`fcntl`] with respect to the given
+    /// parameters.
+    ///
+    /// Please note that `fcntl()` OFD locks are **advisory locks**, which do not
+    /// prevent to `open()` a file if a lock is already placed.
+    ///
+    /// # Parameters
+    /// - `file`: The file to acquire a lock for [`LockType`]. The file's state will
+    ///   be logically mutated, but not technically.
+    /// - `lock_type`: The [`LockType`]
+    /// - `current_lock_status`: Already held locks on this `file`.
+    ///   Used for [`LockGranularity::QemuCompatible`] to roll back to if locking fails.
+    pub fn try_acquire_lock<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+        current_lock_status: LockType,
+    ) -> Result<(), LockError> {
+        match self {
+            LockGranularity::WholeFile => self.try_acquire_lock_file(file, lock_type, 0),
+            LockGranularity::ByteRange(start, _) => {
+                self.try_acquire_lock_file(file, lock_type, start)
+            }
+            LockGranularity::QemuCompatible => {
+                self.try_acquire_lock_qemu(file, lock_type, current_lock_status)
+            }
+        }
+    }
+
+    /// Clears a lock.
+    ///
+    /// # Parameters
+    /// - `file`: The file to clear all locks for [`LockType`].
+    pub fn clear_lock<Fd: AsRawFd>(self, file: &Fd) -> Result<(), LockError> {
+        self.try_acquire_lock(file, LockType::Unlock, LockType::Unlock)
+    }
+
+    /// Checks whether any conflicting locks are set.
+    ///
+    /// Returns an error if a conflicting lock is set.
+    fn check_lock_success_qemu<Fd: AsRawFd>(
+        &self,
+        file: &Fd,
+        lock_type: LockType,
+    ) -> Result<(), LockError> {
+        let flocks = match lock_type {
+            LockType::Unlock => vec![],
+            LockType::Write => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+            ],
+            LockType::Read => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+        };
+
+        for mut flock in flocks {
+            fcntl(file.as_raw_fd(), FcntlArg::F_OFD_GETLK(&mut flock))?;
+
+            if flock.l_type as libc::c_int != libc::F_UNLCK {
+                return Err(LockError::AlreadyLocked);
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns a [`struct@libc::flock`] structure.
+    const fn flock(self, lock_type: libc::c_int, l_start: u64) -> libc::flock {
+        libc::flock {
+            l_type: lock_type as libc::c_short,
+            l_whence: libc::SEEK_SET as libc::c_short,
+            l_start: l_start as libc::c_long,
+            l_len: self.l_len() as libc::c_long,
+            l_pid: 0, /* filled by callee */
         }
     }
 }
@@ -149,15 +370,17 @@ impl LockGranularity {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum LockGranularityChoice {
     /// Byte-range lock covering [0, size).
-    #[default]
     ByteRange,
     /// Whole-file lock (l_start=0, l_len=0) - original OFD whole-file lock behavior.
     Full,
+    /// Locking scheme that mimics QEMU's marker byte based locking scheme.
+    #[default]
+    QemuCompatible,
 }
 
 /// Error returned when parsing a [`LockGranularityChoice`] from a string.
 #[derive(Error, Debug)]
-#[error("Invalid lock granularity value: {0}, expected 'byte-range' or 'full'")]
+#[error("Invalid lock granularity value: {0}, expected 'byte-range', 'full' or 'qemu-compatible'")]
 pub struct LockGranularityParseError(String);
 
 impl FromStr for LockGranularityChoice {
@@ -167,91 +390,36 @@ impl FromStr for LockGranularityChoice {
         match s {
             "byte-range" => Ok(LockGranularityChoice::ByteRange),
             "full" => Ok(LockGranularityChoice::Full),
+            "qemu-compatible" => Ok(Self::QemuCompatible),
             _ => Err(LockGranularityParseError(s.to_owned())),
         }
     }
 }
 
-/// Returns a [`struct@libc::flock`] structure for the whole file.
-const fn get_flock(lock_type: LockType, granularity: LockGranularity) -> libc::flock {
-    libc::flock {
-        l_type: lock_type.to_libc_val() as libc::c_short,
-        l_whence: libc::SEEK_SET as libc::c_short,
-        l_start: granularity.l_start() as libc::c_long,
-        l_len: granularity.l_len() as libc::c_long,
-        l_pid: 0, /* filled by callee */
-    }
-}
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
 
-/// Tries to acquire a lock using [`fcntl`] with respect to the given
-/// parameters.
-///
-/// Please note that `fcntl()` OFD locks are **advisory locks**, which do not
-/// prevent to `open()` a file if a lock is already placed.
-///
-/// # Parameters
-/// - `file`: The file to acquire a lock for [`LockType`]. The file's state will
-///   be logically mutated, but not technically.
-/// - `lock_type`: The [`LockType`]
-/// - `granularity`: The [`LockGranularity`].
-pub fn try_acquire_lock<Fd: AsRawFd>(
-    file: &Fd,
-    lock_type: LockType,
-    granularity: LockGranularity,
-) -> Result<(), LockError> {
-    let flock = get_flock(lock_type, granularity);
+    use vmm_sys_util::tempfile::TempFile;
 
-    loop {
-        let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock));
-        match res {
-            0 => return Ok(()),
-            -1 => {
-                let io_error = io::Error::last_os_error();
-                let errno = io_error.raw_os_error().unwrap();
-                match errno {
-                    // See man page for error code:
-                    // <https://man7.org/linux/man-pages/man2/fcntl.2.html>
-                    libc::EAGAIN | libc::EACCES => return Err(LockError::AlreadyLocked),
-                    libc::EINTR => continue,
-                    _ => return Err(LockError::Io(io_error)),
-                }
-            }
-            val => panic!("Unexpected return value from fcntl(): {val}"),
-        }
-    }
-}
+    use super::{LockGranularity, LockType};
 
-/// Clears a lock.
-///
-/// # Parameters
-/// - `file`: The file to clear all locks for [`LockType`].
-/// - `granularity`: The [`LockGranularity`].
-pub fn clear_lock<Fd: AsRawFd>(file: &Fd, granularity: LockGranularity) -> Result<(), LockError> {
-    try_acquire_lock(file, LockType::Unlock, granularity)
-}
+    #[test]
+    fn qemu_lock_downgrade_allows_another_reader() {
+        let disk = TempFile::new().unwrap();
+        let other_reader = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(disk.as_path())
+            .unwrap();
+        let lock = LockGranularity::QemuCompatible;
 
-/// Returns the current lock state using [`fcntl`] with respect to the given
-/// parameters.
-///
-/// # Parameters
-/// - `file`: The file for which to get the lock state.
-/// - `granularity`: The [`LockGranularity`].
-pub fn get_lock_state<Fd: AsRawFd>(
-    file: &Fd,
-    granularity: LockGranularity,
-) -> Result<LockState, LockError> {
-    let mut flock = get_flock(LockType::Write, granularity);
-    let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_GETLK(&mut flock));
-    match res {
-        0 => {
-            let state = flock.l_type as libc::c_int;
-            let state = LockState::new(state);
-            Ok(state)
-        }
-        -1 => {
-            let io_error = io::Error::last_os_error();
-            Err(LockError::Io(io_error))
-        }
-        val => panic!("Unexpected return value from fcntl(): {val}"),
+        lock.try_acquire_lock(disk.as_file(), LockType::Write, LockType::Unlock)
+            .unwrap();
+        lock.try_acquire_lock(disk.as_file(), LockType::Read, LockType::Write)
+            .unwrap();
+
+        lock.try_acquire_lock(&other_reader, LockType::Read, LockType::Unlock)
+            .unwrap();
     }
 }

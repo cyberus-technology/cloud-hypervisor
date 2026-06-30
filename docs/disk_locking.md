@@ -24,11 +24,23 @@ The `lock_granularity` parameter controls how the lock is placed on the
 disk image:
 
 ```
+--disk path=/bar.img,lock_granularity=qemu-compatible,image_type=raw
 --disk path=/foo.img,lock_granularity=byte-range,image_type=raw
 --disk path=/bar.img,lock_granularity=full,image_type=raw
 ```
 
-### `byte-range` (default)
+### `qemu-compatible` (default)
+
+Mimics QEMU's file locking behavior. Only locks marker-bytes to express
+QEMU's file locking semantics.
+
+For read-only disks, this translates to QEMU's `BLK_PERM_CONSISTENT_READ`
+with `BLK_PERM_WRITE` unshared.
+For read-write disks, this translates to QEMU's `BLK_PERM_CONSISTENT_READ`
+`BLK_PERM_WRITE` and `BLK_PERM_RESIZE` with `BLK_PERM_WRITE` and
+`BLK_PERM_RESIZE` unshared.
+
+### `byte-range`
 
 Locks the byte range `[0, physical_file_size)`. The physical file size
 is evaluated once at startup; if the file grows after the lock is
