@@ -36,7 +36,6 @@ pub enum LockError {
 enum FcntlArg<'a> {
     /// Set an OFD lock from the given lock description.
     F_OFD_SETLK(&'a libc::flock),
-    #[expect(unused, reason = "will be used in the following commits")]
     /// Get the first OFD lock for the given lock description.
     F_OFD_GETLK(&'a mut libc::flock),
 }
@@ -97,6 +96,25 @@ impl LockType {
     }
 }
 
+/// Amount of bytes by which the first lock is offset from the start of the file.
+const QEMU_LOCK_OFFSET: u64 = 100;
+/// Amount of bytes by which the first unshared lock is offset from the start of the file.
+///
+/// Unsharing is equivalent to marking lock as exclusive.
+///
+/// # Example
+///
+/// Setting `QEMU_LOCK_OFFSET` + `QEMU_READ_BYTE` indicates a reader lock that may be shared with
+/// other readers.
+/// Setting `QEMU_UNSHARE_LOCK_OFFSET` + `QEMU_READ_BYTE` additionally indicates, that the reader
+/// lock is "unshared" (exclusive) and may not be shared with others.
+const QEMU_UNSHARE_LOCK_OFFSET: u64 = 200;
+
+/// Read permission lock index for QEMU.
+const QEMU_READ_BYTE: u64 = 0;
+/// Write permission lock index for QEMU.
+const QEMU_WRITE_BYTE: u64 = 1;
+
 /// The granularity of the advisory lock.
 ///
 /// The granularity has significant implications in typical cloud deployments
@@ -118,6 +136,7 @@ impl LockType {
 pub enum LockGranularity {
     WholeFile,
     ByteRange(u64 /* from, inclusive */, u64 /* len */),
+    QemuCompatible,
 }
 
 impl LockGranularity {
@@ -125,6 +144,8 @@ impl LockGranularity {
         match self {
             LockGranularity::WholeFile => 0, /* EOF */
             LockGranularity::ByteRange(_, len) => len,
+            // QEMU uses multiple one byte long locks.
+            LockGranularity::QemuCompatible => 1,
         }
     }
 
@@ -136,9 +157,98 @@ impl LockGranularity {
         lock_type: LockType,
         l_start: u64,
     ) -> Result<(), LockError> {
-        let flock = self.flock(lock_type, l_start);
+        let flock = self.flock(lock_type.to_libc_val(), l_start);
 
         fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock))
+    }
+
+    /// Releases all locks not required for `lock_type`.
+    ///
+    /// Used to roll back a lock acquisition attempt to a previously acquired lock.
+    fn release_unneeded_locks_qemu<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+    ) -> Result<(), LockError> {
+        let flocks = match lock_type {
+            LockType::Unlock => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+            LockType::Write => vec![],
+            LockType::Read => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+        };
+
+        let mut first_error = None;
+        for flock in flocks {
+            if let Err(error) = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock)) {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(first_error) = first_error {
+            return Err(first_error);
+        }
+        Ok(())
+    }
+
+    /// Internal implementation of [`Self::try_acquire_lock`] for [`LockGranularity::QemuCompatible`].
+    fn try_acquire_lock_qemu<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+        current_lock_status: LockType,
+    ) -> Result<(), LockError> {
+        let flocks = match lock_type {
+            LockType::Unlock => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+            LockType::Write => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+            LockType::Read => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+        };
+
+        for flock in flocks {
+            if let Err(error) = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock)) {
+                if let LockType::Unlock = lock_type {
+                    return Err(error);
+                }
+                let _ = self.release_unneeded_locks_qemu(file, current_lock_status);
+                return Err(error);
+            }
+        }
+
+        if let Err(error) = self.check_lock_success_qemu(file, lock_type) {
+            let _ = self.release_unneeded_locks_qemu(file, current_lock_status);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Tries to acquire a lock using [`fcntl`] with respect to the given
@@ -151,15 +261,21 @@ impl LockGranularity {
     /// - `file`: The file to acquire a lock for [`LockType`]. The file's state will
     ///   be logically mutated, but not technically.
     /// - `lock_type`: The [`LockType`]
+    /// - `current_lock_status`: Already held locks on this `file`.
+    ///   Used for [`LockGranularity::QemuCompatible`] to roll back to if locking fails.
     pub fn try_acquire_lock<Fd: AsRawFd>(
         self,
         file: &Fd,
         lock_type: LockType,
+        current_lock_status: LockType,
     ) -> Result<(), LockError> {
         match self {
             LockGranularity::WholeFile => self.try_acquire_lock_file(file, lock_type, 0),
             LockGranularity::ByteRange(start, _) => {
                 self.try_acquire_lock_file(file, lock_type, start)
+            }
+            LockGranularity::QemuCompatible => {
+                self.try_acquire_lock_qemu(file, lock_type, current_lock_status)
             }
         }
     }
@@ -169,13 +285,49 @@ impl LockGranularity {
     /// # Parameters
     /// - `file`: The file to clear all locks for [`LockType`].
     pub fn clear_lock<Fd: AsRawFd>(self, file: &Fd) -> Result<(), LockError> {
-        self.try_acquire_lock(file, LockType::Unlock)
+        self.try_acquire_lock(file, LockType::Unlock, LockType::Unlock)
+    }
+
+    /// Checks whether any conflicting locks are set.
+    ///
+    /// Returns an error if a conflicting lock is set.
+    fn check_lock_success_qemu<Fd: AsRawFd>(
+        &self,
+        file: &Fd,
+        lock_type: LockType,
+    ) -> Result<(), LockError> {
+        let flocks = match lock_type {
+            LockType::Unlock => vec![],
+            LockType::Write => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+            LockType::Read => vec![
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+            ],
+        };
+
+        for mut flock in flocks {
+            fcntl(file.as_raw_fd(), FcntlArg::F_OFD_GETLK(&mut flock))?;
+
+            if flock.l_type as libc::c_int != libc::F_UNLCK {
+                return Err(LockError::AlreadyLocked);
+            }
+        }
+        Ok(())
     }
 
     /// Returns a [`struct@libc::flock`] structure.
-    const fn flock(self, lock_type: LockType, l_start: u64) -> libc::flock {
+    const fn flock(self, lock_type: libc::c_int, l_start: u64) -> libc::flock {
         libc::flock {
-            l_type: lock_type.to_libc_val() as libc::c_short,
+            l_type: lock_type as libc::c_short,
             l_whence: libc::SEEK_SET as libc::c_short,
             l_start: l_start as libc::c_long,
             l_len: self.l_len() as libc::c_long,
@@ -196,11 +348,13 @@ pub enum LockGranularityChoice {
     ByteRange,
     /// Whole-file lock (l_start=0, l_len=0) - original OFD whole-file lock behavior.
     Full,
+    /// Locking scheme that mimics QEMU's marker byte based locking scheme.
+    QemuCompatible,
 }
 
 /// Error returned when parsing a [`LockGranularityChoice`] from a string.
 #[derive(Error, Debug)]
-#[error("Invalid lock granularity value: {0}, expected 'byte-range' or 'full'")]
+#[error("Invalid lock granularity value: {0}, expected 'byte-range', 'full' or 'qemu-compatible'")]
 pub struct LockGranularityParseError(String);
 
 impl FromStr for LockGranularityChoice {
@@ -210,6 +364,7 @@ impl FromStr for LockGranularityChoice {
         match s {
             "byte-range" => Ok(LockGranularityChoice::ByteRange),
             "full" => Ok(LockGranularityChoice::Full),
+            "qemu-compatible" => Ok(Self::QemuCompatible),
             _ => Err(LockGranularityParseError(s.to_owned())),
         }
     }
