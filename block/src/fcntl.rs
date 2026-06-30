@@ -97,13 +97,6 @@ pub enum LockGranularity {
 }
 
 impl LockGranularity {
-    const fn l_start(self) -> u64 {
-        match self {
-            LockGranularity::WholeFile => 0,
-            LockGranularity::ByteRange(start, _) => start,
-        }
-    }
-
     const fn l_len(self) -> u64 {
         match self {
             LockGranularity::WholeFile => 0, /* EOF */
@@ -111,22 +104,15 @@ impl LockGranularity {
         }
     }
 
-    /// Tries to acquire a lock using [`fcntl`] with respect to the given
-    /// parameters.
-    ///
-    /// Please note that `fcntl()` OFD locks are **advisory locks**, which do not
-    /// prevent to `open()` a file if a lock is already placed.
-    ///
-    /// # Parameters
-    /// - `file`: The file to acquire a lock for [`LockType`]. The file's state will
-    ///   be logically mutated, but not technically.
-    /// - `lock_type`: The [`LockType`]
-    pub fn try_acquire_lock<Fd: AsRawFd>(
+    /// Internal implementation of [`Self::try_acquire_lock`] for [`LockGranularity::WholeFile`] and
+    /// [`LockGranularity::ByteRange`].
+    fn try_acquire_lock_file<Fd: AsRawFd>(
         self,
         file: &Fd,
         lock_type: LockType,
+        l_start: u64,
     ) -> Result<(), LockError> {
-        let flock = self.flock(lock_type);
+        let flock = self.flock(lock_type, l_start);
 
         loop {
             let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock));
@@ -148,6 +134,29 @@ impl LockGranularity {
         }
     }
 
+    /// Tries to acquire a lock using [`fcntl`] with respect to the given
+    /// parameters.
+    ///
+    /// Please note that `fcntl()` OFD locks are **advisory locks**, which do not
+    /// prevent to `open()` a file if a lock is already placed.
+    ///
+    /// # Parameters
+    /// - `file`: The file to acquire a lock for [`LockType`]. The file's state will
+    ///   be logically mutated, but not technically.
+    /// - `lock_type`: The [`LockType`]
+    pub fn try_acquire_lock<Fd: AsRawFd>(
+        self,
+        file: &Fd,
+        lock_type: LockType,
+    ) -> Result<(), LockError> {
+        match self {
+            LockGranularity::WholeFile => self.try_acquire_lock_file(file, lock_type, 0),
+            LockGranularity::ByteRange(start, _) => {
+                self.try_acquire_lock_file(file, lock_type, start)
+            }
+        }
+    }
+
     /// Clears a lock.
     ///
     /// # Parameters
@@ -156,12 +165,12 @@ impl LockGranularity {
         self.try_acquire_lock(file, LockType::Unlock)
     }
 
-    /// Returns a [`struct@libc::flock`] structure for the whole file.
-    const fn flock(self, lock_type: LockType) -> libc::flock {
+    /// Returns a [`struct@libc::flock`] structure.
+    const fn flock(self, lock_type: LockType, l_start: u64) -> libc::flock {
         libc::flock {
             l_type: lock_type.to_libc_val() as libc::c_short,
             l_whence: libc::SEEK_SET as libc::c_short,
-            l_start: self.l_start() as libc::c_long,
+            l_start: l_start as libc::c_long,
             l_len: self.l_len() as libc::c_long,
             l_pid: 0, /* filled by callee */
         }
