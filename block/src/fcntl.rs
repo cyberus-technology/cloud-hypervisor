@@ -344,11 +344,11 @@ impl LockGranularity {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum LockGranularityChoice {
     /// Byte-range lock covering [0, size).
-    #[default]
     ByteRange,
     /// Whole-file lock (l_start=0, l_len=0) - original OFD whole-file lock behavior.
     Full,
     /// Locking scheme that mimics QEMU's marker byte based locking scheme.
+    #[default]
     QemuCompatible,
 }
 

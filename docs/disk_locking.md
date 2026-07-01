@@ -29,7 +29,7 @@ disk image:
 --disk path=/bar.img,lock_granularity=full
 ```
 
-### `qemu-compatible`
+### `qemu-compatible` (default)
 
 Mimics QEMU's file locking behavior. Only locks marker-bytes to express
 QEMU's file locking semantics.
@@ -39,7 +39,7 @@ with `BLK_PERM_WRITE` unshared.
 For read-write disks, this translates to QEMU's `BLK_PERM_CONSISTENT_READ`
 and `BLK_PERM_WRITE` with `BLK_PERM_WRITE` unshared.
 
-### `byte-range` (default)
+### `byte-range`
 
 Locks the byte range `[0, physical_file_size)`. The physical file size
 is evaluated once at startup; if the file grows after the lock is
