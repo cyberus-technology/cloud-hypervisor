@@ -42,12 +42,33 @@ enum FcntlArg<'a> {
 }
 
 /// Wrapper for [`libc::fcntl`] that properly sets the function arguments.
-fn fcntl(fd: RawFd, arg: FcntlArg) -> libc::c_int {
-    // SAFETY: We use a valid FD.
-    unsafe {
-        match arg {
-            FcntlArg::F_OFD_SETLK(flock) => libc::fcntl(fd, libc::F_OFD_SETLK, flock),
-            FcntlArg::F_OFD_GETLK(flock) => libc::fcntl(fd, libc::F_OFD_GETLK, flock),
+fn fcntl(fd: RawFd, mut arg: FcntlArg) -> Result<(), LockError> {
+    loop {
+        // SAFETY: We use a valid FD.
+        let result = unsafe {
+            match &mut arg {
+                FcntlArg::F_OFD_SETLK(flock) => {
+                    libc::fcntl(fd, libc::F_OFD_SETLK, *flock as *const libc::flock)
+                }
+                FcntlArg::F_OFD_GETLK(flock) => {
+                    libc::fcntl(fd, libc::F_OFD_GETLK, *flock as *mut libc::flock)
+                }
+            }
+        };
+        match result {
+            0 => return Ok(()),
+            -1 => {
+                let io_error = io::Error::last_os_error();
+                let errno = io_error.raw_os_error().unwrap();
+                match errno {
+                    // See man page for error code:
+                    // <https://man7.org/linux/man-pages/man2/fcntl.2.html>
+                    libc::EAGAIN | libc::EACCES => return Err(LockError::AlreadyLocked),
+                    libc::EINTR => continue,
+                    _ => return Err(LockError::Io(io_error)),
+                }
+            }
+            val => panic!("Unexpected return value from fcntl(): {val}"),
         }
     }
 }
@@ -114,24 +135,7 @@ impl LockGranularity {
     ) -> Result<(), LockError> {
         let flock = self.flock(lock_type, l_start);
 
-        loop {
-            let res = fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock));
-            match res {
-                0 => return Ok(()),
-                -1 => {
-                    let io_error = io::Error::last_os_error();
-                    let errno = io_error.raw_os_error().unwrap();
-                    match errno {
-                        // See man page for error code:
-                        // <https://man7.org/linux/man-pages/man2/fcntl.2.html>
-                        libc::EAGAIN | libc::EACCES => return Err(LockError::AlreadyLocked),
-                        libc::EINTR => continue,
-                        _ => return Err(LockError::Io(io_error)),
-                    }
-                }
-                val => panic!("Unexpected return value from fcntl(): {val}"),
-            }
-        }
+        fcntl(file.as_raw_fd(), FcntlArg::F_OFD_SETLK(&flock))
     }
 
     /// Tries to acquire a lock using [`fcntl`] with respect to the given
