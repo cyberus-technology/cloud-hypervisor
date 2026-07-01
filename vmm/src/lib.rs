@@ -1897,6 +1897,16 @@ impl Vmm {
             MigratableError::MigrateSend(anyhow!("Error starting migration (got bad response)")),
         )?;
 
+        // Signal that the migration connection has been established. Management
+        // software can use this to distinguish short send/receive races from a
+        // real migration startup failure.
+        {
+            let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+            lock.as_mut()
+                .expect("live migration should be ongoing")
+                .update(MigrationStateOngoingPhase::Started, None, None, None);
+        }
+
         return_if_cancelled_cb(&mut socket)?;
 
         // Send config
