@@ -22,6 +22,8 @@ use std::fmt::Display;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::nested_error_to_flat_chain_as_string;
+
 #[derive(
     Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -329,7 +331,7 @@ impl MigrationProgress {
         self.timestamp_snapshot_ms = current_unix_timestamp_ms();
         self.timestamp_snapshot_relative_ms = self.timestamp_snapshot_ms - self.timestamp_begin_ms;
         self.state = MigrationState::Failed {
-            error_msg: format!("{error}",),
+            error_msg: nested_error_to_flat_chain_as_string(error),
             error_msg_debug: format!("{error:?}",),
         };
     }
