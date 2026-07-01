@@ -44,7 +44,10 @@ enum FcntlArg<'a> {
 /// Wrapper for [`libc::fcntl`] that properly sets the function arguments.
 fn fcntl(fd: RawFd, mut arg: FcntlArg) -> Result<(), LockError> {
     loop {
-        // SAFETY: We use a valid FD.
+        // SAFETY:
+        // - `F_OFD_SETLK` and `F_OFD_GETLK` fcntl calls handle invalid file descriptors.
+        // - `F_OFD_SETLK` does not modify `flock`.
+        // - `F_OFD_GETLK` uses a mutable pointer to `flock`.
         let result = unsafe {
             match &mut arg {
                 FcntlArg::F_OFD_SETLK(flock) => {
