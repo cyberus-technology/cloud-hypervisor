@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
+use std::error::Error;
+use std::iter;
+
 use anyhow::anyhow;
 pub use context::{
     CompletedMigrationContext, DowntimeContext, MemoryMigrationContext, MigrationContextError,
@@ -19,6 +22,21 @@ pub mod keep_alive_stream;
 pub mod progress;
 pub mod protocol;
 pub mod tls;
+
+/// Mimics the error chain printing of CH for migration-related errors, where we
+/// do not exit the VMM (which would print the error chain).
+pub fn nested_error_to_flat_chain_as_string(top_error: &dyn Error) -> String {
+    iter::successors(Some(top_error), |sub_error| {
+        // Dereference necessary to mitigate rustc compiler bug.
+        // See <https://github.com/rust-lang/rust/issues/141673>
+        (*sub_error).source()
+    })
+    // Important to use the plain Display impl to not interfere
+    // with anyhow's "smart" printing
+    .map(|e| format!("{e}"))
+    .collect::<Vec<_>>()
+    .join(" => ")
+}
 
 #[derive(Error, Debug)]
 pub enum UffdError {
