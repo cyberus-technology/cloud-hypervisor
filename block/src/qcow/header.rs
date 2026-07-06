@@ -242,7 +242,7 @@ impl QcowHeader {
                     let mut data = vec![0u8; ext_length as usize];
                     f.read_exact(&mut data).map_err(Error::ReadingHeader)?;
                     let table = feature_table.as_mut().unwrap();
-                    for entry in data.chunks_exact(FEATURE_NAME_ENTRY_SIZE) {
+                    for entry in data.as_chunks::<FEATURE_NAME_ENTRY_SIZE>().0 {
                         if entry[0] == FEAT_TYPE_INCOMPATIBLE {
                             let bit_number = entry[1];
                             let name_bytes = &entry[2..];
