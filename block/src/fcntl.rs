@@ -114,6 +114,8 @@ const QEMU_UNSHARE_LOCK_OFFSET: u64 = 200;
 const QEMU_READ_BYTE: u64 = 0;
 /// Write permission lock index for QEMU.
 const QEMU_WRITE_BYTE: u64 = 1;
+/// Resize permission lock index for QEMU.
+const QEMU_RESIZE_BYTE: u64 = 3;
 
 /// The granularity of the advisory lock.
 ///
@@ -177,14 +179,22 @@ impl LockGranularity {
                 LockGranularity::QemuCompatible
                     .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
                 LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
                     .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
                 LockGranularity::QemuCompatible
                     .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
             ],
             LockType::Write => vec![],
             LockType::Read => vec![
                 LockGranularity::QemuCompatible
                     .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
             ],
         };
 
@@ -214,9 +224,13 @@ impl LockGranularity {
                 LockGranularity::QemuCompatible
                     .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
                 LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
                     .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_READ_BYTE),
                 LockGranularity::QemuCompatible
                     .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_UNLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
             ],
             LockType::Write => vec![
                 LockGranularity::QemuCompatible
@@ -224,7 +238,11 @@ impl LockGranularity {
                 LockGranularity::QemuCompatible
                     .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
                 LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
                     .flock(libc::F_RDLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_RDLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
             ],
             LockType::Read => vec![
                 LockGranularity::QemuCompatible
@@ -304,7 +322,11 @@ impl LockGranularity {
                 LockGranularity::QemuCompatible
                     .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_WRITE_BYTE),
                 LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_UNSHARE_LOCK_OFFSET + QEMU_RESIZE_BYTE),
+                LockGranularity::QemuCompatible
                     .flock(libc::F_WRLCK, QEMU_LOCK_OFFSET + QEMU_WRITE_BYTE),
+                LockGranularity::QemuCompatible
+                    .flock(libc::F_WRLCK, QEMU_LOCK_OFFSET + QEMU_RESIZE_BYTE),
             ],
             LockType::Read => vec![
                 LockGranularity::QemuCompatible

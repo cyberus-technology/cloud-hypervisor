@@ -37,7 +37,8 @@ QEMU's file locking semantics.
 For read-only disks, this translates to QEMU's `BLK_PERM_CONSISTENT_READ`
 with `BLK_PERM_WRITE` unshared.
 For read-write disks, this translates to QEMU's `BLK_PERM_CONSISTENT_READ`
-and `BLK_PERM_WRITE` with `BLK_PERM_WRITE` unshared.
+`BLK_PERM_WRITE` and `BLK_PERM_RESIZE` with `BLK_PERM_WRITE` and
+`BLK_PERM_RESIZE` unshared.
 
 ### `byte-range`
 
