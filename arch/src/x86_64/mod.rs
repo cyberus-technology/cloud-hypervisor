@@ -608,7 +608,7 @@ impl CpuidFeatureEntry {
                     };
                     if !is_compatible {
                         info!(
-                            "CPUID incompatibility for value definition='{:?}' detected in leaf={:#02x}, sub-leaf={:#02x}, register={:?}, compatibility_check={:?}, source VM value='{:#04x}' destination VM value='{:#04x}'",
+                            "CPUID incompatibility for value definition='{:?}' detected in leaf={:#04x}, sub-leaf={:#04x}, register={:?}, compatibility_check={:?}, source VM value='{:#04x}' destination VM value='{:#04x}'",
                             def,
                             entry.function,
                             entry.index,
