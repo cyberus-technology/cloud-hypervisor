@@ -3275,9 +3275,9 @@ impl RequestHandler for Vmm {
             "Receiving migration: receiver_url={},tls={},net_fds={:?}, tcp_url={:?}, zones={:?}",
             receive_data_migration.receiver_url,
             receive_data_migration.tls_dir.is_some(),
-            &receive_data_migration.net_fds,
-            &receive_data_migration.tcp_serial_url,
-            &receive_data_migration.zones,
+            receive_data_migration.net_fds,
+            receive_data_migration.tcp_serial_url,
+            receive_data_migration.zones,
         );
 
         let mut listener = migration_transport::receive_migration_listener(
