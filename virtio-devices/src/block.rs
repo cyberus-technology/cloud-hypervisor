@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use std::{io, mem, result, thread};
 
 use anyhow::anyhow;
-use block::async_io::{AsyncIo, AsyncIoError};
+use block::async_io::{AsyncIo, AsyncIoError, is_same_file};
 use block::disk_file::AsyncFullDiskFile;
 use block::error::BlockError;
 use block::fcntl::{LockError, LockGranularity, LockGranularityChoice, LockType};
@@ -139,6 +139,17 @@ pub enum MirrorError {
         source_size: u64,
         destination_size: u64,
     },
+    /// Reports a failure to acquire the mirror destination advisory lock.
+    #[error("Failed to acquire {lock_type:?} lock for mirror destination: {path}")]
+    DestinationLock {
+        path: PathBuf,
+        lock_type: LockType,
+        #[source]
+        error: LockError,
+    },
+    /// Indicates that the reopened destination file differs from the mirrored one.
+    #[error("File at mirror destination {path} changed after mirroring started")]
+    DestinationChanged { path: PathBuf },
     /// Indicates that a mirror operation was requested before device activation.
     #[error("Mirror operation rejected: the device is not active")]
     DeviceNotActive,
@@ -1293,7 +1304,7 @@ impl Block {
         disk_path: &Path,
         lock_type: LockType,
         current_lock: LockType,
-    ) -> Result<()> {
+    ) -> result::Result<(), LockError> {
         let granularity = self.lock_granularity(disk_image, disk_path);
         debug!(
             "Attempting to acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
@@ -1303,18 +1314,12 @@ impl Block {
         let fd = disk_image.fd();
         granularity
             .try_acquire_lock(&fd, lock_type, current_lock)
-            .map_err(|error| {
+            .inspect_err(|_| {
                 error!(
                     "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
                     self.id,
                     disk_path.display()
                 );
-
-                Error::LockDiskImage {
-                    path: disk_path.to_path_buf(),
-                    error,
-                    lock_type,
-                }
             })?;
         info!(
             "Acquired {lock_type:?} lock for disk image id={},path={}",
@@ -1335,7 +1340,12 @@ impl Block {
             &self.disk_path,
             lock_type,
             self.held_lock,
-        )?;
+        )
+        .map_err(|error| Error::LockDiskImage {
+            path: self.disk_path.clone(),
+            error,
+            lock_type,
+        })?;
         self.held_lock = lock_type;
         Ok(())
     }
@@ -1433,6 +1443,10 @@ impl Block {
     /// to destination until all initial bytes are copied.
     /// The [`MirroringAsyncIo`] stays in place until completion, keeping the device's
     /// disk and `destination` in sync.
+    ///
+    /// The destination is write-locked before queue installation. Its open file
+    /// description retains that lock until completion transfers the backend to
+    /// the device or cancellation drops the final destination descriptor.
     pub fn start_mirror(
         &mut self,
         destination: Box<dyn AsyncFullDiskFile>,
@@ -1455,6 +1469,18 @@ impl Block {
             });
         }
 
+        self.try_lock_disk_image(
+            destination.as_ref(),
+            &destination_path,
+            LockType::Write,
+            LockType::Unlock,
+        )
+        .map_err(|error| MirrorError::DestinationLock {
+            path: destination_path.clone(),
+            lock_type: LockType::Write,
+            error,
+        })?;
+
         let (state, copy_worker) = self.initialize_mirror(destination.as_ref(), source_size)?;
 
         self.mirror_handle = Some(BlockMirrorHandle {
@@ -1476,6 +1502,10 @@ impl Block {
     /// disk is no longer used by the VM and the operator can detach or
     /// remove it.
     ///
+    /// `readonly_destination` is the read-only backend the caller opened for a
+    /// read-only device, so it does not keep the writable fd of the mirror.
+    /// With `None` the mirror destination becomes the backend.
+    ///
     /// Returns [`MirrorError::NotActive`] when no mirror is active for the
     /// device, and [`MirrorError::NotReady`] when the copy worker has not yet
     /// reported the ready phase or the mirror has since failed. Both errors
@@ -1488,7 +1518,10 @@ impl Block {
     /// switch-over has started. At that point some queues may already write
     /// to the destination only, and there is no revert that keeps
     /// acknowledged writes, so aborting is preferred over data loss.
-    pub fn complete_mirror(&mut self) -> MirrorResult<PathBuf> {
+    pub fn complete_mirror(
+        &mut self,
+        readonly_destination: Option<Box<dyn AsyncFullDiskFile>>,
+    ) -> MirrorResult<PathBuf> {
         self.ensure_not_paused_for_mirror()?;
 
         let handle = self.mirror_handle.as_ref().ok_or(MirrorError::NotActive)?;
@@ -1497,11 +1530,53 @@ impl Block {
             return Err(MirrorError::NotReady);
         }
 
+        // A read-only device keeps the backend the caller reopened read-only,
+        // so the destination lock moves from the mirror to that backend.
+        let mut destination_lock = LockType::Write;
+        let swap_disk: &dyn AsyncFullDiskFile =
+            if let Some(readonly_destination) = readonly_destination.as_deref() {
+                // The reopen used the path. Refuse a replaced destination.
+                if !is_same_file(handle.destination.fd(), readonly_destination.fd()) {
+                    return Err(MirrorError::DestinationChanged {
+                        path: handle.destination_path.clone(),
+                    });
+                }
+
+                destination_lock = LockType::Read;
+
+                let lock_error = |error| MirrorError::DestinationLock {
+                    path: handle.destination_path.clone(),
+                    lock_type: destination_lock,
+                    error,
+                };
+
+                // The destination's write lock would reject the read lock of the
+                // new backend. Downgrade it first to keep the destination locked.
+                self.try_lock_disk_image(
+                    handle.destination.as_ref(),
+                    &handle.destination_path,
+                    destination_lock,
+                    LockType::Write,
+                )
+                .map_err(lock_error)?;
+
+                self.try_lock_disk_image(
+                    readonly_destination,
+                    &handle.destination_path,
+                    destination_lock,
+                    LockType::Unlock,
+                )
+                .map_err(lock_error)?;
+
+                readonly_destination
+            } else {
+                handle.destination.as_ref()
+            };
+
         let (commands, ack_rx) = self.create_mirror_queue_commands(
             BlockQueueCommandKind::CompleteToDestination,
             |ring_depth| {
-                handle
-                    .destination
+                swap_disk
                     .create_async_io(ring_depth)
                     .map(Some)
                     .map_err(MirrorError::Backend)
@@ -1538,8 +1613,9 @@ impl Block {
             error!("copy worker thread panicked: {error:?}");
         }
 
-        self.disk_image = destination;
+        self.disk_image = readonly_destination.unwrap_or(destination);
         self.disk_path = destination_path.clone();
+        self.held_lock = destination_lock;
         Ok(destination_path)
     }
 
@@ -1810,6 +1886,12 @@ impl Block {
         }
 
         Ok(())
+    }
+
+    /// Returns the destination path of the active mirror.
+    pub fn mirror_destination_path(&self) -> Option<PathBuf> {
+        let handle = self.mirror_handle.as_ref()?;
+        Some(handle.destination_path.clone())
     }
 
     /// Returns a snapshot of the current mirror progress.
@@ -2263,6 +2345,13 @@ mod unit_tests {
         file
     }
 
+    /// Returns the access mode of a disk's backing file descriptor.
+    fn fd_access_mode(disk: &dyn AsyncFullDiskFile) -> libc::c_int {
+        let fd = disk.fd();
+        // SAFETY: F_GETFL only reads the file status flags.
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) & libc::O_ACCMODE }
+    }
+
     /// Returns a block device with an active mirror that copied everything and
     /// is ready to switch over to `destination`.
     fn block_with_ready_mirror(source: &Path, destination: &Path, read_only: bool) -> Block {
@@ -2285,6 +2374,48 @@ mod unit_tests {
             destination_path: destination.to_path_buf(),
         });
         block
+    }
+
+    /// A completed mirror must not leave the writable destination fd in place
+    /// for a read-only disk.
+    #[test]
+    fn completed_mirror_uses_a_read_only_fd_for_a_read_only_disk() {
+        let source = temp_disk();
+        let destination = temp_disk();
+        let mut block = block_with_ready_mirror(source.as_path(), destination.as_path(), true);
+
+        block
+            .complete_mirror(Some(raw_disk(destination.as_path(), true)))
+            .unwrap();
+
+        assert_eq!(
+            fd_access_mode(block.disk_image.as_ref()),
+            libc::O_RDONLY,
+            "a read-only disk must not keep a writable fd after the mirror"
+        );
+    }
+
+    /// A destination path that now points at another file must be rejected.
+    #[test]
+    fn completion_rejects_a_replaced_destination() {
+        let source = temp_disk();
+        let destination = temp_disk();
+        let other = temp_disk();
+        let mut block = block_with_ready_mirror(source.as_path(), destination.as_path(), true);
+
+        let error = block
+            .complete_mirror(Some(raw_disk(other.as_path(), true)))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MirrorError::DestinationChanged { path }
+                if path.as_path() == destination.as_path()
+        ));
+        assert!(
+            block.mirror_handle.is_some(),
+            "the mirror must stay active after a rejected completion"
+        );
     }
 
     /// Registers a fake queue worker on the block's active mirror.
@@ -2331,7 +2462,7 @@ mod unit_tests {
         let mut block = block_with_ready_mirror(source.as_path(), destination.as_path(), false);
         let worker = register_failing_mirror_worker(&mut block);
 
-        let result = block.complete_mirror();
+        let result = block.complete_mirror(None);
 
         assert!(
             matches!(result, Err(MirrorError::NotReady)),
