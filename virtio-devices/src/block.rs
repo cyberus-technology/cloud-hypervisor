@@ -1015,40 +1015,57 @@ impl Block {
         }
     }
 
+    /// Tries to acquire an advisory lock for an arbitrary disk backend.
+    fn try_lock_disk_image(
+        &self,
+        disk_image: &dyn AsyncFullDiskFile,
+        disk_path: &Path,
+        lock_type: LockType,
+        current_lock: LockType,
+    ) -> Result<()> {
+        let granularity = self.lock_granularity(disk_image, disk_path);
+        debug!(
+            "Attempting to acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
+            self.id,
+            disk_path.display()
+        );
+        let fd = disk_image.fd();
+        granularity
+            .try_acquire_lock(&fd, lock_type, current_lock)
+            .map_err(|error| {
+                error!(
+                    "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
+                    self.id,
+                    disk_path.display()
+                );
+
+                Error::LockDiskImage {
+                    path: disk_path.to_path_buf(),
+                    error,
+                    lock_type,
+                }
+            })?;
+        info!(
+            "Acquired {lock_type:?} lock for disk image id={},path={}",
+            self.id,
+            disk_path.display()
+        );
+        Ok(())
+    }
+
     /// Tries to set an advisory lock for the corresponding disk image.
     pub fn try_lock_image(&mut self) -> Result<()> {
         let lock_type = match self.read_only() {
             true => LockType::Read,
             false => LockType::Write,
         };
-        let granularity = self.lock_granularity(self.disk_image.as_ref(), &self.disk_path);
-        debug!(
-            "Attempting to acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
-            self.id,
-            self.disk_path.display()
-        );
-        let fd = self.disk_image.fd();
-        granularity
-            .try_acquire_lock(&fd, lock_type, self.held_lock)
-            .map_err(|error| {
-                error!(
-                    "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
-                    self.id,
-                    self.disk_path.display()
-                );
-
-                Error::LockDiskImage {
-                    path: self.disk_path.clone(),
-                    error,
-                    lock_type,
-                }
-            })?;
+        self.try_lock_disk_image(
+            self.disk_image.as_ref(),
+            &self.disk_path,
+            lock_type,
+            self.held_lock,
+        )?;
         self.held_lock = lock_type;
-        info!(
-            "Acquired {lock_type:?} lock for disk image id={},path={}",
-            self.id,
-            self.disk_path.display()
-        );
         Ok(())
     }
 
