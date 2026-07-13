@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
+use std::io;
 use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
@@ -56,6 +57,28 @@ impl AsRawFd for BorrowedDiskFd<'_> {
     fn as_raw_fd(&self) -> RawFd {
         self.raw_fd
     }
+}
+
+/// Returns true when `left` and `right` refer to the same file.
+pub fn is_same_file(left: BorrowedDiskFd, right: BorrowedDiskFd) -> bool {
+    matches!(
+        (file_identity(left), file_identity(right)),
+        (Ok(left), Ok(right)) if left == right
+    )
+}
+
+/// Returns the `(device ID, inode number)` identity of the file behind `fd`.
+fn file_identity(fd: BorrowedDiskFd) -> io::Result<(u64, u64)> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: `stat` points to writable memory for one `libc::stat`.
+    // `fstat` does not close or take ownership of the borrowed file descriptor.
+    let ret = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the zeroed buffer is a valid `libc::stat`.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.st_dev, stat.st_ino))
 }
 
 #[derive(Error, Debug)]
