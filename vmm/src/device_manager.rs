@@ -5572,8 +5572,20 @@ impl DeviceManager {
     /// mirror is not ready.
     pub fn mirror_disk_complete(&self, device_id: &str) -> DeviceManagerResult<()> {
         let mut disk = self.find_block_device(device_id)?;
+
+        let src = self.find_disk_config(device_id)?;
+
+        // The mirror destination is opened writable. Reopen it read-only so a
+        // read-only disk does not keep write access to it.
+        let readonly_destination = match disk.mirror_destination_path() {
+            Some(destination_path) if src.readonly => {
+                Some(Self::open_disk_with_config(&src, &destination_path, true)?)
+            }
+            _ => None,
+        };
+
         let new_path = disk
-            .complete_mirror()
+            .complete_mirror(readonly_destination)
             .map_err(DeviceManagerError::BlockMirrorComplete)?;
 
         // Repoint the config entry so a rebuild reopens the destination.
