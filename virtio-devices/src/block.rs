@@ -143,6 +143,14 @@ pub enum MirrorError {
         source_size: u64,
         destination_size: u64,
     },
+    /// Reports a failure to acquire the mirror destination advisory lock.
+    #[error("Failed to acquire {lock_type:?} lock for mirror destination: {path}")]
+    DestinationLock {
+        path: PathBuf,
+        lock_type: LockType,
+        #[source]
+        error: LockError,
+    },
     /// Indicates that a mirror operation was requested before device activation.
     #[error("Mirror operation rejected: the device is not active")]
     DeviceNotActive,
@@ -1273,7 +1281,7 @@ impl Block {
         disk_path: &Path,
         lock_type: LockType,
         current_lock: LockType,
-    ) -> Result<()> {
+    ) -> result::Result<(), LockError> {
         let granularity = self.lock_granularity(disk_image, disk_path);
         debug!(
             "Attempting to acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
@@ -1283,18 +1291,12 @@ impl Block {
         let fd = disk_image.fd();
         granularity
             .try_acquire_lock(&fd, lock_type, current_lock)
-            .map_err(|error| {
+            .inspect_err(|_| {
                 error!(
                     "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
                     self.id,
                     disk_path.display()
                 );
-
-                Error::LockDiskImage {
-                    path: disk_path.to_path_buf(),
-                    error,
-                    lock_type,
-                }
             })?;
         info!(
             "Acquired {lock_type:?} lock for disk image id={},path={}",
@@ -1315,7 +1317,12 @@ impl Block {
             &self.disk_path,
             lock_type,
             self.held_lock,
-        )?;
+        )
+        .map_err(|error| Error::LockDiskImage {
+            path: self.disk_path.clone(),
+            error,
+            lock_type,
+        })?;
         self.held_lock = lock_type;
         Ok(())
     }
@@ -1410,6 +1417,10 @@ impl Block {
     /// to destination until all initial bytes are copied.
     /// The [`MirroringAsyncIo`] stays in place until completion, keeping the device's
     /// disk and `destination` in sync.
+    ///
+    /// The destination is write-locked before queue installation. Its open file
+    /// description retains that lock until completion transfers the backend to
+    /// the device or cancellation drops the final destination descriptor.
     pub fn start_mirror(
         &mut self,
         destination: Box<dyn AsyncFullDiskFile>,
@@ -1431,6 +1442,18 @@ impl Block {
                 destination_size,
             });
         }
+
+        self.try_lock_disk_image(
+            destination.as_ref(),
+            &destination_path,
+            LockType::Write,
+            LockType::Unlock,
+        )
+        .map_err(|error| MirrorError::DestinationLock {
+            path: destination_path.clone(),
+            lock_type: LockType::Write,
+            error,
+        })?;
 
         let (state, copy_worker) = self.initialize_mirror(destination.as_ref(), source_size)?;
 
@@ -1472,6 +1495,23 @@ impl Block {
             return Err(MirrorError::NotReady);
         }
 
+        let destination_lock = if self.read_only() {
+            LockType::Read
+        } else {
+            LockType::Write
+        };
+        self.try_lock_disk_image(
+            handle.destination.as_ref(),
+            &handle.destination_path,
+            destination_lock,
+            LockType::Write,
+        )
+        .map_err(|error| MirrorError::DestinationLock {
+            path: handle.destination_path.clone(),
+            lock_type: destination_lock,
+            error,
+        })?;
+
         let (commands, ack_rx) = self.create_mirror_queue_commands(
             BlockQueueCommandKind::CompleteToDestination,
             |ring_depth| {
@@ -1511,6 +1551,7 @@ impl Block {
 
         self.disk_image = destination;
         self.disk_path = destination_path.clone();
+        self.held_lock = destination_lock;
         Ok(destination_path)
     }
 
