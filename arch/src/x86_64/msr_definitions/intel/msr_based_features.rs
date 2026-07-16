@@ -4030,69 +4030,83 @@ fn check_arch_capabilities_compatibility(
     src_id: &str,
     dest_id: &str,
 ) -> Result<(), ()> {
-    // Make a mask out of
-    const RDCL_NO: u64 = 1 << 0;
-    const IBRS_ALL: u64 = 1 << 1;
-    const SKIP_L1_DFL_VMENTRY: u64 = 1 << 3;
-    const SSB_NO: u64 = 1 << 4;
-    const MDS_NO: u64 = 1 << 5;
-    const TSX_CONTROL: u64 = 1 << 7;
-    const TAA_NO: u64 = 1 << 8;
-    const MCU_CONTROL: u64 = 1 << 9;
-    const MISC_PACKAGE_CTLS: u64 = 1 << 10;
-    const ENERGY_FILTERING_CTL: u64 = 1 << 11;
-    const DOITM: u64 = 1 << 12;
-    const MCU_ENUMERATION: u64 = 1 << 16;
-    const FB_CLEAR: u64 = 1 << 17;
-    const FB_CLEAR_CTRL: u64 = 1 << 18;
-    const BHI_NO: u64 = 1 << 20;
-    const XAPIC_DISABLE_STATUS: u64 = 1 << 21;
-    const MCU_EXTENDED_SERVICE: u64 = 1 << 22;
-    const OVERCLOCKING_STATUS: u64 = 1 << 23;
-    const PBRSB_NO: u64 = 1 << 24;
-    const GDS_CTRL: u64 = 1 << 25;
-    const GDS_NO: u64 = 1 << 26;
-    const RFDS_NO: u64 = 1 << 27;
-    // TODO: Should we perhaps ignore checking this (is it too strict)?
-    const RFDS_CLEAR: u64 = 1 << 28;
-    const IGN_UMONITOR_SUPPORT: u64 = 1 << 29;
-    const MON_UMON_MITG_SUPPORT: u64 = 1 << 30;
-    const PBOPT_SUPPORT: u64 = 1 << 32;
+    let definitions = msr_definitions::<{ RegisterAddress::IA32_ARCH_CAPABILITIES.0 }>();
+    let check_id = "IA32_ARCH_CAPABILITIES";
 
-    let mask: u64 = {
-        RDCL_NO
-            | IBRS_ALL
-            | SKIP_L1_DFL_VMENTRY
-            | SSB_NO
-            | MDS_NO
-            | TAA_NO
-            | TSX_CONTROL
-            | MCU_CONTROL
-            | MISC_PACKAGE_CTLS
-            | ENERGY_FILTERING_CTL
-            | DOITM
-            | MCU_ENUMERATION
-            | FB_CLEAR
-            | FB_CLEAR_CTRL
-            | XAPIC_DISABLE_STATUS
-            | MCU_EXTENDED_SERVICE
-            | OVERCLOCKING_STATUS
-            | GDS_CTRL
-            | IGN_UMONITOR_SUPPORT
-            | MON_UMON_MITG_SUPPORT
-            | PBOPT_SUPPORT
-            | RFDS_CLEAR
-            | PBRSB_NO
-            | GDS_NO
-            | RFDS_NO
-            | BHI_NO
+    const RSBA_MASK: u64 = 1 << 2;
+    const RRSBA_MASK: u64 = 1 << 19;
+    // We consider it unsafe to migrate from a machine without RSBA or RRSBA to one that advertises this behavior.
+    // We consider the converse safe: Return stack buffer underflow mitigations can still be applied even if they
+    // may no longer be necessary after migrating. This of course assumes that the destination is capable of applying
+    // said mitigations, but that should be ensured by other CPUID and/or MSR value checks.
+    const SUPERSET_MASK: u64 = RSBA_MASK | RRSBA_MASK;
+
+    // Bits 31 and 33..=61 are (currently) reserved
+    const RESERVED_MASK: u64 = {
+        let bits_0_to_61 = (1_u64 << 62) - 1;
+        let bits_0_to_32 = (1_u64 << 33) - 1;
+        (bits_0_to_61 ^ bits_0_to_32) | (1 << 31)
     };
-    if let Err(only_in_src) = check_subset(src_val & mask, dest_val & mask) {
+
+    const SUBSET_MASK: u64 = !(SUPERSET_MASK | RESERVED_MASK);
+
+    const MDS_NO_MASK: u64 = 1 << 5;
+    const TAA_NO_MASK: u64 = 1 << 8;
+    const SBDR_SSDP_NO_MASK: u64 = 1 << 13;
+    const FBSDP_NO_MASK: u64 = 1 << 14;
+    const PSDP_NO_MASK: u64 = 1 << 15;
+    const FB_CLEAR_MASK: u64 = 1 << 17;
+    const TOLERATE_MISSING_FB_CLEAR_MASK: u64 =
+        MDS_NO_MASK | TAA_NO_MASK | SBDR_SSDP_NO_MASK | FBSDP_NO_MASK | PSDP_NO_MASK;
+
+    // For safety reasons we will require equality on the reserved bits for now: If/when they become unreserved then we can adjust the checks
+    // accordingly.
+    let reserved_eq_check = {
+        let src_reserved = src_val & RESERVED_MASK;
+        let dest_reserved = dest_val & RESERVED_MASK;
+        if src_reserved == dest_reserved {
+            true
+        } else {
+            let only_in_src = src_reserved & (src_reserved ^ dest_reserved);
+            let only_in_dest = dest_reserved & (dest_reserved ^ src_reserved);
+            log_features_only_in(only_in_src, src_id, definitions, check_id);
+            log_features_only_in(only_in_dest, dest_id, definitions, check_id);
+            false
+        }
+    };
+
+    let mut subset_check = true;
+    if let Err(only_in_src) = check_subset(src_val & SUBSET_MASK, dest_val & SUBSET_MASK) {
+        // If the only bit that is only in source is 17 (FB_CLEAR) and dest_val has
+        // certain mitigation bits set, then src_val is actually compatible with
+        // dest_val. QEMU does in fact always artificially set bit 17 in that case: See
+        // https://github.com/qemu/qemu/blob/v11.0.1/target/i386/kvm/kvm.c#L679-L685
+        //
+        // TODO: Perhaps we should also rather make Hypervisor::get_msr_based_features() adjust bit
+        // 17? With CPU profiles this doesn't seem necessary though.
+        if !(((dest_val & TOLERATE_MISSING_FB_CLEAR_MASK) == TOLERATE_MISSING_FB_CLEAR_MASK)
+            && (only_in_src == FB_CLEAR_MASK))
+        {
+            subset_check = false;
+            log_features_only_in(only_in_src, src_id, definitions, check_id);
+        }
+    }
+
+    let superset_check = {
+        if let Err(only_in_dest) = check_subset(dest_val & SUPERSET_MASK, src_val & SUPERSET_MASK) {
+            log_features_only_in(only_in_dest, dest_id, definitions, check_id);
+            false
+        } else {
+            true
+        }
+    };
+
+    let is_err = !(reserved_eq_check && subset_check && superset_check);
+
+    if is_err {
         error!(
-            "IA32_ARCH_CAPABILITIES compatibility check failed: {src_id} value:={src_val:#x}, {dest_id} value:={dest_val:#x}"
+            "IA32_ARCH_CAPABILITIES compatibility check failed: {src_id} value={src_val:#x}, {dest_id} value={dest_val:#x}"
         );
-        let definitions = msr_definitions::<{ RegisterAddress::IA32_ARCH_CAPABILITIES.0 }>();
-        log_features_only_in(only_in_src, src_id, definitions, "IA32_ARCH_CAPABILITIES");
         Err(())
     } else {
         Ok(())
