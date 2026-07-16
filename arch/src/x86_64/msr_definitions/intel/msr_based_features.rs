@@ -4092,7 +4092,7 @@ fn check_arch_capabilities_compatibility(
             "IA32_ARCH_CAPABILITIES compatibility check failed: {src_id} value:={src_val:#x}, {dest_id} value:={dest_val:#x}"
         );
         let definitions = msr_definitions::<{ RegisterAddress::IA32_ARCH_CAPABILITIES.0 }>();
-        log_features_only_in_src(only_in_src, src_id, definitions, "IA32_ARCH_CAPABILITIES");
+        log_features_only_in(only_in_src, src_id, definitions, "IA32_ARCH_CAPABILITIES");
         Err(())
     } else {
         Ok(())
@@ -4208,7 +4208,7 @@ fn check_vmx_misc_msr(
     ) {
         is_err = true;
         let definitions = msr_definitions::<{ RegisterAddress::IA32_VMX_MISC.0 }>();
-        log_features_only_in_src(only_in_src, src_id, definitions, "IA32_VMX_MISC");
+        log_features_only_in(only_in_src, src_id, definitions, "IA32_VMX_MISC");
     }
 
     let eq_mask: u64 = {
@@ -4333,7 +4333,7 @@ fn check_vpid_and_ept_capabilities(
     {
         is_err = true;
         let definitions = msr_definitions::<{ RegisterAddress::IA32_VMX_EPT_VPID_CAP.0 }>();
-        log_features_only_in_src(
+        log_features_only_in(
             bits_only_in_src,
             src_id,
             definitions,
@@ -4370,29 +4370,23 @@ fn for_each_bitpos(bits: u64, mut cb: impl FnMut(u8)) {
     }
 }
 
+/// Log feature bits that are only set for `id` at the debug level.
 #[inline(never)]
 #[cold]
-fn log_features_only_in_src(
-    only_in_src: u64,
-    src_id: &str,
-    definitions: &[ValueDefinition],
-    check_id: &str,
-) {
-    for_each_bitpos(only_in_src, |bit_pos| {
+fn log_features_only_in(only_in: u64, id: &str, definitions: &[ValueDefinition], check_id: &str) {
+    for_each_bitpos(only_in, |bit_pos| {
         let Some(def) = definitions
             .iter()
             .find(|def| (def.bits_range.0..=def.bits_range.1).contains(&bit_pos))
         else {
-            debug!(
-                "{check_id} compatibility check failed: bit:={bit_pos} is only set for {src_id}"
-            );
+            debug!("{check_id} compatibility check failed: bit:={bit_pos} is only set for {id}");
             warn!(
                 "unable to produce proper debug log: No MSR value definition found for bit:={bit_pos} check:={check_id} compatibility"
             );
             return;
         };
         debug!(
-            "{check_id} compatibility check failed: feature bit {bit_pos} only set for {src_id}: feature definition:={def:?}"
+            "{check_id} compatibility check failed: feature bit {bit_pos} only set for {id}: feature definition:={def:?}"
         );
     });
 }
