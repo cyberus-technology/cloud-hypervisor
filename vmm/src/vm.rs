@@ -3041,10 +3041,23 @@ impl Vm {
             self.vm.resume().map_err(Error::ResumeVm)?;
         }
 
+        let prefault_ranges = {
+            let prefault_ranges = self
+                .memory_manager
+                .lock()
+                .unwrap()
+                .prefault_memory_range_table(false);
+            if !self.vm.supports_prefault_memory() || prefault_ranges.is_empty() {
+                None
+            } else {
+                Some(prefault_ranges)
+            }
+        };
+
         self.cpu_manager
             .lock()
             .unwrap()
-            .start_boot_vcpus(new_state == VmState::BreakPoint, None)
+            .start_boot_vcpus(new_state == VmState::BreakPoint, prefault_ranges)
             .map_err(Error::CpuManager)?;
 
         self.state = new_state;
@@ -3066,10 +3079,23 @@ impl Vm {
         // self.post_migration_announce();
 
         // Now we can start all vCPUs from here.
+        let prefault_ranges = {
+            let prefault_ranges = self
+                .memory_manager
+                .lock()
+                .unwrap()
+                .prefault_memory_range_table(false);
+            if !self.vm.supports_prefault_memory() || prefault_ranges.is_empty() {
+                None
+            } else {
+                Some(prefault_ranges)
+            }
+        };
+
         self.cpu_manager
             .lock()
             .unwrap()
-            .start_restored_vcpus(None)
+            .start_restored_vcpus(prefault_ranges)
             .map_err(Error::CpuManager)?;
 
         event!("vm", "restored");
