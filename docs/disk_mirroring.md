@@ -60,6 +60,10 @@ curl --unix-socket /tmp/cloud-hypervisor.sock -i \
 This switches the disk to a mirroring backend and starts the background copy.
 The VM keeps serving I/O throughout. A `204` response means mirroring started.
 
+Mirroring supports standalone QCOW2 images. QCOW2 sources and destinations
+with backing files are rejected because mirroring copies the full logical
+contents and would flatten the image.
+
 ### Check progress
 
 ```console
