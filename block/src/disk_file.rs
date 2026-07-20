@@ -36,7 +36,7 @@
 use std::fmt::Debug;
 
 use crate::async_io::{AsyncIo, BorrowedDiskFd};
-use crate::{BlockResult, DiskTopology};
+use crate::{BlockError, BlockErrorKind, BlockResult, DiskTopology};
 
 /// Reported capacity of a disk image.
 pub trait DiskSize: Send + Debug {
@@ -96,7 +96,12 @@ pub trait Resizable: Send + Debug {
 /// Every disk format implements `DiskSize` and `Geometry`.
 /// `Sync` is required so that `Arc<dyn DiskFile>` can be shared
 /// across threads for concurrent readonly access.
-pub trait DiskFile: DiskSize + Geometry + Sync {}
+pub trait DiskFile: DiskSize + Geometry + Sync {
+    /// Returns an error if this disk image cannot participate in block mirroring.
+    fn supports_mirroring(&self) -> BlockResult<()> {
+        Err(BlockError::from_kind(BlockErrorKind::UnsupportedFeature))
+    }
+}
 
 /// Full capability disk file trait.
 ///
