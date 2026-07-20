@@ -266,6 +266,10 @@ impl LockGranularity {
             let _ = self.release_unneeded_locks_qemu(file, current_lock_status);
             return Err(error);
         }
+
+        // When downgrading a Write lock to a Read lock, the
+        // previously locked write marker needs to be unlocked.
+        self.release_unneeded_locks_qemu(file, lock_type)?;
         Ok(())
     }
 
@@ -389,5 +393,33 @@ impl FromStr for LockGranularityChoice {
             "qemu-compatible" => Ok(Self::QemuCompatible),
             _ => Err(LockGranularityParseError(s.to_owned())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
+
+    use vmm_sys_util::tempfile::TempFile;
+
+    use super::{LockGranularity, LockType};
+
+    #[test]
+    fn qemu_lock_downgrade_allows_another_reader() {
+        let disk = TempFile::new().unwrap();
+        let other_reader = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(disk.as_path())
+            .unwrap();
+        let lock = LockGranularity::QemuCompatible;
+
+        lock.try_acquire_lock(disk.as_file(), LockType::Write, LockType::Unlock)
+            .unwrap();
+        lock.try_acquire_lock(disk.as_file(), LockType::Read, LockType::Write)
+            .unwrap();
+
+        lock.try_acquire_lock(&other_reader, LockType::Read, LockType::Unlock)
+            .unwrap();
     }
 }
