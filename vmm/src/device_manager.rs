@@ -5525,6 +5525,9 @@ impl DeviceManager {
             ));
         }
 
+        disk.supports_mirroring()
+            .map_err(DeviceManagerError::BlockMirrorStart)?;
+
         // Refuse a destination that already backs one of this VM's disks, comparing canonicalized paths.
         let canon =
             |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

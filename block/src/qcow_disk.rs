@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::File;
+use std::io::Error as IoError;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::{fmt, io};
@@ -142,7 +143,18 @@ impl disk_file::Resizable for QcowDisk {
     }
 }
 
-impl disk_file::DiskFile for QcowDisk {}
+impl disk_file::DiskFile for QcowDisk {
+    fn supports_mirroring(&self) -> BlockResult<()> {
+        if self.backing_file.is_some() {
+            return Err(BlockError::new(
+                BlockErrorKind::UnsupportedFeature,
+                IoError::other("block mirroring does not support backing files"),
+            ));
+        }
+
+        Ok(())
+    }
+}
 
 impl disk_file::AsyncDiskFile for QcowDisk {
     fn try_clone(&self) -> BlockResult<Box<dyn disk_file::AsyncDiskFile>> {
