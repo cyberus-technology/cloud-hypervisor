@@ -1452,6 +1452,11 @@ impl Block {
         destination: Box<dyn AsyncFullDiskFile>,
         destination_path: PathBuf,
     ) -> MirrorResult<()> {
+        self.supports_mirroring()?;
+        destination
+            .supports_mirroring()
+            .map_err(MirrorError::Unsupported)?;
+
         // Mirroring requires activation to have installed at least one live queue worker.
         if self.common.workers.is_none() || self.queue_cmd_senders.is_empty() {
             return Err(MirrorError::DeviceNotActive);
@@ -1490,6 +1495,13 @@ impl Block {
             destination_path,
         });
         Ok(())
+    }
+
+    /// Returns an error if this disk image cannot participate in block mirroring.
+    pub fn supports_mirroring(&self) -> MirrorResult<()> {
+        self.disk_image
+            .supports_mirroring()
+            .map_err(MirrorError::Unsupported)
     }
 
     /// Switch the device's mirroring wrapper to the destination disk.
@@ -2292,12 +2304,39 @@ mod tests {
 
 #[cfg(test)]
 mod unit_tests {
+    use block::error::BlockErrorKind;
     use block::factory::{DiskOpenOptions, open_disk};
+    use block::formats::qcow::{BackingFileConfig, ImageType, QcowDisk, QcowTempDisk};
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
 
     const TEST_DISK_SIZE: u64 = 1 << 20;
+
+    fn qcow2_disk(with_backing_file: bool) -> (TempFile, Box<dyn AsyncFullDiskFile>) {
+        let backing = with_backing_file.then(|| TempFile::new().unwrap());
+        let backing_config = backing.as_ref().map(|backing| {
+            backing.as_file().set_len(TEST_DISK_SIZE).unwrap();
+            BackingFileConfig {
+                path: backing.as_path().to_string_lossy().into_owned(),
+                format: Some(ImageType::Raw),
+            }
+        });
+        let image = QcowTempDisk::new(TEST_DISK_SIZE, backing_config.as_ref(), false, true, false)
+            .unwrap()
+            .into_tempfile();
+
+        let disk = QcowDisk::new(
+            image.as_file().try_clone().unwrap(),
+            false,
+            with_backing_file,
+            true,
+            false,
+        )
+        .unwrap();
+
+        (image, Box::new(disk))
+    }
 
     fn block_with_disk(
         disk_path: &Path,
@@ -2377,6 +2416,40 @@ mod unit_tests {
             destination_path: destination.to_path_buf(),
         });
         block
+    }
+
+    #[test]
+    fn mirror_rejects_qcow2_backing_source() {
+        let (source_file, source) = qcow2_disk(true);
+        let (destination_file, destination) = qcow2_disk(false);
+        let mut block = block_with_disk(source_file.as_path(), source, false);
+
+        let error = block
+            .start_mirror(destination, destination_file.as_path().to_path_buf())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MirrorError::Unsupported(error)
+                if error.kind() == BlockErrorKind::UnsupportedFeature
+        ));
+    }
+
+    #[test]
+    fn mirror_rejects_qcow2_backing_destination() {
+        let (source_file, source) = qcow2_disk(false);
+        let (destination_file, destination) = qcow2_disk(true);
+        let mut block = block_with_disk(source_file.as_path(), source, false);
+
+        let error = block
+            .start_mirror(destination, destination_file.as_path().to_path_buf())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MirrorError::Unsupported(error)
+                if error.kind() == BlockErrorKind::UnsupportedFeature
+        ));
     }
 
     /// A completed mirror must not leave the writable destination fd in place
