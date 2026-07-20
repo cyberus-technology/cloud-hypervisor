@@ -3044,7 +3044,7 @@ impl Vm {
         self.cpu_manager
             .lock()
             .unwrap()
-            .start_boot_vcpus(new_state == VmState::BreakPoint)
+            .start_boot_vcpus(new_state == VmState::BreakPoint, None)
             .map_err(Error::CpuManager)?;
 
         self.state = new_state;
@@ -3069,7 +3069,7 @@ impl Vm {
         self.cpu_manager
             .lock()
             .unwrap()
-            .start_restored_vcpus()
+            .start_restored_vcpus(None)
             .map_err(Error::CpuManager)?;
 
         event!("vm", "restored");

@@ -74,6 +74,7 @@ use vm_memory::ByteValued;
 #[cfg(feature = "guest_debug")]
 use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
+use vm_migration::protocol::MemoryRangeTable;
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable, Transportable,
     snapshot_from_id,
@@ -1269,6 +1270,7 @@ impl CpuManager {
         vcpu_id: u32,
         vcpu_thread_barrier: Arc<Barrier>,
         inserting: bool,
+        prefault_ranges: Option<MemoryRangeTable>,
     ) -> Result<()> {
         let reset_evt = self.reset_evt.try_clone().unwrap();
         let exit_evt = self.exit_evt.try_clone().unwrap();
@@ -1437,6 +1439,16 @@ impl CpuManager {
                             error!("Error applying seccomp filter: {e:?}");
                             return;
                         }
+
+                    if let Some(ranges)= prefault_ranges.as_ref() {
+                        let vcpu = vcpu.lock().unwrap();
+                        for range in ranges.ranges() {
+                            if let Err(e) = vcpu.vcpu.prefault_memory(range.gpa, range.length) {
+                                error!("Error prefaulting guest memory (GPA: {:#x}, size: {:#x} for vCPU {vcpu_id}: {e}", range.gpa, range.length);
+                                return;
+                            }
+                        }
+                    }
 
                     #[cfg(not(feature = "kvm"))]
                     extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {}
@@ -1640,6 +1652,7 @@ impl CpuManager {
         desired_vcpus: u32,
         inserting: bool,
         paused: Option<bool>,
+        mut prefault_ranges: Option<MemoryRangeTable>,
     ) -> Result<()> {
         if desired_vcpus > self.config.max_vcpus {
             return Err(Error::DesiredVCpuCountExceedsMax);
@@ -1664,7 +1677,13 @@ impl CpuManager {
         // This reuses any inactive vCPUs as well as any that were newly created
         for vcpu_id in self.present_vcpus()..desired_vcpus {
             let vcpu = Arc::clone(&self.vcpus[vcpu_id as usize]);
-            self.start_vcpu(vcpu, vcpu_id, vcpu_thread_barrier.clone(), inserting)?;
+            self.start_vcpu(
+                vcpu,
+                vcpu_id,
+                vcpu_thread_barrier.clone(),
+                inserting,
+                prefault_ranges.take(),
+            )?;
         }
 
         // Unblock all CPU threads.
@@ -1704,8 +1723,12 @@ impl CpuManager {
     }
 
     // Starts all the vCPUs that the VM is booting with. Blocks until all vCPUs are running.
-    pub fn start_boot_vcpus(&mut self, paused: bool) -> Result<()> {
-        self.activate_vcpus(self.boot_vcpus(), false, Some(paused))
+    pub fn start_boot_vcpus(
+        &mut self,
+        paused: bool,
+        prefault_ranges: Option<MemoryRangeTable>,
+    ) -> Result<()> {
+        self.activate_vcpus(self.boot_vcpus(), false, Some(paused), prefault_ranges)
     }
 
     #[cfg(feature = "mshv")]
@@ -1727,8 +1750,11 @@ impl CpuManager {
         Ok(())
     }
 
-    pub fn start_restored_vcpus(&mut self) -> Result<()> {
-        self.activate_vcpus(self.vcpus.len() as u32, false, Some(true))
+    pub fn start_restored_vcpus(
+        &mut self,
+        prefault_ranges: Option<MemoryRangeTable>,
+    ) -> Result<()> {
+        self.activate_vcpus(self.vcpus.len() as u32, false, Some(true), prefault_ranges)
             .map_err(|e| {
                 Error::StartRestoreVcpu(anyhow!("Failed to start restored vCPUs: {e:#?}"))
             })?;
@@ -1760,7 +1786,7 @@ impl CpuManager {
                     let mut vcpu = vcpu.lock().unwrap();
                     self.configure_vcpu(&mut vcpu, None)?;
                 }
-                self.activate_vcpus(desired_vcpus, true, None)?;
+                self.activate_vcpus(desired_vcpus, true, None, None)?;
                 Ok(true)
             }
             cmp::Ordering::Less => {
