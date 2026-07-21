@@ -1965,18 +1965,8 @@ impl VirtioDevice for Block {
     }
 
     fn reset(&mut self) {
-        // Cancel the copy worker without reverting the queues: reverting
-        // rebuilds an AsyncIo (io_setup) on this vcpu thread, which seccomp
-        // blocks. The queues are dropped by common.reset() and rebuilt by
-        // activate() anyway.
-        if let Some(handle) = self.mirror_handle.take() {
-            handle.state.transition_to_phase(MirrorPhase::Cancelling);
-            if let Err(e) = handle.copy_worker.join() {
-                error!("copy worker thread panicked: {e:?}");
-            }
-        }
-
         self.common.reset();
+        self.queue_cmd_senders.clear();
         self.draining_active_requests.store(false, Ordering::SeqCst);
         self.active_request_count.store(0, Ordering::SeqCst);
         self.set_writeback_mode(true);

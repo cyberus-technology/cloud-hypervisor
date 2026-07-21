@@ -139,9 +139,12 @@ unacknowledged.
 
 While a mirror is active, the VMM rejects operations that would disturb it:
 snapshotting, live migration, resizing the disk, removing the device, and
-rebooting, shutting down, or deleting the VM. Complete or cancel the mirror
-first. Pausing the VM is allowed, but a mirror cannot be started, completed,
-or cancelled while the device is paused.
+API requests to reboot, shut down, or delete the VM. Complete or cancel the
+mirror first. If the guest requests a reboot or shutdown, the VMM stops the
+guest but keeps the mirror and API available. The requested lifecycle operation
+continues after the operator completes or cancels every active mirror. Pausing
+the VM is allowed, but a mirror cannot be started, completed, or cancelled while
+the device is paused.
 
 ## Implementation details
 
