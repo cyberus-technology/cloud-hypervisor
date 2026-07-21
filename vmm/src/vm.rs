@@ -2238,6 +2238,11 @@ impl Vm {
     pub fn shutdown(&mut self) -> Result<()> {
         let new_state = VmState::Shutdown;
 
+        // Shutting down an already shut down VM is a no-op
+        if self.state == new_state {
+            return Ok(());
+        }
+
         self.state.valid_transition(new_state)?;
 
         // Wake up the DeviceManager threads so they will get terminated cleanly
