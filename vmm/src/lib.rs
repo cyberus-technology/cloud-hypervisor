@@ -78,7 +78,7 @@ use crate::migration_transport::{
     ReceiveAdditionalConnections, ReceiveListener, SendAdditionalConnections, SocketStream,
 };
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
-use crate::vm::{Error as VmError, PostMigrationLifecycleEvent, Vm, VmState};
+use crate::vm::{Error as VmError, PostponedLifecycleEvent, Vm, VmState};
 use crate::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, MemoryZoneConfig, NetConfig,
     PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
@@ -682,7 +682,7 @@ struct MigrationWorker {
     check_migration_evt: EventFd,
     config: VmSendMigrationData,
     // Shared with main VMM thread
-    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+    postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     cancel: Arc<AtomicBool>,
@@ -724,7 +724,7 @@ impl MigrationWorker {
         vm: Vm,
         check_migration_evt: EventFd,
         config: VmSendMigrationData,
-        postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+        postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
             dyn hypervisor::Hypervisor,
         >,
@@ -872,10 +872,22 @@ pub struct Vmm {
     console_info: Option<ConsoleInfo>,
     no_shutdown: bool,
     check_migration_evt: EventFd,
-    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
-    received_postponed_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+    postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
+    received_postponed_lifecycle_event: Option<PostponedLifecycleEvent>,
     /// Handle to the [`MigrationWorker`] thread.
     migration_thread_handle: Option<MigrationWorkerHandle>,
+}
+
+/// Replays a postponed guest lifecycle event.
+fn replay_lifecycle_event(
+    event: PostponedLifecycleEvent,
+    reset_evt: &EventFd,
+    guest_exit_evt: &EventFd,
+) -> io::Result<()> {
+    match event {
+        PostponedLifecycleEvent::VmReboot => reset_evt.write(1),
+        PostponedLifecycleEvent::VmShutdown => guest_exit_evt.write(1),
+    }
 }
 
 /// Just a wrapper for the data that goes into
@@ -1108,7 +1120,7 @@ impl Vmm {
         })
     }
 
-    fn postpone_lifecycle_event_during_migration(&self, event: PostMigrationLifecycleEvent) {
+    fn postpone_lifecycle_event(&self, event: PostponedLifecycleEvent) {
         let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
         if postponed_event.is_none() {
             *postponed_event = Some(event);
@@ -1116,13 +1128,21 @@ impl Vmm {
         }
     }
 
-    fn current_postponed_lifecycle_event(&self) -> Option<PostMigrationLifecycleEvent> {
-        *self.postponed_lifecycle_event.lock().unwrap()
-    }
-
     fn clear_postponed_lifecycle_event(&self) {
         let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
         *postponed_event = None;
+    }
+
+    /// Replays and clears the postponed lifecycle event.
+    fn replay_postponed_lifecycle_event(&self) {
+        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+        let Some(event) = *postponed_event else {
+            return;
+        };
+        match replay_lifecycle_event(event, &self.reset_evt, &self.guest_exit_evt) {
+            Ok(()) => *postponed_event = None,
+            Err(e) => error!("Failed replaying postponed lifecycle event: {e}"),
+        }
     }
 
     /// Try to receive a file descriptor from a socket. Returns the slot number and the file descriptor.
@@ -1306,16 +1326,9 @@ impl Vmm {
                                 resume_duration.as_millis()
                             );
                         }
-                        Some(PostMigrationLifecycleEvent::VmReboot) => {
-                            self.reset_evt
-                                .write(1)
-                                .context("Failed writing reset eventfd after migration")
-                                .map_err(MigratableError::MigrateReceive)?;
-                        }
-                        Some(PostMigrationLifecycleEvent::VmShutdown) => {
-                            self.guest_exit_evt
-                                .write(1)
-                                .context("Failed writing guest exit eventfd after migration")
+                        Some(event) => {
+                            replay_lifecycle_event(event, &self.reset_evt, &self.guest_exit_evt)
+                                .context("Failed replaying lifecycle event after migration")
                                 .map_err(MigratableError::MigrateReceive)?;
                         }
                     }
@@ -1592,7 +1605,7 @@ impl Vmm {
         ctx: &mut MemoryMigrationContext,
         is_converged: impl Fn(&MemoryMigrationContext) -> result::Result<bool, MigratableError>,
         mem_send: &mut SendAdditionalConnections,
-        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<MemoryRangeTable /* remaining */, MigratableError> {
         let total_memory_size_bytes = vm
@@ -1803,7 +1816,7 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         mem_send: &mut SendAdditionalConnections,
         ctx: &mut OngoingMigrationContext,
-        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<(), MigratableError> {
         let mut mem_ctx = MemoryMigrationContext::new();
@@ -1865,7 +1878,7 @@ impl Vmm {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor: &dyn hypervisor::Hypervisor,
         send_data_migration: &VmSendMigrationData,
-        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         cancel: Arc<AtomicBool>,
     ) -> result::Result<(), MigratableError> {
         // State machine that is updated with more context as we progress.
@@ -2261,24 +2274,7 @@ impl Vmm {
             // Give VMM back control.
             self.vm = MaybeVmOwnership::Vmm(vm);
 
-            if let Some(event) = self.current_postponed_lifecycle_event() {
-                match event {
-                    PostMigrationLifecycleEvent::VmReboot => {
-                        self.reset_evt
-                            .write(1)
-                            .context("Failed replaying reset event after failed migration")
-                            .inspect_err(|write_err| error!("{write_err}"))
-                            .ok();
-                    }
-                    PostMigrationLifecycleEvent::VmShutdown => {
-                        self.guest_exit_evt
-                            .write(1)
-                            .context("Failed replaying guest exit event after failed migration")
-                            .inspect_err(|write_err| error!("{write_err}"))
-                            .ok();
-                    }
-                }
-            }
+            self.replay_postponed_lifecycle_event();
         };
 
         match migration_res {
@@ -2384,9 +2380,7 @@ impl Vmm {
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
                         // Workaround for guest-induced shutdown during a live-migration.
                         if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
-                            self.postpone_lifecycle_event_during_migration(
-                                PostMigrationLifecycleEvent::VmReboot,
-                            );
+                            self.postpone_lifecycle_event(PostponedLifecycleEvent::VmReboot);
                             continue;
                         }
                         self.vm_reboot().map_err(Error::VmReboot)?;
@@ -2396,9 +2390,7 @@ impl Vmm {
                         self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
                         // Workaround for guest-induced shutdown during a live-migration.
                         if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
-                            self.postpone_lifecycle_event_during_migration(
-                                PostMigrationLifecycleEvent::VmShutdown,
-                            );
+                            self.postpone_lifecycle_event(PostponedLifecycleEvent::VmShutdown);
                             continue;
                         }
                         if self.no_shutdown {
