@@ -562,11 +562,11 @@ pub struct Vm {
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
     vcpu_throttler: ThrottleThreadHandle,
-    post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+    post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PostMigrationLifecycleEvent {
+pub enum PostponedLifecycleEvent {
     VmReboot,
     VmShutdown,
 }
@@ -1411,14 +1411,14 @@ impl Vm {
         self.vcpu_throttler.reset();
     }
 
-    pub fn set_post_migration_lifecycle_event(
-        &mut self,
-        event: Option<PostMigrationLifecycleEvent>,
-    ) {
+    /// Stores a lifecycle event until migration and active disk mirrors permit
+    /// it to be replayed.
+    pub fn set_post_migration_lifecycle_event(&mut self, event: Option<PostponedLifecycleEvent>) {
         self.post_migration_lifecycle_event = event;
     }
 
-    pub fn post_migration_lifecycle_event(&self) -> Option<PostMigrationLifecycleEvent> {
+    /// Returns the lifecycle event currently waiting to be replayed.
+    pub fn post_migration_lifecycle_event(&self) -> Option<PostponedLifecycleEvent> {
         self.post_migration_lifecycle_event
     }
 
@@ -3451,7 +3451,7 @@ impl Pausable for Vm {
 #[derive(Serialize, Deserialize)]
 pub struct VmSnapshot {
     #[serde(default)]
-    pub post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+    pub post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
     #[cfg(target_arch = "x86_64")]
     pub clock: Option<hypervisor::ClockData>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
