@@ -26,7 +26,7 @@ use vmm_sys_util::eventfd::EventFd;
 
 use crate::Vmm;
 use crate::api::VmSendMigrationData;
-use crate::vm::{PostMigrationLifecycleEvent, Vm, VmState};
+use crate::vm::{PostponedLifecycleEvent, Vm, VmState};
 
 #[derive(thiserror::Error)]
 #[error("Migration worker could not be spawned: {spawn_error}")]
@@ -84,7 +84,7 @@ pub struct MigrationWorker {
     check_migration_evt: EventFd,
     config: VmSendMigrationData,
     /// Shared with the main VMM thread.
-    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+    postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
     cancel: Arc<AtomicBool>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
@@ -129,7 +129,7 @@ impl MigrationWorker {
         vm: Vm,
         check_migration_evt: EventFd,
         config: VmSendMigrationData,
-        postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+        postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
             dyn hypervisor::Hypervisor,
         >,
