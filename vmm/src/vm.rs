@@ -548,6 +548,201 @@ pub struct Vm {
     post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
 }
 
+/// Early VM state used during incoming migration.
+pub(crate) struct VmRestoreShell {
+    config: Arc<Mutex<VmConfig>>,
+    vm: Arc<dyn hypervisor::Vm>,
+    memory_manager: Arc<Mutex<MemoryManager>>,
+    cpu_manager: Arc<Mutex<cpu::CpuManager>>,
+    io_bus: Arc<Bus>,
+    mmio_bus: Arc<Bus>,
+    seccomp_action: SeccompAction,
+    #[cfg(not(target_arch = "riscv64"))]
+    numa_nodes: NumaNodes,
+    #[cfg(not(target_arch = "riscv64"))]
+    hypervisor: Arc<dyn hypervisor::Hypervisor>,
+    stop_on_boot: bool,
+    force_access_platform: bool,
+    #[cfg(feature = "igvm")]
+    igvm_file: Option<IgvmFile>,
+}
+
+impl VmRestoreShell {
+    pub(crate) fn start_restored_vcpus(&self) -> Result<()> {
+        info!("receiver restore phase: start_restored_vcpus");
+
+        if self.cpu_manager.lock().unwrap().vcpus().is_empty() {
+            info!("creating vCPUs");
+            self.cpu_manager
+                .lock()
+                .unwrap()
+                .create_boot_vcpus(None)
+                .map_err(Error::CpuManager)?;
+        }
+
+        let prefault_ranges = {
+            let prefault_ranges = self
+                .memory_manager
+                .lock()
+                .unwrap()
+                .prefault_memory_range_table(false);
+            if !self.vm.supports_prefault_memory() || prefault_ranges.is_empty() {
+                None
+            } else {
+                Some(prefault_ranges)
+            }
+        };
+
+        self.cpu_manager
+            .lock()
+            .unwrap()
+            .start_restored_vcpus(prefault_ranges)
+            .map_err(Error::CpuManager)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish(
+        self,
+        exit_evt: EventFd,
+        reset_evt: EventFd,
+        guest_exit_evt: EventFd,
+        activate_evt: &EventFd,
+        #[cfg(not(target_arch = "riscv64"))] timestamp: Instant,
+        console_info: Option<&ConsoleInfo>,
+        console_resize_pipe: Option<&Arc<File>>,
+        original_termios: &Arc<Mutex<Option<termios>>>,
+        snapshot: Option<&Snapshot>,
+    ) -> Result<Vm> {
+        info!("restore finalization: applying final VM state");
+
+        let boot_id_list = self
+            .config
+            .lock()
+            .unwrap()
+            .validate()
+            .map_err(Error::ConfigValidation)?;
+
+        if let Some(snapshot) = snapshot {
+            self.cpu_manager
+                .lock()
+                .unwrap()
+                .restore_vcpu_states(snapshot_from_id(Some(snapshot), CPU_MANAGER_SNAPSHOT_ID))
+                .map_err(Error::CpuManager)?;
+        }
+
+        let device_manager = Vm::create_device_manager(
+            self.io_bus,
+            self.mmio_bus,
+            self.vm.clone(),
+            self.config.clone(),
+            self.memory_manager.clone(),
+            self.cpu_manager.clone(),
+            exit_evt,
+            reset_evt,
+            guest_exit_evt,
+            self.seccomp_action,
+            self.numa_nodes.clone(),
+            activate_evt,
+            self.force_access_platform,
+            boot_id_list,
+            #[cfg(not(target_arch = "riscv64"))]
+            timestamp,
+            snapshot,
+        )?;
+
+        let load_payload_handle = Vm::hypervisor_specific_init(
+            &self.vm,
+            &self.memory_manager,
+            &self.cpu_manager,
+            &device_manager,
+            &self.config,
+            &self.hypervisor,
+            console_info,
+            console_resize_pipe,
+            original_termios,
+            snapshot,
+            #[cfg(feature = "igvm")]
+            self.igvm_file,
+        )?;
+
+        #[cfg(feature = "tdx")]
+        let kernel = self
+            .config
+            .lock()
+            .unwrap()
+            .payload
+            .as_ref()
+            .map(|p| p.kernel.as_ref().map(File::open))
+            .unwrap_or_default()
+            .transpose()
+            .map_err(Error::KernelFile)?;
+
+        let initramfs = self
+            .config
+            .lock()
+            .unwrap()
+            .payload
+            .as_ref()
+            .map(|p| p.initramfs.as_ref().map(File::open))
+            .unwrap_or_default()
+            .transpose()
+            .map_err(Error::InitramfsFile)?;
+
+        #[cfg(target_arch = "x86_64")]
+        let saved_clock = if let Some(snapshot) = snapshot.as_ref() {
+            let vm_snapshot = get_vm_snapshot(snapshot).map_err(Error::Restore)?;
+            vm_snapshot.clock
+        } else {
+            None
+        };
+
+        let state = if snapshot.is_some() {
+            VmState::Paused
+        } else {
+            VmState::Created
+        };
+
+        let post_migration_lifecycle_event = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                get_vm_snapshot(snapshot)
+                    .map(|vm_snapshot| vm_snapshot.post_migration_lifecycle_event)
+                    .map_err(Error::Restore)
+            })
+            .transpose()?
+            .flatten();
+
+        let vcpu_throttler = ThrottleThreadHandle::new_from_cpu_manager(&self.cpu_manager);
+
+        Ok(Vm {
+            #[cfg(feature = "tdx")]
+            kernel,
+            initramfs,
+            device_manager,
+            config: self.config,
+            threads: Vec::with_capacity(1),
+            state,
+            cpu_manager: self.cpu_manager,
+            memory_manager: self.memory_manager,
+            vm: self.vm,
+            #[cfg(target_arch = "x86_64")]
+            saved_clock,
+            #[cfg(not(target_arch = "riscv64"))]
+            numa_nodes: self.numa_nodes,
+            #[cfg(not(target_arch = "riscv64"))]
+            hypervisor: self.hypervisor,
+            stop_on_boot: self.stop_on_boot,
+            load_payload_handle,
+            vcpu_throttler,
+            post_migration_lifecycle_event,
+        })
+    }
+
+    pub(crate) fn guest_memory(&self) -> GuestMemoryAtomic<GuestMemoryMmap> {
+        self.memory_manager.lock().unwrap().guest_memory()
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PostMigrationLifecycleEvent {
     VmReboot,
@@ -568,6 +763,87 @@ impl Vm {
             .with_smt(1)
             .with_reserved_must_be_one(1)
             .with_migrate_ma(0)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_restore_shell(
+        config: Arc<Mutex<VmConfig>>,
+        memory_manager: Arc<Mutex<MemoryManager>>,
+        vm: Arc<dyn hypervisor::Vm>,
+        exit_evt: EventFd,
+        reset_evt: EventFd,
+        #[cfg(feature = "guest_debug")] vm_debug_evt: EventFd,
+        seccomp_action: &SeccompAction,
+        hypervisor: Arc<dyn hypervisor::Hypervisor>,
+        _activate_evt: EventFd,
+    ) -> Result<VmRestoreShell> {
+        #[cfg(feature = "igvm")]
+        let igvm_file = {
+            let config = config.lock().unwrap();
+            config
+                .payload
+                .as_ref()
+                .and_then(|p| p.igvm.as_ref())
+                .map(|igvm_path| crate::igvm::parse_igvm(igvm_path))
+                .transpose()
+                .map_err(Error::IgvmLoad)?
+        };
+
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+        if config.lock().unwrap().max_apic_id() > MAX_SUPPORTED_CPUS_LEGACY {
+            vm.enable_x2apic_api().unwrap();
+        }
+
+        let numa_nodes =
+            Self::create_numa_nodes(config.lock().unwrap().numa.as_deref(), &memory_manager)?;
+        let force_access_platform = Self::should_force_access_platform(&config);
+        let stop_on_boot = Self::should_stop_on_boot(&config);
+
+        let memory = memory_manager.lock().unwrap().guest_memory();
+        let io_bus = Arc::new(Bus::new());
+        let mmio_bus = Arc::new(Bus::new());
+
+        let vm_ops: Arc<dyn VmOps> = Arc::new(VmOpsHandler {
+            memory,
+            #[cfg(target_arch = "x86_64")]
+            io_bus: io_bus.clone(),
+            mmio_bus: mmio_bus.clone(),
+        });
+
+        let cpu_manager = Self::create_cpu_manager(
+            &config,
+            vm.clone(),
+            exit_evt.try_clone().map_err(Error::EventFdClone)?,
+            reset_evt,
+            #[cfg(feature = "guest_debug")]
+            vm_debug_evt,
+            &hypervisor,
+            seccomp_action.clone(),
+            vm_ops,
+            &numa_nodes,
+        )?;
+
+        #[cfg(feature = "tdx")]
+        Self::init_tdx_if_enabled(&config, &vm, &cpu_manager)?;
+
+        Ok(VmRestoreShell {
+            config,
+            vm,
+            memory_manager,
+            cpu_manager,
+            io_bus,
+            mmio_bus,
+            seccomp_action: seccomp_action.clone(),
+            #[cfg(not(target_arch = "riscv64"))]
+            numa_nodes,
+            #[cfg(not(target_arch = "riscv64"))]
+            hypervisor,
+            stop_on_boot,
+            force_access_platform,
+            #[cfg(feature = "igvm")]
+            igvm_file,
+        })
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -979,12 +1255,14 @@ impl Vm {
             )?;
         }
 
-        // Allocate address space for non-SEV-SNP guests
-        memory_manager
-            .lock()
-            .unwrap()
-            .allocate_address_space()
-            .map_err(Error::MemoryManager)?;
+        if memory_manager.lock().unwrap().num_guest_ram_mappings() == 0 {
+            // Allocate address space for non-SEV-SNP guests
+            memory_manager
+                .lock()
+                .unwrap()
+                .allocate_address_space()
+                .map_err(Error::MemoryManager)?;
+        }
 
         // Load payload asynchronously
         let load_payload_handle = if snapshot.is_none() {

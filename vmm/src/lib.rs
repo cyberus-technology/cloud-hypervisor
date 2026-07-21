@@ -79,7 +79,7 @@ use crate::migration_transport::{
     ReceiveAdditionalConnections, ReceiveListener, SendAdditionalConnections, SocketStream,
 };
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
-use crate::vm::{Error as VmError, PostMigrationLifecycleEvent, Vm, VmState};
+use crate::vm::{Error as VmError, PostMigrationLifecycleEvent, Vm, VmRestoreShell, VmState};
 use crate::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, MemoryZoneConfig, NetConfig,
     PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
@@ -882,7 +882,7 @@ pub struct Vmm {
 /// Just a wrapper for the data that goes into
 /// [`ReceiveMigrationState::Configured`]
 struct ReceiveMigrationConfiguredData {
-    memory_manager: Arc<Mutex<MemoryManager>>,
+    vm: VmRestoreShell,
     guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
     connections: ReceiveAdditionalConnections,
 }
@@ -901,9 +901,8 @@ enum ReceiveMigrationState {
     /// around to populate it without having to acquire a lock (which we would have to do
     /// when accessing the memory through the memory manager).
     ///
-    /// We keep the memory manager around to pass it into the next state. From this point
-    /// on, the sender can start sending memory updates.
-    Configured(ReceiveMigrationConfiguredData),
+    /// We keep the restore shell around to finish VM construction in the next state.
+    Configured(Box<ReceiveMigrationConfiguredData>),
 
     /// Memory is populated and we received the state. The VM is ready to go.
     StateReceived {
@@ -1166,46 +1165,52 @@ impl Vmm {
             )))
         };
 
-        let mut configure_vm =
-            |socket: &mut SocketStream,
-             memory_files: HashMap<u32, File>|
-             -> std::result::Result<ReceiveMigrationConfiguredData, MigratableError> {
-                let memory_manager = self.vm_receive_config(
-                    req,
-                    socket,
-                    memory_files,
-                    receive_data_migration.tcp_serial_url.clone(),
-                    receive_data_migration.zones.clone(),
-                )?;
+        let mut configure_vm = |socket: &mut SocketStream,
+                                memory_files: HashMap<u32, File>|
+         -> std::result::Result<
+            Box<ReceiveMigrationConfiguredData>,
+            MigratableError,
+        > {
+            let vm = self.vm_receive_config(
+                req,
+                socket,
+                memory_files,
+                receive_data_migration.tcp_serial_url.clone(),
+                receive_data_migration.zones.clone(),
+            )?;
 
-                if !receive_data_migration.net_fds.is_empty() {
-                    let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
-                    for restored_net in &receive_data_migration.net_fds {
-                        for net_config in vm_config.net.iter_mut().flatten() {
-                            // Only update net devices that are backed directly by file descriptors.
-                            if net_config.pci_common.id.as_ref() == Some(&restored_net.id)
-                                && net_config.fds.is_some()
-                            {
-                                net_config.fds.clone_from(&restored_net.fds);
-                            }
+            if !receive_data_migration.net_fds.is_empty() {
+                let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
+                for restored_net in &receive_data_migration.net_fds {
+                    for net_config in vm_config.net.iter_mut().flatten() {
+                        // Only update net devices that are backed directly by file descriptors.
+                        if net_config.pci_common.id.as_ref() == Some(&restored_net.id)
+                            && net_config.fds.is_some()
+                        {
+                            net_config.fds.clone_from(&restored_net.fds);
                         }
                     }
                 }
+            }
 
-                let guest_memory = memory_manager.lock().unwrap().guest_memory();
-                // Create the additional-connection receiver even in the single-connection case.
-                // At this point the receiver does not know whether the sender will use extra TCP
-                // connections. If it does not, no worker connections are accepted and memory
-                // requests continue to arrive on the main connection.
-                let connections = listener
-                    .try_clone()
-                    .and_then(|l| ReceiveAdditionalConnections::new(l, guest_memory.clone()))?;
-                Ok(ReceiveMigrationConfiguredData {
-                    memory_manager,
-                    guest_memory,
-                    connections,
-                })
-            };
+            vm.start_restored_vcpus().map_err(|e| {
+                MigratableError::MigrateReceive(anyhow!("Error starting restored vCPUs: {e:?}"))
+            })?;
+
+            let guest_memory = vm.guest_memory();
+            // Create the additional-connection receiver even in the single-connection case.
+            // At this point the receiver does not know whether the sender will use extra TCP
+            // connections. If it does not, no worker connections are accepted and memory
+            // requests continue to arrive on the main connection.
+            let connections = listener
+                .try_clone()
+                .and_then(|l| ReceiveAdditionalConnections::new(l, guest_memory.clone()))?;
+            Ok(Box::new(ReceiveMigrationConfiguredData {
+                vm,
+                guest_memory,
+                connections,
+            }))
+        };
 
         let recv_memory_fd = |socket: &mut SocketStream,
                               mut memory_files: Vec<(u32, File)>|
@@ -1266,7 +1271,7 @@ impl Vmm {
                     let state_receive_begin = Instant::now();
                     config_data.connections.cleanup()?;
                     let (recv_state_dur, restore_vm_dur) =
-                        self.vm_receive_state(req, socket, config_data.memory_manager)?;
+                        self.vm_receive_state(req, socket, config_data.vm)?;
                     debug!(
                         "Migration (incoming): recv_snapshot:{}ms restore:{}ms",
                         recv_state_dur.as_millis(),
@@ -1349,7 +1354,7 @@ impl Vmm {
         existing_memory_files: HashMap<u32, File>,
         tcp_serial_url: Option<String>,
         zones: Vec<MemoryZoneConfig>,
-    ) -> std::result::Result<Arc<Mutex<MemoryManager>>, MigratableError>
+    ) -> std::result::Result<VmRestoreShell, MigratableError>
     where
         T: Read,
     {
@@ -1455,7 +1460,7 @@ impl Vmm {
         );
 
         let memory_manager = MemoryManager::new(
-            vm,
+            vm.clone(),
             &config.lock().unwrap().memory.clone(),
             None,
             phys_bits,
@@ -1467,7 +1472,42 @@ impl Vmm {
         .context("Error creating MemoryManager from snapshot")
         .map_err(MigratableError::MigrateReceive)?;
 
-        Ok(memory_manager)
+        memory_manager
+            .lock()
+            .unwrap()
+            .allocate_address_space()
+            .context("Error allocating address spaces")
+            .map_err(MigratableError::MigrateReceive)?;
+
+        let vm = Vm::new_restore_shell(
+            config,
+            memory_manager,
+            vm,
+            self.exit_evt
+                .try_clone()
+                .context("Error cloning exit EventFd")
+                .map_err(MigratableError::MigrateReceive)?,
+            self.reset_evt
+                .try_clone()
+                .context("Error cloning reset EventFd")
+                .map_err(MigratableError::MigrateReceive)?,
+            #[cfg(feature = "guest_debug")]
+            self.vm_debug_evt
+                .try_clone()
+                .context("Error cloning debug EventFd")
+                .map_err(MigratableError::MigrateReceive)?,
+            &self.seccomp_action,
+            self.hypervisor.clone(),
+            self.activate_evt
+                .try_clone()
+                .context("Error cloning activate EventFd")
+                .map_err(MigratableError::MigrateReceive)?,
+        )
+        .map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error creating restore shell: {e:?}"))
+        })?;
+
+        Ok(vm)
     }
 
     /// Receives the final VM state (devices, vCPUs) and restores the VM.
@@ -1477,7 +1517,7 @@ impl Vmm {
         &mut self,
         req: &Request,
         socket: &mut T,
-        mm: Arc<Mutex<MemoryManager>>,
+        vm_shell: VmRestoreShell,
     ) -> std::result::Result<
         (
             Duration, /* state receive + deserialize */
@@ -1517,52 +1557,29 @@ impl Vmm {
         let guest_exit_evt = self.guest_exit_evt.try_clone().map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error cloning guest exit EventFd: {e}"))
         })?;
-        #[cfg(feature = "guest_debug")]
-        let debug_evt = self
-            .vm_debug_evt
-            .try_clone()
-            .context("Error clonung debug EventFd")
-            .map_err(MigratableError::MigrateReceive)?;
-        let activate_evt = self
-            .activate_evt
-            .try_clone()
-            .context("Error cloning activate EventFd")
-            .map_err(MigratableError::MigrateReceive)?;
 
         let (vm, restore_duration) = measure_ok(|| {
             #[cfg(not(target_arch = "riscv64"))]
             let timestamp = Instant::now();
-            let hypervisor_vm = mm.lock().unwrap().vm.clone();
 
-            let mut vm = Vm::new_from_memory_manager(
-                self.vm_config.clone().unwrap(),
-                mm,
-                hypervisor_vm,
-                exit_evt,
-                reset_evt,
-                guest_exit_evt,
-                #[cfg(feature = "guest_debug")]
-                debug_evt,
-                &self.seccomp_action,
-                self.hypervisor.clone(),
-                activate_evt,
-                #[cfg(not(target_arch = "riscv64"))]
-                timestamp,
-                self.console_info.clone(),
-                self.console_resize_pipe.clone(),
-                Arc::clone(&self.original_termios_opt),
-                Some(&snapshot),
-                #[cfg(feature = "igvm")]
-                None,
-            )
-            .map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error creating VM from snapshot: {e:?}"))
-            })?;
-
-            // Create VM
-            vm.restore().map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Failed restoring the Vm: {e}"))
-            })?;
+            let vm = vm_shell
+                .finish(
+                    exit_evt,
+                    reset_evt,
+                    guest_exit_evt,
+                    &self.activate_evt,
+                    #[cfg(not(target_arch = "riscv64"))]
+                    timestamp,
+                    self.console_info.as_ref(),
+                    self.console_resize_pipe.as_ref(),
+                    &self.original_termios_opt,
+                    Some(&snapshot),
+                )
+                .map_err(|e| {
+                    MigratableError::MigrateReceive(anyhow!(
+                        "Error creating VM from snapshot: {e:?}"
+                    ))
+                })?;
 
             Ok(vm)
         })?;

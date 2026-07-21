@@ -1146,6 +1146,33 @@ impl CpuManager {
         Ok(vcpu)
     }
 
+    /// Applies the given snapshot to all vCPUs. The vCPUs can already be created at
+    /// this point.
+    pub fn restore_vcpu_states(&mut self, snapshot: Option<&Snapshot>) -> Result<()> {
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+
+        for (cpu_id, vcpu) in self.vcpus.iter().enumerate() {
+            let mut vcpu = vcpu.lock().unwrap();
+            let vcpu_snapshot = snapshot_from_id(Some(snapshot), cpu_id.to_string().as_str())
+                .ok_or_else(|| {
+                    Error::VcpuCreate(anyhow!("Could not find snapshot for vCPU {cpu_id}"))
+                })?;
+
+            let state: CpuState = vcpu_snapshot.to_state().map_err(|e| {
+                Error::VcpuCreate(anyhow!("Could not get vCPU state from snapshot {e:?}"))
+            })?;
+
+            vcpu.vcpu
+                .set_state(&state)
+                .map_err(|e| Error::VcpuCreate(anyhow!("Could not set the vCPU state {e:?}")))?;
+            vcpu.saved_state = Some(state);
+        }
+
+        Ok(())
+    }
+
     pub fn configure_vcpu(
         &self,
         vcpu: &mut Vcpu,
