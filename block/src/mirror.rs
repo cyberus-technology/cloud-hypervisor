@@ -298,6 +298,9 @@ pub struct MirrorStatus {
 ///
 /// Reads use the source backend. Mutating requests use both the source and
 /// destination backends.
+///
+/// If the destination backend fails, all subsequent disk operations are passed
+/// through to the source backend.
 pub struct MirroringAsyncIo {
     source: CompletionIo,
     destination: CompletionIo,
@@ -308,6 +311,11 @@ pub struct MirroringAsyncIo {
     /// The `user_data` identifies the request it was submitted with. The
     /// result is the number of bytes transferred or a negative errno.
     inflight_completions: VecDeque<(u64, i32)>,
+    /// Set once this virtqueue worker observes a failure.
+    ///
+    /// While true, the worker forwards only to the source and ignores the
+    /// destination.
+    bypass_destination: bool,
 }
 
 impl MirroringAsyncIo {
@@ -329,6 +337,7 @@ impl MirroringAsyncIo {
             destination,
             state,
             inflight_completions: VecDeque::new(),
+            bypass_destination: false,
         })
     }
 
@@ -336,8 +345,10 @@ impl MirroringAsyncIo {
     ///
     /// The operator must cancel to clean up the destination and the copy worker.
     fn fail(&mut self, failure: MirrorFailure) {
+        // Phase fails the mirror globally, passthrough is per worker, so other queues fail independently.
         self.state
             .transition_to_phase(MirrorPhase::Failed(Arc::new(failure)));
+        self.bypass_destination = true;
     }
 
     /// Calls source and destination submissions with mirror-specific error handling.
@@ -356,31 +367,33 @@ impl MirroringAsyncIo {
         Ok(())
     }
 
-    /// Blocks until `user_data`'s source and destination completions arrive,
-    /// then queues the guest-visible `(user_data, src_result)`.
+    /// Blocks until `user_data`'s source completion and, unless already in
+    /// passthrough mode, its destination completion arrive, then queues the
+    /// guest-visible `(user_data, src_result)`.
     ///
     /// Other completions seen while waiting are stashed for later delivery.
     fn wait_for_completions(&mut self, user_data: u64, expected_result: i32) -> io::Result<()> {
         let src_result =
             Self::await_completion(&mut self.source, &mut self.inflight_completions, user_data)?;
 
-        match Self::await_completion(
-            &mut self.destination,
-            &mut self.inflight_completions,
-            user_data,
-        ) {
-            // Destination reported an I/O error or incomplete operation.
-            Ok(dest_result) if dest_result != expected_result => {
-                self.fail(MirrorFailure::DestinationCompletion {
-                    user_data,
-                    actual: dest_result,
-                    expected: expected_result,
-                });
+        if !self.bypass_destination {
+            match Self::await_completion(
+                &mut self.destination,
+                &mut self.inflight_completions,
+                user_data,
+            ) {
+                Ok(dest_result) if dest_result != expected_result => {
+                    self.fail(MirrorFailure::DestinationCompletion {
+                        user_data,
+                        actual: dest_result,
+                        expected: expected_result,
+                    });
+                }
+                Ok(_) => {}
+                // The destination wait itself failed (broken notifier or epoll).
+                // Hide it from the guest like any other destination failure.
+                Err(source) => self.fail(MirrorFailure::DestinationWait { user_data, source }),
             }
-            Ok(_) => {}
-            // The destination wait itself failed (broken notifier or epoll).
-            // Hide it from the guest like any other destination failure.
-            Err(source) => self.fail(MirrorFailure::DestinationWait { user_data, source }),
         }
 
         if src_result != expected_result {
@@ -439,6 +452,13 @@ impl AsyncIo for MirroringAsyncIo {
         iovecs: &[iovec],
         user_data: u64,
     ) -> AsyncIoResult<()> {
+        if self.bypass_destination {
+            return self
+                .source
+                .io_mut()
+                .write_vectored(offset, iovecs, user_data);
+        }
+
         let expected_result = iovecs
             .iter()
             .map(|iov| iov.iov_len)
@@ -461,6 +481,10 @@ impl AsyncIo for MirroringAsyncIo {
     }
 
     fn fsync(&mut self, user_data: Option<u64>) -> AsyncIoResult<()> {
+        if self.bypass_destination {
+            return self.source.io_mut().fsync(user_data);
+        }
+
         self.mirror_request(|backend| backend.fsync(user_data))?;
 
         // A tracked fsync (Some) waits for its completion. A barrier fsync (None) does not.
@@ -472,6 +496,10 @@ impl AsyncIo for MirroringAsyncIo {
     }
 
     fn punch_hole(&mut self, offset: u64, length: u64, user_data: u64) -> AsyncIoResult<()> {
+        if self.bypass_destination {
+            return self.source.io_mut().punch_hole(offset, length, user_data);
+        }
+
         let _guard = self
             .state
             .range_locks
@@ -486,6 +514,10 @@ impl AsyncIo for MirroringAsyncIo {
     }
 
     fn write_zeroes(&mut self, offset: u64, length: u64, user_data: u64) -> AsyncIoResult<()> {
+        if self.bypass_destination {
+            return self.source.io_mut().write_zeroes(offset, length, user_data);
+        }
+
         let _guard = self
             .state
             .range_locks
@@ -500,7 +532,7 @@ impl AsyncIo for MirroringAsyncIo {
     }
 
     fn next_completed_request(&mut self) -> Option<(u64, i32)> {
-        // Mirrored writes are awaited synchronously. Only async source reads complete here.
+        // Mirrored writes are awaited synchronously, only reads and post-failure passthrough writes surface here.
         while let Some((id, res)) = self.source.io_mut().next_completed_request() {
             self.inflight_completions.push_back((id, res));
         }
@@ -508,7 +540,8 @@ impl AsyncIo for MirroringAsyncIo {
     }
 
     fn batch_requests_enabled(&self) -> bool {
-        false
+        // Only batch when bypassing the destination to avoid reordering mirrored writes.
+        self.bypass_destination && self.source.io().batch_requests_enabled()
     }
 
     fn submit_batch_requests(&mut self, batch_request: &[BatchRequest]) -> AsyncIoResult<()> {
@@ -516,10 +549,20 @@ impl AsyncIo for MirroringAsyncIo {
             return Ok(());
         }
 
-        unreachable!("Unexpected non-empty batch while batching is disabled");
+        if !self.batch_requests_enabled() {
+            return Err(AsyncIoError::SubmitBatchRequests(io::Error::other(
+                "non-empty batch outside source passthrough",
+            )));
+        }
+
+        self.source.io_mut().submit_batch_requests(batch_request)
     }
 
     fn alignment(&self) -> u64 {
+        if self.bypass_destination {
+            return self.source.io().alignment();
+        }
+
         // Stricter alignment wins. Same iovec goes to both backends.
         self.source
             .io()
