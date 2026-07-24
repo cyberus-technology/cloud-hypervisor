@@ -98,7 +98,7 @@ fn parse_format(fmt: &str) -> Result<Vec<Token>, Error> {
 }
 
 pub const DEFAULT_FORMAT: &str =
-    "cloud-hypervisor: {wallclock}: <{thread}> {level}:{location} -- {msg}";
+    "cloud-hypervisor: {boottime}s: <{thread}> {level}:{location} -- {msg}";
 
 pub struct Logger {
     output: Mutex<Box<dyn Write + Send>>,
@@ -135,7 +135,9 @@ impl log::Log for Logger {
                 Token::Literal(s) => out.write_all(s.as_bytes()),
                 // 10: 6 decimal places + sep => whole seconds in range `0..=999` properly aligned
                 Token::BootTime => write!(&mut *out, "{duration_s:>10.6?}"),
-                Token::WallClock => write!(out, "{:.6}", jiff::Zoned::now()),
+                Token::WallClock => {
+                    write!(out, "{:.6}", jiff::Timestamp::now())
+                }
                 Token::Pid => write!(&mut *out, "{}", self.pid),
                 // SAFETY: gettid(2) always succeeds
                 Token::Tid => write!(&mut *out, "{}", unsafe { libc::gettid() }),
@@ -235,7 +237,7 @@ mod tests {
     fn parse_default_format_succeeds() {
         let tokens = parse_format(DEFAULT_FORMAT).unwrap();
         // Default format has 5 tokens interleaved with literals.
-        assert!(tokens.iter().any(|t| matches!(t, Token::WallClock)));
+        assert!(tokens.iter().any(|t| matches!(t, Token::BootTime)));
         assert!(tokens.iter().any(|t| matches!(t, Token::Thread)));
         assert!(tokens.iter().any(|t| matches!(t, Token::Level)));
         assert!(tokens.iter().any(|t| matches!(t, Token::Location)));
@@ -365,13 +367,14 @@ mod tests {
 
         let out = buf.contents();
         let out = out.trim();
-        assert_eq!(out.len(), 40, "got: {out}");
+        assert_eq!(out.len(), 27, "got: {out}");
         assert_eq!(&out[4..5], "-", "got: {out}");
         assert_eq!(&out[7..8], "-", "got: {out}");
         assert_eq!(&out[10..11], "T", "got: {out}");
         assert_eq!(&out[13..14], ":", "got: {out}");
         assert_eq!(&out[16..17], ":", "got: {out}");
         assert_eq!(&out[19..20], ".", "got: {out}");
+        assert!(out.ends_with('Z'), "got: {out}");
     }
 
     #[test]
