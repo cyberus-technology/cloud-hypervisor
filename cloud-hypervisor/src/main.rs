@@ -690,6 +690,10 @@ fn start_vmm(
         .map_err(Error::EventMonitorThread)?;
     }
 
+    info!(
+        "Cloud Hypervisor starting: build version: {}",
+        env!("BUILD_VERSION"),
+    );
     event!("vmm", "starting");
 
     let vmm_thread_handle = vmm::start_vmm_thread(
