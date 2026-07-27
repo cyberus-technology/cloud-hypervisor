@@ -25,7 +25,7 @@ use crate::VcpuInit;
 use crate::arch::x86::{CpuIdEntry, FpuState, LapicState, MsrEntry, SpecialRegisters};
 #[cfg(feature = "tdx")]
 use crate::kvm::{TdxExitDetails, TdxExitStatus};
-use crate::{CpuState, MpState, StandardRegisters};
+use crate::{CpuState, HypervisorType, MpState, StandardRegisters};
 
 #[cfg(target_arch = "x86_64")]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -618,4 +618,9 @@ pub trait Vcpu: Send + Sync {
     /// signal handler and only use it from there.
     #[cfg(feature = "kvm")]
     unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd;
+
+    ///
+    /// The type of the hypervisor backing this vCPU
+    ///
+    fn hypervisor_type(&self) -> HypervisorType;
 }

@@ -1680,6 +1680,10 @@ impl cpu::Vcpu for MshvVcpu {
     unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
         unimplemented!()
     }
+
+    fn hypervisor_type(&self) -> HypervisorType {
+        HypervisorType::Mshv
+    }
 }
 
 impl MshvVcpu {
