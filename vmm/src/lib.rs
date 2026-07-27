@@ -1878,17 +1878,10 @@ impl Vmm {
         };
 
         // Set up the socket connection
-        let mut socket = if send_data_migration.local {
-            migration_transport::send_migration_socket(
-                &send_data_migration.destination_url,
-                send_data_migration.tls_dir.as_deref(),
-            )?
-        } else {
-            migration_transport::send_migration_socket_with_keep_alive(
-                &send_data_migration.destination_url,
-                send_data_migration.tls_dir.as_deref(),
-            )?
-        };
+        let mut socket = migration_transport::send_migration_socket(
+            &send_data_migration.destination_url,
+            send_data_migration.tls_dir.as_deref(),
+        )?;
 
         // Start the migration
         migration_transport::send_request_expect_ok(
@@ -3286,7 +3279,7 @@ impl RequestHandler for Vmm {
         )?;
         // Accept the connection and get the socket
         let mut socket = listener
-            .accept(true)
+            .accept()
             .inspect_err(|e| warn!("{e}"))
             .context("Failed to accept incoming migration")
             .map_err(MigratableError::MigrateReceive)?;

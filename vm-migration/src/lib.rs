@@ -18,7 +18,6 @@ use crate::protocol::MemoryRangeTable;
 
 mod bitpos_iterator;
 mod context;
-pub mod keep_alive_stream;
 pub mod progress;
 pub mod protocol;
 pub mod tls;
