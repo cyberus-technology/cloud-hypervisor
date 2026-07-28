@@ -1980,6 +1980,7 @@ impl MemoryManager {
 
         // Prefault the region if needed, in parallel.
         if prefault {
+            std::thread::sleep(std::time::Duration::from_secs(120));
             let page_size =
                 Self::get_prefault_align_size(backing_file, hugepages, hugepage_size)? as usize;
 
