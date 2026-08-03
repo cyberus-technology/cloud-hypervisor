@@ -30,13 +30,13 @@
 
 use std::cell::Cell;
 use std::cmp::min;
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use log::{debug, warn};
+use log::{debug, error, info, warn};
 use vm_migration::Pausable;
 
 use crate::cpu::CpuManager;
@@ -50,6 +50,11 @@ enum ThrottleCommand {
     Throttle(u8 /* `1..=99` */),
     /// Gracefully shutdown the vCPU throttling thread.
     Exit,
+    /// Exit the throttle loop then rendezvous with the receiver before proceeding to wait for the next command.
+    ///
+    /// In other words the `report` is used to synchronize the throttle thread reset event with the thread that
+    /// sent this command.
+    Reset { report: SyncSender<()> },
 }
 
 /// Helper to adapt the throttling timeslice as we go, depending on the time it
@@ -258,6 +263,7 @@ impl ThrottleWorker {
                 None
             }
             Some(cmd @ (ThrottleCommand::Exit | ThrottleCommand::Wait)) => Some(cmd),
+            Some(ThrottleCommand::Reset { report }) => Some(ThrottleCommand::Reset { report }),
         }
     }
 
@@ -345,10 +351,31 @@ impl ThrottleWorker {
                             &callback_pause_vcpus,
                             &callback_resume_vcpus,
                         );
-                        if matches!(next_task, ThrottleCommand::Exit) {
-                            break 'control;
+                        match next_task {
+                            ThrottleCommand::Exit => {
+                                break 'control;
+                            }
+                            // else: thread needs to go into waiting state
+                            ThrottleCommand::Reset { report } => {
+                                // Inform sender that we are back in the waiting state: Since `report` has capacity 0
+                                // this call will block until the command sender has received our message.
+                                if let Err(e) = report.send(()) {
+                                    error!(
+                                        "Unable to synchronize throttle thread reset event: error = {e:#?}"
+                                    );
+                                }
+                            }
+                            _ => {
+                                continue 'control;
+                            }
                         }
-                        // else: thread is in Waiting state
+                    }
+                    ThrottleCommand::Reset { report } => {
+                        if let Err(e) = report.send(()) {
+                            error!(
+                                "Unable to synchronize throttle thread reset event: error = {e:#?}"
+                            );
+                        }
                     }
                 }
             }
@@ -526,6 +553,19 @@ impl ThrottleThreadHandle {
                 elapsed.as_millis()
             );
         }
+    }
+
+    /// Stops throttling and returns the throttle thread to the waiting state.
+    ///
+    /// This blocks until the throttling thread has exited the throttling loop.
+    pub fn reset(&self) {
+        let (report, recv) = mpsc::sync_channel(0);
+        self.state_sender
+            .send(ThrottleCommand::Reset { report })
+            .expect("channel should not be closed");
+        self.current_throttle.set(0);
+        info!("Waiting for throttle thread to acknowledge reset");
+        recv.recv().expect("The throttle thread should acknowledge the reset event before dropping rendezvous channel");
     }
 }
 
