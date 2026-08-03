@@ -1387,11 +1387,11 @@ impl Vm {
         self.vcpu_throttler.throttle_percent()
     }
 
-    /// Stops and terminates the thread gracefully.
+    /// Sets the vCPU throttling thread back to its initial waiting state.
     ///
-    /// Waits for the thread to finish.
-    pub fn stop_vcpu_throttling(&mut self) {
-        self.vcpu_throttler.shutdown();
+    /// Blocks until the throttling thread acknowledges the reset event.
+    pub fn reset_vcpu_throttle_thread(&self) {
+        self.vcpu_throttler.reset();
     }
 
     pub fn set_post_migration_lifecycle_event(
