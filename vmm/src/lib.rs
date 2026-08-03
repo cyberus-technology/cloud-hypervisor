@@ -1654,9 +1654,9 @@ impl Vmm {
         )?;
         let downtime_begin = Instant::now();
         // End throttle thread
-        info!("stopping vcpu thread");
-        vm.stop_vcpu_throttling();
-        info!("stopped vcpu thread");
+        info!("stopping vcpu throttling");
+        vm.reset_vcpu_throttle_thread();
+        info!("stopped vcpu throttling");
         // Skip if already paused, e.g. when migrating a paused VM.
         if vm.get_state() != VmState::Paused {
             info!("pausing VM");
