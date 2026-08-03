@@ -42,7 +42,7 @@ use vm_migration::Pausable;
 use crate::cpu::CpuManager;
 
 /// The possible command of the thread, i.e., the current state.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum ThrottleCommand {
     /// Waiting for next event.
     Waiting,
