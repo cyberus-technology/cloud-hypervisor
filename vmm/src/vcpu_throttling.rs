@@ -44,14 +44,12 @@ use crate::cpu::CpuManager;
 /// The possible command of the thread, i.e., the current state.
 #[derive(Debug)]
 enum ThrottleCommand {
-    /// Waiting for next event.
-    Waiting,
-    /// Ongoing vCPU throttling.
-    ///
-    /// The inner value shows the current throttling percentage in range `1..=99`.
-    Throttling(u8 /* `1..=99` */),
-    /// Thread is shutting down gracefully.
-    Exiting,
+    /// Exit the throttle loop and wait for next event.
+    Wait,
+    /// Throttle the vCPUs with the given throttle percentage in the range `1..=99` per time slice.
+    Throttle(u8 /* `1..=99` */),
+    /// Gracefully shutdown the vCPU throttling thread.
+    Exit,
 }
 
 /// Helper to adapt the throttling timeslice as we go, depending on the time it
@@ -252,14 +250,14 @@ impl ThrottleWorker {
         );
         match maybe_task {
             None => None,
-            Some(ThrottleCommand::Throttling(next)) => {
+            Some(ThrottleCommand::Throttle(next)) => {
                 // A new throttle value is only applied at the end of a full
                 // throttling cycle. This is fine and negligible in a series of
                 // (tens of) thousands of cycles.
                 *current_throttle = next as u64;
                 None
             }
-            Some(cmd @ (ThrottleCommand::Exiting | ThrottleCommand::Waiting)) => Some(cmd),
+            Some(cmd @ (ThrottleCommand::Exit | ThrottleCommand::Wait)) => Some(cmd),
         }
     }
 
@@ -334,20 +332,20 @@ impl ThrottleWorker {
             'control: loop {
                 let thread_task = receiver.recv().expect("channel should not be closed");
                 match thread_task {
-                    ThrottleCommand::Exiting => {
+                    ThrottleCommand::Exit => {
                         break 'control;
                     }
-                    ThrottleCommand::Waiting => {
+                    ThrottleCommand::Wait => {
                         continue 'control;
                     }
-                    ThrottleCommand::Throttling(initial_throttle) => {
+                    ThrottleCommand::Throttle(initial_throttle) => {
                         let next_task = Self::throttle_loop(
                             &receiver,
                             initial_throttle,
                             &callback_pause_vcpus,
                             &callback_resume_vcpus,
                         );
-                        if matches!(next_task, ThrottleCommand::Exiting) {
+                        if matches!(next_task, ThrottleCommand::Exit) {
                             break 'control;
                         }
                         // else: thread is in Waiting state
@@ -483,11 +481,11 @@ impl ThrottleThreadHandle {
 
         if percent_new == 0 {
             self.state_sender
-                .send(ThrottleCommand::Waiting)
+                .send(ThrottleCommand::Wait)
                 .expect("channel should not be closed");
         } else {
             self.state_sender
-                .send(ThrottleCommand::Throttling(percent_new))
+                .send(ThrottleCommand::Throttle(percent_new))
                 .expect("channel should not be closed");
         }
 
@@ -513,7 +511,7 @@ impl ThrottleThreadHandle {
             // drop thread; ensure that the channel is still alive when it is dropped
             if let Some(worker) = self.throttle_thread.take() {
                 self.state_sender
-                    .send(ThrottleCommand::Exiting)
+                    .send(ThrottleCommand::Exit)
                     .expect("channel should not be closed");
 
                 // Ensure the sender is still living when this is dropped.
