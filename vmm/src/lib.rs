@@ -1819,12 +1819,16 @@ impl Vmm {
             mem_send,
             postponed_lifecycle_event,
             return_if_cancelled_cb,
-        )?;
+        );
+
         let downtime_begin = Instant::now();
         // End throttle thread
         info!("stopping vcpu throttling");
         vm.reset_vcpu_throttle_thread();
         info!("stopped vcpu throttling");
+
+        let remaining = remaining?;
+
         info!("pausing VM");
         vm.pause()?;
         info!("paused VM");
