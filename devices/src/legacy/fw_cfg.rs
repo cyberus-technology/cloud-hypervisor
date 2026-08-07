@@ -3,23 +3,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-/// Cloud Hypervisor implementation of QEMU's fw_cfg spec
-/// https://www.qemu.org/docs/master/specs/fw_cfg.html
-/// Linux kernel fw_cfg driver header
-/// https://github.com/torvalds/linux/blob/master/include/uapi/linux/qemu_fw_cfg.h
-/// Uploading files to the guest via fw_cfg is supported for all kernels 4.6+ w/ CONFIG_FW_CFG_SYSFS enabled
-/// https://cateee.net/lkddb/web-lkddb/FW_CFG_SYSFS.html
-/// No kernel requirement if above functionality is not required,
-/// only firmware must implement mechanism to interact with this fw_cfg device
-use std::{
-    cmp,
-    ffi::CString,
-    fs::File,
-    io::{ErrorKind, Read, Result, Seek, SeekFrom},
-    mem::offset_of,
-    os::unix::fs::FileExt,
-    sync::{Arc, Barrier},
-};
+//! Cloud Hypervisor implementation of QEMU's fw_cfg spec
+//! https://www.qemu.org/docs/master/specs/fw_cfg.html
+//! Linux kernel fw_cfg driver header
+//! https://github.com/torvalds/linux/blob/master/include/uapi/linux/qemu_fw_cfg.h
+//! Uploading files to the guest via fw_cfg is supported for all kernels 4.6+ w/ CONFIG_FW_CFG_SYSFS enabled
+//! https://cateee.net/lkddb/web-lkddb/FW_CFG_SYSFS.html
+//! No kernel requirement if above functionality is not required,
+//! only firmware must implement mechanism to interact with this fw_cfg device
+use std::cmp;
+use std::ffi::CString;
+use std::fs::File;
+use std::io::{ErrorKind, Read, Result, Seek, SeekFrom};
+use std::mem::offset_of;
+use std::os::unix::fs::FileExt;
+use std::sync::{Arc, Barrier};
 
 use acpi_tables::rsdp::Rsdp;
 use arch::RegionType;
@@ -99,9 +97,10 @@ pub const FW_CFG_SIGNATURE_CONTENT: [u8; 4] = *b"QEMU";
 pub const FW_CFG_ACPI_ID: &str = "QEMU0002";
 // Reserved (must be enabled)
 const FW_CFG_F_RESERVED: u8 = 1 << 0;
-// DMA Toggle Bit (enabled by default)
 const FW_CFG_F_DMA: u8 = 1 << 1;
-pub const FW_CFG_FEATURE: [u8; 4] = [FW_CFG_F_RESERVED | FW_CFG_F_DMA, 0, 0, 0];
+// We disable the broken DMA interface while the rework is in progress.
+// See https://github.com/cobaltcore-dev/cobaltcore/issues/647.
+pub const FW_CFG_FEATURE: [u8; 4] = [FW_CFG_F_RESERVED, 0, 0, 0];
 
 const COMMAND_ALLOCATE: u32 = 0x1;
 const COMMAND_ADD_POINTER: u32 = 0x2;
@@ -636,6 +635,11 @@ impl FwCfg {
     }
 
     fn do_dma(&mut self) {
+        // If the DMA bit is not set, then DMA is a no-op like Write from the traditional interface.
+        if (FW_CFG_FEATURE[0] & FW_CFG_F_DMA) == 0 {
+            return;
+        }
+
         let dma_address = self.dma_address;
         let mut access = FwCfgDmaAccess::new_zeroed();
         // TODO although the name indicates, there is no retry internally: https://github.com/rust-vmm/rust-vmm/issues/43
@@ -1108,7 +1112,10 @@ mod tests {
             fw_cfg.write(0, FW_CFG_DMA_LO_OFFSET, &dma_lo);
         }
         let _ = mem.read(&mut data, GuestAddress(code_address));
-        assert_eq!(data, code);
+
+        // Assert that the DMA path is currently deactivated.
+        assert_eq!(data, [0u8; 12]);
+        assert_eq!(fw_cfg.data_offset, 0);
     }
 
     #[test]
@@ -1178,37 +1185,28 @@ mod tests {
         let read = AccessControl::new().with_read(true);
         let skip = AccessControl::new().with_skip(true);
         let write = AccessControl::new().with_write(true);
-        let error = AccessControl::new().with_error(true).0;
 
         #[cfg(target_arch = "aarch64")]
         fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &item_a.to_be_bytes());
         #[cfg(target_arch = "x86_64")]
         fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &item_a.to_le_bytes());
 
-        assert_eq!(
-            run_dma(&mut fw_cfg, &mem, select(item_b).with_read(true), 4),
-            0
-        );
-        assert_eq!(dma_buffer(&mem, 4), [11, 12, 13, 14]);
-
-        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 2), 0);
-        assert_eq!(run_dma(&mut fw_cfg, &mem, read, 2), 0);
-        assert_eq!(dma_buffer(&mem, 2), [17, 18]);
-
-        assert_eq!(
-            run_dma(&mut fw_cfg, &mem, select(item_b).with_read(true), 2),
-            0
-        );
-        assert_eq!(dma_buffer(&mem, 2), [11, 12]);
-
-        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, u32::MAX), 0);
-        assert_eq!(fw_cfg.data_offset, 8);
-
-        assert_eq!(run_dma(&mut fw_cfg, &mem, select(item_a), 0), 0);
-        assert_eq!(run_dma(&mut fw_cfg, &mem, read, 3), 0);
-        assert_eq!(dma_buffer(&mem, 3), [1, 2, 3]);
-
-        assert_eq!(run_dma(&mut fw_cfg, &mem, write, 1), error);
+        // Assert that the DMA path is currently deactivated.
+        for (control, len) in [
+            (select(item_b).with_read(true), 4),
+            (skip, 2),
+            (read, 2),
+            (select(item_b).with_read(true), 2),
+            (skip, u32::MAX),
+            (select(item_b), 0),
+            (read, 3),
+            (write, 1),
+        ] {
+            assert_eq!(run_dma(&mut fw_cfg, &mem, control, len), control.0);
+            assert_eq!(fw_cfg.selector, item_a);
+            assert_eq!(fw_cfg.data_offset, 0);
+            assert_eq!(dma_buffer(&mem, 8), [0; 8]);
+        }
     }
 
     #[test]
@@ -1233,10 +1231,11 @@ mod tests {
             .with_selector(FW_CFG_FILE_FIRST);
         let skip = select.with_skip(true);
         let read = select.with_read(true);
-        let error = AccessControl::new().with_error(true).0;
-        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 4), 0);
+        // Assert that the DMA path is currently deactivated.
+        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 4), skip.0);
+        assert_eq!(run_dma(&mut fw_cfg, &mem, read, 4), read.0);
         assert_eq!(fw_cfg.data_offset, 0);
-        assert_eq!(run_dma(&mut fw_cfg, &mem, read, 4), error);
+        assert_eq!(dma_buffer(&mem, 4), [0; 4]);
     }
 
     #[test]
@@ -1258,11 +1257,14 @@ mod tests {
         let select = AccessControl::new()
             .with_select(true)
             .with_selector(FW_CFG_FILE_FIRST);
-        assert_eq!(run_dma(&mut fw_cfg, &mem, select.with_read(true), 6), 0);
+        // Assert that the DMA path is currently deactivated.
+        let read = select.with_read(true);
+        assert_eq!(run_dma(&mut fw_cfg, &mem, read, 6), read.0);
         file.set_len(4).unwrap();
         let skip = AccessControl::new().with_skip(true);
-        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 0), 0);
-        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 2), 0);
-        assert_eq!(fw_cfg.data_offset, 6);
+        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 0), skip.0);
+        assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 2), skip.0);
+        assert_eq!(fw_cfg.data_offset, 0);
+        assert_eq!(dma_buffer(&mem, 6), [0; 6]);
     }
 }
