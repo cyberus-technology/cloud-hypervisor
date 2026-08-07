@@ -824,6 +824,8 @@ impl FwCfg {
 impl BusDevice for FwCfg {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
         let size = data.len();
+        let mut qemu_mapped_offsets = (FW_CFG_SELECTOR_OFFSET..FW_CFG_DATA_OFFSET + 1)
+            .chain(FW_CFG_DMA_HI_OFFSET..FW_CFG_DMA_LO_OFFSET + 4);
         match (offset, size) {
             (FW_CFG_SELECTOR_OFFSET, _) => {
                 error!("fw_cfg: selector register is write-only.");
@@ -838,6 +840,16 @@ impl BusDevice for FwCfg {
                 let addr = self.dma_address;
                 let addr_lo = (addr & 0xffff_ffff) as u32;
                 data.copy_from_slice(&addr_lo.to_be_bytes());
+            }
+            (port, _) if qemu_mapped_offsets.any(|mapped_port| mapped_port == port) => {
+                // We read from a port that should actually be mapped to fw_cfg. Note that QEMU
+                // doesn't map the entire range but leaves a hole at 0x512 and 0x513. We mimic this
+                // by doing a no-op below for this range.
+                debug!(
+                    "fw_cfg: Unsupported {:#x}-byte read from port {port:#x}.",
+                    data.len()
+                );
+                data.fill(0x0);
             }
             _ => {
                 debug!("fw_cfg: read from unknown offset {offset:#x}: {size:#x} bytes.");
@@ -1266,5 +1278,27 @@ mod tests {
         assert_eq!(run_dma(&mut fw_cfg, &mem, skip, 2), skip.0);
         assert_eq!(fw_cfg.data_offset, 0);
         assert_eq!(dma_buffer(&mem, 6), [0; 6]);
+    }
+
+    #[test]
+    fn test_register_invalid_ports_leaves_buffer_untouched() {
+        // We should not answer reads from unknown ports.
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        // Single-byte reads from forbidden ports should be a no-op. Test the address succeeding the
+        // mapped range of 0xC addresses.
+        let mut buff = [0xCD; 1];
+        fw_cfg.read(0, PORT_FW_CFG_DMA_LO - PORT_FW_CFG_BASE + 4, &mut buff);
+        assert_eq!(fw_cfg.data_offset, 0);
+        assert_eq!(buff, [0xCD; 1]);
+        // Test that reads to addresses in the hole of the mapping are no-ops too.
+        let mut buff = [0xCD; 1];
+        fw_cfg.read(0, PORT_FW_CFG_DATA - PORT_FW_CFG_BASE + 1, &mut buff);
+        assert_eq!(fw_cfg.data_offset, 0);
+        assert_eq!(buff, [0xCD; 1]);
+        let mut buff = [0xCD; 1];
+        fw_cfg.read(0, PORT_FW_CFG_DATA - PORT_FW_CFG_BASE + 2, &mut buff);
+        assert_eq!(fw_cfg.data_offset, 0);
+        assert_eq!(buff, [0xCD; 1]);
     }
 }
