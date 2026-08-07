@@ -782,8 +782,10 @@ impl BusDevice for FwCfg {
         let mut qemu_mapped_offsets = (PORT_FW_CFG_SELECTOR_OFFSET..PORT_FW_CFG_DATA_OFFSET + 1)
             .chain(PORT_FW_CFG_DMA_HI_OFFSET..PORT_FW_CFG_DMA_LO_OFFSET + 4);
         match (offset, size) {
-            (PORT_FW_CFG_SELECTOR_OFFSET, _) => {
-                error!("fw_cfg: selector register is write-only.");
+            (PORT_FW_CFG_SELECTOR_OFFSET, 1) => {
+                // Selector register is actually defined write-only. QEMU’s combined PIO region
+                // treats a 1-byte read at this offset as a data read. Bypass to mimic QEMU quirk.
+                self.read_data(data, size as u32);
             }
             (PORT_FW_CFG_DATA_OFFSET, 1) => _ = self.read_data(data, size as u32),
             (PORT_FW_CFG_DMA_HI_OFFSET, 4) => {
@@ -1087,5 +1089,24 @@ mod unit_tests {
         fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET + 2, &mut buff);
         assert_eq!(fw_cfg.data_offset, 0);
         assert_eq!(buff, [0xCD; 1]);
+    }
+
+    #[test]
+    fn test_register_qemu_selector_read_quirk() {
+        // While defined as write-only, QEMU uses a port-mapping that leaves the select register
+        // readable. For full compatibility we also allow reading from the selector register as a
+        // quirk.
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        // One-byte read returns actual data.
+        let mut buff = [0xEF; 1];
+        fw_cfg.read(0, PORT_FW_CFG_SELECTOR_OFFSET, &mut buff);
+        assert_eq!(fw_cfg.data_offset, 1);
+        assert_eq!(buff, [b'Q']);
+        // Forbidden access zeros buffer similar to data register access. Offset isn't moved.
+        let mut buff = [0xEF; 2];
+        fw_cfg.read(0, PORT_FW_CFG_SELECTOR_OFFSET, &mut buff);
+        assert_eq!(fw_cfg.data_offset, 1);
+        assert_eq!(buff, [0x0; 2]);
     }
 }
