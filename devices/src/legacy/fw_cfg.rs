@@ -179,6 +179,12 @@ pub struct FwCfgItem {
     pub content: FwCfgContent,
 }
 
+// ARM MMIO transport needs a rework.
+// Find more details here: https://github.com/cobaltcore-dev/cobaltcore/issues/650
+#[cfg(all(feature = "fw_cfg", target_arch = "aarch64"))]
+compile_error!(
+    "fw_cfg is not supported on aarch64: the MMIO transport is incomplete and defective."
+);
 /// https://www.qemu.org/docs/master/specs/fw_cfg.html
 #[derive(Debug)]
 pub struct FwCfg {
@@ -778,7 +784,7 @@ impl BusDevice for FwCfg {
             (PORT_FW_CFG_SELECTOR, _) => {
                 error!("fw_cfg: selector register is write-only.");
             }
-            (PORT_FW_CFG_DATA, _) => _ = self.read_data(data, size as u32),
+            (PORT_FW_CFG_DATA, 1) => _ = self.read_data(data, size as u32),
             (PORT_FW_CFG_DMA_HI, 4) => {
                 let addr = self.dma_address;
                 let addr_hi = (addr >> 32) as u32;
