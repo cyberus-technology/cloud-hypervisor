@@ -53,25 +53,25 @@ const E820_RAM: u32 = 1;
 const E820_RESERVED: u32 = 2;
 
 #[cfg(target_arch = "x86_64")]
-const PORT_FW_CFG_SELECTOR: u64 = 0x510;
+const PORT_FW_CFG_SELECTOR_OFFSET: u64 = 0x0;
 #[cfg(target_arch = "x86_64")]
-const PORT_FW_CFG_DATA: u64 = 0x511;
+const PORT_FW_CFG_DATA_OFFSET: u64 = 0x1;
 #[cfg(target_arch = "x86_64")]
-const PORT_FW_CFG_DMA_HI: u64 = 0x514;
+const PORT_FW_CFG_DMA_HI_OFFSET: u64 = 0x4;
 #[cfg(target_arch = "x86_64")]
-const PORT_FW_CFG_DMA_LO: u64 = 0x518;
+const PORT_FW_CFG_DMA_LO_OFFSET: u64 = 0x8;
 #[cfg(target_arch = "x86_64")]
 pub const PORT_FW_CFG_BASE: u64 = 0x510;
 #[cfg(target_arch = "x86_64")]
 pub const PORT_FW_CFG_WIDTH: u64 = 0xc;
 #[cfg(target_arch = "aarch64")]
-const PORT_FW_CFG_SELECTOR: u64 = 0x9030008;
+const PORT_FW_CFG_SELECTOR_OFFSET: u64 = 0x8;
 #[cfg(target_arch = "aarch64")]
-const PORT_FW_CFG_DATA: u64 = 0x9030000;
+const PORT_FW_CFG_DATA_OFFSET: u64 = 0x0;
 #[cfg(target_arch = "aarch64")]
-const PORT_FW_CFG_DMA_HI: u64 = 0x9030010;
+const PORT_FW_CFG_DMA_HI_OFFSET: u64 = 0x10;
 #[cfg(target_arch = "aarch64")]
-const PORT_FW_CFG_DMA_LO: u64 = 0x9030014;
+const PORT_FW_CFG_DMA_LO_OFFSET: u64 = 0x14;
 #[cfg(target_arch = "aarch64")]
 pub const PORT_FW_CFG_BASE: u64 = 0x9030000;
 #[cfg(target_arch = "aarch64")]
@@ -778,50 +778,50 @@ impl FwCfg {
 
 impl BusDevice for FwCfg {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-        let port = offset + PORT_FW_CFG_BASE;
         let size = data.len();
-        let mut qemu_mapped_offsets = (PORT_FW_CFG_SELECTOR..PORT_FW_CFG_DATA + 1)
-            .chain(PORT_FW_CFG_DMA_HI..PORT_FW_CFG_DMA_LO + 4);
-        match (port, size) {
-            (PORT_FW_CFG_SELECTOR, _) => {
+        let mut qemu_mapped_offsets = (PORT_FW_CFG_SELECTOR_OFFSET..PORT_FW_CFG_DATA_OFFSET + 1)
+            .chain(PORT_FW_CFG_DMA_HI_OFFSET..PORT_FW_CFG_DMA_LO_OFFSET + 4);
+        match (offset, size) {
+            (PORT_FW_CFG_SELECTOR_OFFSET, _) => {
                 error!("fw_cfg: selector register is write-only.");
             }
-            (PORT_FW_CFG_DATA, 1) => _ = self.read_data(data, size as u32),
-            (PORT_FW_CFG_DMA_HI, 4) => {
+            (PORT_FW_CFG_DATA_OFFSET, 1) => _ = self.read_data(data, size as u32),
+            (PORT_FW_CFG_DMA_HI_OFFSET, 4) => {
                 let addr = self.dma_address;
                 let addr_hi = (addr >> 32) as u32;
                 data.copy_from_slice(&addr_hi.to_be_bytes());
             }
-            (PORT_FW_CFG_DMA_LO, 4) => {
+            (PORT_FW_CFG_DMA_LO_OFFSET, 4) => {
                 let addr = self.dma_address;
                 let addr_lo = (addr & 0xffff_ffff) as u32;
                 data.copy_from_slice(&addr_lo.to_be_bytes());
             }
-            (port, _) if qemu_mapped_offsets.any(|mapped_port| mapped_port == port) => {
+            (offset, _) if qemu_mapped_offsets.any(|mapped_offset| mapped_offset == offset) => {
                 // We read from a port that should actually be mapped to fw_cfg. Note that QEMU
                 // doesn't map the entire range but leaves a hole at 0x512 and 0x513. We mimic this
                 // by doing a no-op below for this range.
                 debug!(
-                    "fw_cfg: Unsupported {:#x}-byte read from port {port:#x}.",
-                    data.len()
+                    "fw_cfg: Unsupported {:#x}-byte read from address: base={:#x} + offset={:#x}.",
+                    data.len(),
+                    PORT_FW_CFG_BASE,
+                    offset
                 );
+
                 data.fill(0x0);
             }
-            (port, _) => {
+            (offset, _) => {
                 // We read from a port that shouldn't be mapped to fw_cfg and do nothing but warn.
                 debug!(
-                    "fw_cfg: Unsupported {:#x}-byte read from unsupported port {port:#x}. This is a wrong mapping!",
-                    data.len()
+                    "fw_cfg: read to unmapped address: base={PORT_FW_CFG_BASE:#x} + offset={offset:#x}. Read length: {size}. This is a wrong mapping and a bug!"
                 );
             }
         }
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        let port = offset + PORT_FW_CFG_BASE;
         let size = data.size();
-        match (port, size) {
-            (PORT_FW_CFG_SELECTOR, 2) => {
+        match (offset, size) {
+            (PORT_FW_CFG_SELECTOR_OFFSET, 2) => {
                 let mut buf = [0u8; 2];
                 buf[..size].copy_from_slice(&data[..size]);
                 #[cfg(target_arch = "x86_64")]
@@ -831,15 +831,15 @@ impl BusDevice for FwCfg {
                 self.selector = val;
                 self.data_offset = 0;
             }
-            (PORT_FW_CFG_DATA, 1) => error!("fw_cfg: data register is read-only."),
-            (PORT_FW_CFG_DMA_HI, 4) => {
+            (PORT_FW_CFG_DATA_OFFSET, 1) => error!("fw_cfg: data register is read-only."),
+            (PORT_FW_CFG_DMA_HI_OFFSET, 4) => {
                 let mut buf = [0u8; 4];
                 buf[..size].copy_from_slice(&data[..size]);
                 let val = u32::from_be_bytes(buf);
                 self.dma_address &= 0xffff_ffff;
                 self.dma_address |= (val as u64) << 32;
             }
-            (PORT_FW_CFG_DMA_LO, 4) => {
+            (PORT_FW_CFG_DMA_LO_OFFSET, 4) => {
                 let mut buf = [0u8; 4];
                 buf[..size].copy_from_slice(&data[..size]);
                 let val = u32::from_be_bytes(buf);
@@ -847,9 +847,11 @@ impl BusDevice for FwCfg {
                 self.dma_address |= val as u64;
                 self.do_dma();
             }
-            _ => debug!(
-                "fw_cfg: write to unknown port {port:#x}: {size:#x} bytes and offset {offset:#x} ."
-            ),
+            _ => {
+                debug!(
+                    "fw_cfg: write to unmapped address: base={PORT_FW_CFG_BASE:#x} + offset={offset:#x}. Write length: {size}. This is a wrong mapping and a bug!"
+                );
+            }
         }
         None
     }
@@ -864,19 +866,6 @@ mod unit_tests {
 
     use super::*;
 
-    #[cfg(target_arch = "x86_64")]
-    const SELECTOR_OFFSET: u64 = 0;
-    #[cfg(target_arch = "aarch64")]
-    const SELECTOR_OFFSET: u64 = 8;
-    #[cfg(target_arch = "x86_64")]
-    const DATA_OFFSET: u64 = 1;
-    #[cfg(target_arch = "aarch64")]
-    const DATA_OFFSET: u64 = 0;
-    #[cfg(target_arch = "x86_64")]
-    const DMA_OFFSET: u64 = 4;
-    #[cfg(target_arch = "aarch64")]
-    const DMA_OFFSET: u64 = 16;
-
     #[test]
     fn test_signature() {
         let gm = GuestMemoryAtomic::new(
@@ -888,10 +877,10 @@ mod unit_tests {
         let mut data = vec![0u8];
 
         let mut sig_iter = FW_CFG_SIGNATURE_CONTENT.into_iter();
-        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
         loop {
             if let Some(char) = sig_iter.next() {
-                fw_cfg.read(0, DATA_OFFSET, &mut data);
+                fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
                 assert_eq!(data[0], char);
             } else {
                 return;
@@ -914,10 +903,14 @@ mod unit_tests {
         let mut data = vec![0u8];
 
         let mut cmdline_iter = cmdline.into_iter();
-        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_CMDLINE_DATA as u8, 0]);
+        fw_cfg.write(
+            0,
+            PORT_FW_CFG_SELECTOR_OFFSET,
+            &[FW_CFG_CMDLINE_DATA as u8, 0],
+        );
         loop {
             if let Some(char) = cmdline_iter.next() {
-                fw_cfg.read(0, DATA_OFFSET, &mut data);
+                fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
                 assert_eq!(data[0], char);
             } else {
                 return;
@@ -944,10 +937,14 @@ mod unit_tests {
         let mut data = vec![0u8];
 
         let mut initram_iter = (*initram_content).into_iter();
-        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_INITRD_DATA as u8, 0]);
+        fw_cfg.write(
+            0,
+            PORT_FW_CFG_SELECTOR_OFFSET,
+            &[FW_CFG_INITRD_DATA as u8, 0],
+        );
         loop {
             if let Some(char) = initram_iter.next() {
-                fw_cfg.read(0, DATA_OFFSET, &mut data);
+                fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
                 assert_eq!(data[0], char);
             } else {
                 return;
@@ -974,9 +971,13 @@ mod unit_tests {
         let mut data = vec![0u8];
 
         // Select the first file item (FW_CFG_FILE_FIRST = 0x20)
-        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_FILE_FIRST as u8, 0]);
+        fw_cfg.write(
+            0,
+            PORT_FW_CFG_SELECTOR_OFFSET,
+            &[FW_CFG_FILE_FIRST as u8, 0],
+        );
         for &byte in expected.iter() {
-            fw_cfg.read(0, DATA_OFFSET, &mut data);
+            fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
             assert_eq!(data[0], byte);
         }
     }
@@ -1030,9 +1031,13 @@ mod unit_tests {
         let _ = mem.read(&mut data, GuestAddress(code_address));
         assert_ne!(data, code);
 
-        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_FILE_FIRST as u8, 0]);
-        fw_cfg.write(0, DMA_OFFSET, &dma_lo);
-        fw_cfg.write(0, DMA_OFFSET + 4, &dma_hi);
+        fw_cfg.write(
+            0,
+            PORT_FW_CFG_SELECTOR_OFFSET,
+            &[FW_CFG_FILE_FIRST as u8, 0],
+        );
+        fw_cfg.write(0, PORT_FW_CFG_DMA_LO_OFFSET, &dma_lo);
+        fw_cfg.write(0, PORT_FW_CFG_DMA_HI_OFFSET, &dma_hi);
         let _ = mem.read(&mut data, GuestAddress(code_address));
 
         // Assert that the DMA path is currently deactivated.
@@ -1044,20 +1049,20 @@ mod unit_tests {
     fn test_register_invalid_reads_zero_buffer() {
         // Reads with unsupported size zero the whole buffer in QEMU. We mimic this behavior.
         let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
-        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
         // Two-byte reads are forbidden.
         let mut buff = [0xEF; 2];
-        fw_cfg.read(0, DATA_OFFSET, &mut buff);
+        fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut buff);
         assert_eq!(fw_cfg.data_offset, 0);
         assert_eq!(buff, [0x0; 2]);
         // Four-byte reads are forbidden.
         let mut buff = [0xEF; 4];
-        fw_cfg.read(0, DATA_OFFSET, &mut buff);
+        fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut buff);
         assert_eq!(buff, [0x0; 4]);
         assert_eq!(fw_cfg.data_offset, 0);
         // One-byte reads return actual data.
         let mut buff = [0xEF; 1];
-        fw_cfg.read(0, DATA_OFFSET, &mut buff);
+        fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut buff);
         assert_eq!(fw_cfg.data_offset, 1);
         assert_eq!(buff, [b'Q']);
     }
@@ -1066,20 +1071,20 @@ mod unit_tests {
     fn test_register_invalid_ports_leaves_buffer_untouched() {
         // We should not answer reads from unknown ports.
         let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
-        fw_cfg.write(0, SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
         // Single-byte reads from forbidden ports should be a no-op. Test the address succeeding the
         // mapped range of 0xC addresses.
         let mut buff = [0xCD; 1];
-        fw_cfg.read(0, PORT_FW_CFG_DMA_LO - PORT_FW_CFG_BASE + 4, &mut buff);
+        fw_cfg.read(0, PORT_FW_CFG_DMA_LO_OFFSET + 4, &mut buff);
         assert_eq!(fw_cfg.data_offset, 0);
         assert_eq!(buff, [0xCD; 1]);
         // Test that reads to addresses in the hole of the mapping are no-ops too.
         let mut buff = [0xCD; 1];
-        fw_cfg.read(0, PORT_FW_CFG_DATA - PORT_FW_CFG_BASE + 1, &mut buff);
+        fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET + 1, &mut buff);
         assert_eq!(fw_cfg.data_offset, 0);
         assert_eq!(buff, [0xCD; 1]);
         let mut buff = [0xCD; 1];
-        fw_cfg.read(0, PORT_FW_CFG_DATA - PORT_FW_CFG_BASE + 2, &mut buff);
+        fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET + 2, &mut buff);
         assert_eq!(fw_cfg.data_offset, 0);
         assert_eq!(buff, [0xCD; 1]);
     }
