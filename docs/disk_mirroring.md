@@ -124,6 +124,16 @@ to serving the guest from the source disk, so the guest keeps running on
 intact data. The operator then cancels the failed mirror to release the
 destination.
 
+### Events
+
+The VMM emits one `vm` event for each mirror outcome via `--event-monitor`.
+Each event includes an `id` property containing the disk identifier.
+
+- `vm:disk-mirror-ready` when the background copy finishes.
+- `vm:disk-mirror-failed` when the mirror fails.
+- `vm:disk-mirror-completed` when switching to the destination finishes.
+- `vm:disk-mirror-cancelled` when the mirror is cancelled.
+
 ### Unrecoverable errors
 
 Completing a mirror cannot be undone. Once the switch to the destination

@@ -1567,6 +1567,7 @@ impl Block {
         self.disk_image = destination;
         self.disk_path = destination_path.clone();
         self.held_lock = destination_lock;
+        event!("vm", "disk-mirror-completed", "id", &self.id);
         Ok(destination_path)
     }
 
@@ -1589,7 +1590,7 @@ impl Block {
         destination: &dyn AsyncFullDiskFile,
         source_size: u64,
     ) -> MirrorResult<(Arc<MirrorState>, CopyWorkerHandle)> {
-        let state = MirrorState::new(source_size);
+        let state = MirrorState::new(source_size, self.id.clone());
         let (commands, ack_rx) = self.create_mirror_queue_commands(
             BlockQueueCommandKind::InstallMirror,
             |ring_depth| {
@@ -1764,6 +1765,8 @@ impl Block {
         {
             error!("copy worker thread panicked: {e:?}");
         }
+
+        event!("vm", "disk-mirror-cancelled", "id", &self.id);
 
         Ok(())
     }
