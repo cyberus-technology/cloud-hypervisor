@@ -1590,6 +1590,7 @@ impl Block {
         self.disk_image = readonly_destination.unwrap_or(destination);
         self.disk_path = destination_path.clone();
         self.held_lock = destination_lock;
+        event!("vm", "disk-mirror-completed", "id", &self.id);
         Ok(destination_path)
     }
 
@@ -1640,7 +1641,7 @@ impl Block {
         destination: &dyn AsyncFullDiskFile,
         source_size: u64,
     ) -> MirrorResult<(Arc<MirrorState>, CopyWorkerHandle)> {
-        let state = MirrorState::new(source_size);
+        let state = MirrorState::new(source_size, self.id.clone());
         let (commands, ack_rx) = self.create_mirror_queue_commands(
             BlockQueueCommandKind::InstallMirror,
             |ring_depth| {
@@ -1820,6 +1821,8 @@ impl Block {
         {
             error!("copy worker thread panicked: {e:?}");
         }
+
+        event!("vm", "disk-mirror-cancelled", "id", &self.id);
 
         Ok(())
     }
@@ -2235,7 +2238,7 @@ mod unit_tests {
         let mut block = block_with_disk(source, raw_disk(source, read_only), read_only);
         let destination_disk = raw_disk(destination, false);
 
-        let state = MirrorState::new(TEST_DISK_SIZE);
+        let state = MirrorState::new(TEST_DISK_SIZE, "test".to_string());
         state.transition_to_phase(MirrorPhase::Ready);
         let copy_worker = CopyWorker::spawn(
             block.disk_image.as_ref(),
