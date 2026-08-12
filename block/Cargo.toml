@@ -13,6 +13,7 @@ io_uring = ["dep:io-uring"]
 bitflags = { workspace = true }
 byteorder = { workspace = true }
 crc-any = "2.5.0"
+event_monitor = { path = "../event_monitor" }
 flate2 = "1.1"
 io-uring = { version = "0.7.12", optional = true }
 libc = { workspace = true }
