@@ -16,6 +16,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::{io, mem, thread};
 
+use event_monitor::event;
 use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::poll::PollContext;
@@ -171,6 +172,8 @@ pub enum MirrorPhase {
 /// State shared by the copy worker and the per-queue mirroring
 /// `AsyncIo` handles.
 pub struct MirrorState {
+    /// Disk identifier of the block device being mirrored.
+    disk_id: String,
     /// Current phase of the mirror.
     phase: Mutex<MirrorPhase>,
     range_locks: Arc<RangeLockManager>,
@@ -179,8 +182,9 @@ pub struct MirrorState {
 }
 
 impl MirrorState {
-    pub fn new(logical_disk_size: u64) -> Arc<Self> {
+    pub fn new(logical_disk_size: u64, disk_id: String) -> Arc<Self> {
         Arc::new(Self {
+            disk_id,
             phase: Mutex::new(MirrorPhase::Running),
             range_locks: RangeLockManager::new(),
             copied_bytes: AtomicU64::new(0),
@@ -224,12 +228,22 @@ impl MirrorState {
 
         *current = target;
 
+        match *current {
+            Ready => event!("vm", "disk-mirror-ready", "id", &self.disk_id),
+            Failed(_) => event!("vm", "disk-mirror-failed", "id", &self.disk_id),
+            _ => {}
+        }
+
         Ok(())
     }
 
     /// Attempts a phase transition.
     ///
     /// Only allowed transitions are applied. Invalid transitions panic.
+    ///
+    /// Reaching the `Ready` and `Failed(_)` outcomes emits the
+    /// `vm:disk-mirror-ready` and `vm:disk-mirror-failed` events. Exactly one
+    /// event fires per outcome because only the first transition applies.
     ///
     /// Allowed transitions:
     /// ```text
@@ -826,7 +840,7 @@ mod tests {
         let mirror = MirroringAsyncIo::create(
             &create_disk(&source),
             &create_disk(&destination),
-            MirrorState::new(4096),
+            MirrorState::new(4096, "test-disk".into()),
             1,
         )
         .unwrap();
@@ -905,7 +919,7 @@ mod tests {
                 RawBackend::Sync,
                 false,
             );
-            let state = MirrorState::new(size as u64);
+            let state = MirrorState::new(size as u64, "test-disk".into());
             CopyWorker::spawn(&source_disk, &destination_disk, Arc::clone(&state), 4096)
                 .unwrap()
                 .join()
@@ -1082,7 +1096,7 @@ mod tests {
         mirror_from(
             MockAsyncIo::new(),
             MockAsyncIo::new(),
-            MirrorState::new(1 << 20),
+            MirrorState::new(1 << 20, "test-disk".into()),
         )
     }
 
@@ -1172,7 +1186,7 @@ mod tests {
     /// proceed only once the range is released.
     #[test]
     fn copy_worker_hold_serializes_overlapping_guest_write() {
-        let state = MirrorState::new(1 << 20);
+        let state = MirrorState::new(1 << 20, "test-disk".into());
         // The "copy worker" holds [0, 4096).
         let guard = Arc::clone(&state.range_locks).lock_range(0, 4096).unwrap();
 
@@ -1210,7 +1224,7 @@ mod tests {
             let source_stats = source.stats();
             let destination = MockAsyncIo::with_fill_byte(0xbb);
             let destination_stats = destination.stats();
-            let state = MirrorState::new(1 << 20);
+            let state = MirrorState::new(1 << 20, "test-disk".into());
             let mut mirror = mirror_from(source, destination, Arc::clone(&state));
 
             // The copy worker holds the range while it copies the block. A read
@@ -1244,7 +1258,8 @@ mod tests {
             let mut dest = MockAsyncIo::new();
             let dest_stats = dest.stats();
             dest.fail_on_nth_write_submission(0);
-            let mut mirror = mirror_from(source, dest, MirrorState::new(1 << 20));
+            let mut mirror =
+                mirror_from(source, dest, MirrorState::new(1 << 20, "test-disk".into()));
             let buf = [0u8; 4096];
 
             mirror
@@ -1274,7 +1289,11 @@ mod tests {
     fn short_destination_completion_uses_source_result() {
         let mut destination = MockAsyncIo::new();
         destination.completion_result = Some(2048);
-        let mut mirror = mirror_from(MockAsyncIo::new(), destination, MirrorState::new(4096));
+        let mut mirror = mirror_from(
+            MockAsyncIo::new(),
+            destination,
+            MirrorState::new(4096, "test-disk".into()),
+        );
         let buf = [0u8; 4096];
 
         mirror
@@ -1299,7 +1318,11 @@ mod tests {
     fn source_io_error_reaches_guest() {
         let mut source = MockAsyncIo::new();
         source.completion_result = Some(-libc::EIO);
-        let mut mirror = mirror_from(source, MockAsyncIo::new(), MirrorState::new(4096));
+        let mut mirror = mirror_from(
+            source,
+            MockAsyncIo::new(),
+            MirrorState::new(4096, "test-disk".into()),
+        );
         let buf = [0u8; 4096];
 
         mirror
@@ -1411,7 +1434,7 @@ mod tests {
     /// `lock_range` acquire while the write is still in flight.
     #[test]
     fn guard_is_held_across_submit_and_wait() {
-        let state = MirrorState::new(1 << 20);
+        let state = MirrorState::new(1 << 20, "test-disk".into());
 
         // Source completes immediately; destination is gated, so the write parks
         // waiting on the destination completion while holding the range lock.
@@ -1458,7 +1481,7 @@ mod tests {
     /// state reached only from its documented predecessor.
     #[test]
     fn phase_advances_through_the_lifecycle() {
-        let state = MirrorState::new(1 << 20);
+        let state = MirrorState::new(1 << 20, "test-disk".into());
         assert!(matches!(state.phase(), MirrorPhase::Running));
         state.transition_to_phase(MirrorPhase::Ready);
         state.transition_to_phase(MirrorPhase::Completing);
@@ -1470,7 +1493,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Invalid mirror phase transition attempted")]
     fn invalid_phase_transition_panics() {
-        let state = MirrorState::new(1 << 20);
+        let state = MirrorState::new(1 << 20, "test-disk".into());
         // Running -> Completed skips Ready and Completing, so it is rejected.
         state.transition_to_phase(MirrorPhase::Completed);
     }
@@ -1479,7 +1502,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Invalid mirror phase transition attempted")]
     fn completed_phase_is_terminal() {
-        let state = MirrorState::new(1 << 20);
+        let state = MirrorState::new(1 << 20, "test-disk".into());
         state.transition_to_phase(MirrorPhase::Ready);
         state.transition_to_phase(MirrorPhase::Completing);
         state.transition_to_phase(MirrorPhase::Completed);
@@ -1490,7 +1513,7 @@ mod tests {
     /// and can still move to `Cancelling` for cleanup.
     #[test]
     fn failed_keeps_first_reason_then_cancels() {
-        let state = MirrorState::new(1 << 20);
+        let state = MirrorState::new(1 << 20, "test-disk".into());
         let first = Arc::new(MirrorFailure::SourceCompletion {
             user_data: 1,
             actual: -libc::EIO,
@@ -1516,16 +1539,16 @@ mod tests {
     /// cancellation or a queue failure changed the phase.
     #[test]
     fn finish_copy_records_or_drops_the_worker_result() {
-        let running = MirrorState::new(1 << 20);
+        let running = MirrorState::new(1 << 20, "test-disk".into());
         running.finish_copy(Ok(()));
         assert!(matches!(running.phase(), MirrorPhase::Ready));
 
-        let cancelled = MirrorState::new(1 << 20);
+        let cancelled = MirrorState::new(1 << 20, "test-disk".into());
         cancelled.transition_to_phase(MirrorPhase::Cancelling);
         cancelled.finish_copy(Err(io::Error::other("write failed")));
         assert!(matches!(cancelled.phase(), MirrorPhase::Cancelling));
 
-        let failed = MirrorState::new(1 << 20);
+        let failed = MirrorState::new(1 << 20, "test-disk".into());
         failed.transition_to_phase(MirrorPhase::Failed(Arc::new(MirrorFailure::Installation)));
         failed.finish_copy(Ok(()));
         assert!(matches!(failed.phase(), MirrorPhase::Failed(_)));
@@ -1569,7 +1592,11 @@ mod tests {
         run_with_watchdog(Duration::from_secs(5), || {
             let mut dest = MockAsyncIo::new();
             dest.fail_on_nth_write_submission(0);
-            let mut mirror = mirror_from(MockAsyncIo::new(), dest, MirrorState::new(1 << 20));
+            let mut mirror = mirror_from(
+                MockAsyncIo::new(),
+                dest,
+                MirrorState::new(1 << 20, "test-disk".into()),
+            );
             // The first write fails on the destination and flips to passthrough.
             mirror
                 .write_from_vec(0, OwnedIoBuffer::from_vec(vec![0; 4096]), 1)
