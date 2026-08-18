@@ -727,7 +727,7 @@ impl SendAdditionalConnections {
                 })?;
             match message {
                 SendMemoryThreadMessage::Memory(table) => {
-                    if external_cancel.load(Ordering::Acquire) {
+                    if external_cancel.load(Ordering::Acquire) || worker_error.load(Ordering::Acquire) {
                         continue;
                     }
 
@@ -885,7 +885,7 @@ impl SendAdditionalConnections {
             // All threads may have terminated, leading to a dropped receiver. Thus we ignore
             // errors here.
             self.message_tx
-                .try_send(SendMemoryThreadMessage::Disconnect)
+                .send(SendMemoryThreadMessage::Disconnect)
                 .ok();
         }
 
