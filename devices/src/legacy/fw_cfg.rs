@@ -835,7 +835,12 @@ impl BusDevice for FwCfg {
                 // treats a 1-byte read at this offset as a data read. Bypass to mimic QEMU quirk.
                 self.read_data(data);
             }
-            (PORT_FW_CFG_DATA_OFFSET, 1) => self.read_data(data),
+            // TODO(fw_cfg): For now we need to allow arbitrary length reads from DATA because we
+            // cannot distinguish between on one multi byte long read and multiple single-byte
+            // reads. There is an open issue in kvm-ioctls:
+            // https://github.com/rust-vmm/kvm/issues/371 Once this is solved, we should only
+            // support one-byte-length reads.
+            (PORT_FW_CFG_DATA_OFFSET, _) => self.read_data(data),
             (PORT_FW_CFG_DMA_HI_OFFSET, 4) => {
                 let addr = self.dma_address;
                 let addr_hi = (addr >> 32) as u32;
@@ -1097,25 +1102,27 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_register_invalid_reads_zero_buffer() {
-        // Reads with unsupported size zero the whole buffer in QEMU. We mimic this behavior.
+    fn test_register_allow_arbitrary_length_reads_from_data() {
         let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
         fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
-        // Two-byte reads are forbidden.
+
+        // Two-byte reads are served.
         let mut buff = [0xEF; 2];
         fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut buff);
-        assert_eq!(fw_cfg.data_offset, 0);
-        assert_eq!(buff, [0x0; 2]);
-        // Four-byte reads are forbidden.
+        assert_eq!(buff, *b"QE");
+        assert_eq!(fw_cfg.data_offset, 2);
+        // Four-byte reads are served.
         let mut buff = [0xEF; 4];
+        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
         fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut buff);
-        assert_eq!(buff, [0x0; 4]);
-        assert_eq!(fw_cfg.data_offset, 0);
-        // One-byte reads return actual data.
-        let mut buff = [0xEF; 1];
+        assert_eq!(buff, *b"QEMU");
+        assert_eq!(fw_cfg.data_offset, 4);
+        // Eight-byte reads are served.
+        let mut buff = [0xEF; 8];
+        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
         fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut buff);
-        assert_eq!(fw_cfg.data_offset, 1);
-        assert_eq!(buff, [b'Q']);
+        assert_eq!(buff, *b"QEMU\0\0\0\0");
+        assert_eq!(fw_cfg.data_offset, 4);
     }
 
     #[test]
