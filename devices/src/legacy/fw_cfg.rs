@@ -11,13 +11,13 @@
 //! https://cateee.net/lkddb/web-lkddb/FW_CFG_SYSFS.html
 //! No kernel requirement if above functionality is not required,
 //! only firmware must implement mechanism to interact with this fw_cfg device
-use std::cmp;
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{ErrorKind, Read, Result, Seek, SeekFrom};
+use std::io::{Error as IoError, ErrorKind, Read, Result};
 use std::mem::offset_of;
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Barrier};
+use std::{cmp, result};
 
 use acpi_tables::rsdp::Rsdp;
 use arch::RegionType;
@@ -34,6 +34,7 @@ use bitfield_struct::bitfield;
 #[cfg(target_arch = "x86_64")]
 use linux_loader::bootparam::boot_params;
 use log::{debug, error};
+use thiserror::Error;
 use vm_device::BusDevice;
 #[cfg(target_arch = "x86_64")]
 use vm_memory::ByteValued;
@@ -130,8 +131,8 @@ impl Read for FwCfgContentAccess<'_> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         match self.content {
             FwCfgContent::File(offset, f) => {
-                Seek::seek(&mut (&*f), SeekFrom::Start(offset + self.offset as u64))?;
-                Read::read(&mut (&*f), buf)
+                f.read_exact_at(buf, offset + self.offset as u64)?;
+                Ok(buf.len())
             }
             FwCfgContent::Bytes(b) => match b.get(self.offset as usize..) {
                 Some(mut s) => s.read(buf),
@@ -184,6 +185,12 @@ pub struct FwCfgItem {
     pub content: FwCfgContent,
 }
 
+// ARM MMIO transport needs a rework.
+// Find more details here: https://github.com/cobaltcore-dev/cobaltcore/issues/650
+#[cfg(all(feature = "fw_cfg", target_arch = "aarch64"))]
+compile_error!(
+    "fw_cfg is not supported on aarch64: the MMIO transport is incomplete and defective."
+);
 /// https://www.qemu.org/docs/master/specs/fw_cfg.html
 #[derive(Debug)]
 pub struct FwCfg {
@@ -417,6 +424,29 @@ fn create_acpi_loader(acpi_table: AcpiTable) -> [FwCfgItem; 3] {
     [table_loader, acpi_rsdp, apci_tables]
 }
 
+#[derive(Error, Debug)]
+pub enum FwCfgContentAccessError {
+    /// Failed to access the data source that is backing the FwCfg item.
+    #[error("Reading the source failed")]
+    ReadError,
+    /// FwCfg doesn't hold an item that can be referenced by the given selector.
+    #[error("There is no item accessible through the selector {0}")]
+    IllegalSelector(u16),
+    /// The item accessed is too large and it's size cannot be represented by a 32-bit unsigned
+    /// integer.
+    #[error("The accessed item is too large")]
+    TooLarge,
+    /// The cursor for this item pointed behind its EOF, which means the
+    /// file was shrunk after the last access.
+    #[error("The cursor was behind the EOF of an item")]
+    UnexpectedEof,
+    /// Accessing a file backed item failed.
+    #[error("The file backed item could not be accessed")]
+    FileAccessFailed(#[source] IoError),
+}
+
+type FwCfgContentAccessResult<T> = result::Result<T, FwCfgContentAccessError>;
+
 impl FwCfg {
     pub fn new(memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>) -> FwCfg {
         const DEFAULT_ITEM: FwCfgContent = FwCfgContent::Slice(&[]);
@@ -582,6 +612,21 @@ impl FwCfg {
         self.items.push(item);
         self.update_count();
         Ok(())
+    }
+
+    /// Retrieves the [`FwCfgContent`] corresponding to the selector currently set in the internal
+    /// selector buffer.
+    fn get_selected_content(&self) -> FwCfgContentAccessResult<&FwCfgContent> {
+        if let Some(known_item) = self.known_items.get(usize::from(self.selector)) {
+            Ok(known_item)
+        } else if let Some(item) = self
+            .items
+            .get(usize::from(self.selector - FW_CFG_FILE_FIRST))
+        {
+            Ok(&item.content)
+        } else {
+            Err(FwCfgContentAccessError::IllegalSelector(self.selector))
+        }
     }
 
     fn dma_read_content(
@@ -774,65 +819,75 @@ impl FwCfg {
         Ok(())
     }
 
-    fn read_content(content: &FwCfgContent, offset: u32, data: &mut [u8], size: u32) -> Option<u8> {
-        // Zero fill rather than the usual 0xff fill for QEMU compatibility
-        data.fill(0);
-        let start = offset as usize;
-        let end = start + size as usize;
-        match content {
-            FwCfgContent::Bytes(b) => {
-                if end <= b.len() {
-                    data.copy_from_slice(&b[start..end]);
-                }
-            }
-            FwCfgContent::Slice(s) => {
-                if end <= s.len() {
-                    data.copy_from_slice(&s[start..end]);
-                }
-            }
-            FwCfgContent::File(o, f) => {
-                f.read_exact_at(data, o + offset as u64).ok()?;
-            }
-            FwCfgContent::U32(n) => {
-                let bytes = n.to_le_bytes();
-                if end <= bytes.len() {
-                    data.copy_from_slice(&bytes[start..end]);
-                }
-            }
+    /// Reads the data [`FwCfgContent`] of item currently selected through the internal selector
+    /// buffer to an externally provided buffer.
+    ///
+    /// On success, returns the number of bytes written to the buffer. This can be fewer bytes than
+    /// the buffer length, if the items content shorter than the buffer. If the buffer is shorter
+    /// than the item's content, then more than one reads is necessary to retrieve all data.
+    ///
+    /// Either accumulate the number of bytes returned through all calls to this function or use the
+    /// internal buffer for offset and the items size to determine if the all bytes were read.
+    ///
+    /// Errors if access to a file backed item fails ([`FwCfgContentAccessError::ReadError`]) or if
+    /// the size of the item exceeds u32::MAX ([`FwCfgContentAccessError::TooLarge]).
+    fn read_content(&mut self, data: &mut [u8]) -> FwCfgContentAccessResult<u32> {
+        let content_size = self.get_selected_content()?.size().map_err(|e| match e {
+            e if e.kind() == ErrorKind::UnexpectedEof => FwCfgContentAccessError::UnexpectedEof,
+            e if e.kind() == ErrorKind::InvalidInput => FwCfgContentAccessError::TooLarge,
+            e => FwCfgContentAccessError::FileAccessFailed(e),
+        })?;
+
+        let remaining_content_bytes = content_size.saturating_sub(self.data_offset);
+        let content_bytes_to_copy = u32::min(remaining_content_bytes, data.len() as u32);
+        let planned_end = self.data_offset + content_bytes_to_copy;
+        let read_size = self
+            .get_selected_content()?
+            .access(self.data_offset)
+            .read(data[..content_bytes_to_copy as usize].as_mut_bytes())
+            .map_err(|_| FwCfgContentAccessError::ReadError)?;
+
+        // Only relevant for file backed items. These can change between
+        // access so the data used to calculate can be stale. We cannot fix this.
+        if read_size != content_bytes_to_copy as usize {
+            return Err(FwCfgContentAccessError::ReadError);
         }
-        Some(size as u8)
+
+        self.data_offset = planned_end;
+
+        Ok(content_bytes_to_copy)
     }
 
-    fn read_data(&mut self, data: &mut [u8], size: u32) -> u8 {
-        let ret = if let Some(content) = self.known_items.get(self.selector as usize) {
-            Self::read_content(content, self.data_offset, data, size)
-        } else if let Some(item) = self.items.get((self.selector - FW_CFG_FILE_FIRST) as usize) {
-            Self::read_content(&item.content, self.data_offset, data, size)
+    /// Reads data from this [`FwCfg`]'s item selected through the internal selector buffer and
+    /// writes it's data to the provided buffer.
+    ///
+    /// If less bytes were read from the item than the buffer can hold, remaining bytes of the
+    /// buffer will be filled with zeros (0x0).
+    fn read_data(&mut self, data: &mut [u8]) {
+        if let Ok(read_len) = self.read_content(data) {
+            data[read_len as usize..].fill(0x0);
         } else {
-            error!("fw_cfg: selector {:#x} does not exist.", self.selector);
-            None
-        };
-        if let Some(val) = ret {
-            self.data_offset += size;
-            val
-        } else {
-            0
+            data.fill(0x0);
         }
     }
 }
 
 impl BusDevice for FwCfg {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-        let size = data.len();
         let mut qemu_mapped_offsets = (FW_CFG_SELECTOR_OFFSET..FW_CFG_DATA_OFFSET + 1)
             .chain(FW_CFG_DMA_HI_OFFSET..FW_CFG_DMA_LO_OFFSET + 4);
-        match (offset, size) {
+        match (offset, data.len()) {
             (FW_CFG_SELECTOR_OFFSET, 1) => {
                 // Selector register is actually defined write-only. QEMU’s combined PIO region
                 // treats a 1-byte read at this offset as a data read. Bypass to mimic QEMU quirk.
-                self.read_data(data, size as u32);
+                self.read_data(data);
             }
-            (FW_CFG_DATA_OFFSET, _) => _ = self.read_data(data, size as u32),
+            // TODO(fw_cfg): For now we need to allow arbitrary length reads from DATA because we
+            // cannot distinguish between on one multi byte long read and multiple single-byte
+            // reads. There is an open issue in kvm-ioctls:
+            // https://github.com/rust-vmm/kvm/issues/371 Once this is solved, we should only
+            // support one-byte-length reads.
+            (FW_CFG_DATA_OFFSET, _) => self.read_data(data),
             (FW_CFG_DMA_HI_OFFSET, 4) => {
                 let addr = self.dma_address;
                 let addr_hi = (addr >> 32) as u32;
@@ -859,7 +914,8 @@ impl BusDevice for FwCfg {
             (offset, _) => {
                 // We read from a port that shouldn't be mapped to fw_cfg and do nothing but warn.
                 debug!(
-                    "fw_cfg: read to unmapped address: base={FW_CFG_ADDRESS_BASE:#x} + offset={offset:#x}. Read length: {size}. This is a wrong mapping and a bug!"
+                    "fw_cfg: read to unmapped address: base={FW_CFG_ADDRESS_BASE:#x} + offset={offset:#x}. Read length: {}. This is a wrong mapping and a bug!",
+                    data.len()
                 );
             }
         }
@@ -1289,6 +1345,30 @@ mod tests {
     }
 
     #[test]
+    fn test_register_allow_arbitrary_length_reads_from_data() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+
+        // Two-byte reads are served.
+        let mut buff = [0xEF; 2];
+        fw_cfg.read(0, FW_CFG_DATA_OFFSET, &mut buff);
+        assert_eq!(buff, *b"QE");
+        assert_eq!(fw_cfg.data_offset, 2);
+        // Four-byte reads are served.
+        let mut buff = [0xEF; 4];
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        fw_cfg.read(0, FW_CFG_DATA_OFFSET, &mut buff);
+        assert_eq!(buff, *b"QEMU");
+        assert_eq!(fw_cfg.data_offset, 4);
+        // Eight-byte reads are served.
+        let mut buff = [0xEF; 8];
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        fw_cfg.read(0, FW_CFG_DATA_OFFSET, &mut buff);
+        assert_eq!(buff, *b"QEMU\0\0\0\0");
+        assert_eq!(fw_cfg.data_offset, 4);
+    }
+
+    #[test]
     fn test_register_invalid_ports_leaves_buffer_untouched() {
         // We should not answer reads from unknown ports.
         let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
@@ -1327,5 +1407,77 @@ mod tests {
         fw_cfg.read(0, FW_CFG_SELECTOR_OFFSET, &mut buff);
         assert_eq!(fw_cfg.data_offset, 1);
         assert_eq!(buff, [0x0; 2]);
+    }
+
+    #[test]
+    fn test_register_reads_past_eof_return_zero() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
+        let mut buff = [0xEF; 8];
+        let max_offset = FW_CFG_SIGNATURE_CONTENT.len() as u32;
+        for (offset, byte) in buff.iter_mut().enumerate() {
+            fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+            let expected_offset = if (offset as u32 + 1) < max_offset {
+                offset as u32 + 1
+            } else {
+                max_offset
+            };
+            assert_eq!(fw_cfg.data_offset, expected_offset);
+        }
+        assert_eq!(buff[..4], FW_CFG_SIGNATURE_CONTENT);
+        assert_eq!(buff[4..], [0; 4]);
+    }
+
+    #[test]
+    fn test_register_reads_with_invalid_selector() {
+        const SELECTOR_INITIALIZED_WITH_DEFAULT: u16 = 0x08;
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        fw_cfg.known_items[SELECTOR_INITIALIZED_WITH_DEFAULT as usize] = FwCfgContent::Slice(&[]);
+        fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &[0xFF, 0]);
+        let mut buff = [0xEF_u8; 8];
+        for byte in buff.iter_mut() {
+            fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+            assert_eq!(fw_cfg.data_offset, 0);
+        }
+        assert_eq!(buff, [0; 8]);
+
+        fw_cfg.write(
+            0,
+            FW_CFG_SELECTOR_OFFSET,
+            &SELECTOR_INITIALIZED_WITH_DEFAULT.to_le_bytes(),
+        );
+        let mut buff = [0xEF_u8; 8];
+        for byte in buff.iter_mut() {
+            fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+            assert_eq!(fw_cfg.data_offset, 0);
+        }
+        assert_eq!(buff, [0; 8]);
+    }
+
+    #[test]
+    fn test_register_writing_select_resets_internal_cursor() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        let payload_bytes = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let content = FwCfgContent::Bytes(payload_bytes.to_vec());
+        let cfg_item = FwCfgItem {
+            name: "payload".to_string(),
+            content,
+        };
+        fw_cfg.add_item(cfg_item).unwrap();
+
+        // Read the same bytes twice, demonstrating that we can reset the cursor by selecting a new item.
+        for _ in 0..2 {
+            fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &FW_CFG_FILE_FIRST.to_le_bytes());
+            assert_eq!(fw_cfg.data_offset, 0);
+            let mut buffer = [0xEF_u8; 6];
+            const MAX_INDEX: usize = 4;
+            for (index, byte) in buffer.iter_mut().enumerate().take(MAX_INDEX) {
+                fw_cfg.read(0, FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
+                assert_eq!(fw_cfg.data_offset as usize, index + 1);
+            }
+            assert_eq!(buffer[..MAX_INDEX], payload_bytes[..MAX_INDEX]);
+            assert_eq!(buffer[MAX_INDEX..], [0xEF; 2]);
+            assert_eq!(fw_cfg.data_offset, MAX_INDEX as u32);
+        }
     }
 }
