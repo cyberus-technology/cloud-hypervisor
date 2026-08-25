@@ -84,16 +84,33 @@ const FW_CFG_UUID: u16 = 0x02;
 const FW_CFG_RAM_SIZE: u16 = 0x03;
 const FW_CFG_NOGRAPHIC: u16 = 0x04;
 const FW_CFG_NB_CPUS: u16 = 0x05;
+// FW_CFG_MACHINE_ID = 0x06 is intentionally left out as it's only used in QEMU for Sparc and
+// PowerPC architectures, both not supported by CHV.
 const FW_CFG_KERNEL_ADDR: u16 = 0x07;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
+// FW_CFG_KERNEL_CMDLINE = 0x09 is intentionally left out as it's only used in QEMU for Sparc and
+// PowerPC architectures, both not supported by CHV.
+// FW_CFG_INITRD_ADDR = 0x0a is intentionally left out because CHV's EDK2 fw_cfg kernel loader
+// ignores it and allocates the initrd at its own address.
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
+// FW_CFG_BOOT_DEVICE = 0x0C is intentionally left out as it's not used on CHV-supported
+// architectures in QEMU.
 const FW_CFG_BOOT_MENU: u16 = 0x0e;
+// FW_CFG_NUMA = 0x0D is intentionally left out as it's for SeaBIOS’s built-in ACPI-generation
+// fallback. SeaBIOS prioritizes fw_cfg's etc/table-loader path, which we export. CHV exports ACPI
+// through etc/table-loader and does not support SeaBIOS.
 #[cfg(target_arch = "x86_64")]
 const FW_CFG_MAX_CPUS: u16 = 0x0f;
+// FW_CFG_KERNEL_ENTRY = 0x10 is intentionally left out as CHV doesn't support loading
+// ELF PVH/Multiboot images through fw_cfg.
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
 const FW_CFG_INITRD_DATA: u16 = 0x12;
+// FW_CFG_CMDLINE_ADDR = 0x13 is intentionally left out because it's ignored by CHV’s EDK2
+// fw_cfg kernel-loader path and is meaningful only to QEMU’s legacy Linux option-ROM boot path.
 const FW_CFG_CMDLINE_SIZE: u16 = 0x14;
 const FW_CFG_CMDLINE_DATA: u16 = 0x15;
+// FW_CFG_SETUP_ADDR = 0x16 is intentionally left out as it's the real-mode setup-image
+// destination consumed by QEMU’s legacy Linux option ROM. We do not expose an option ROM.
 const FW_CFG_SETUP_SIZE: u16 = 0x17;
 const FW_CFG_SETUP_DATA: u16 = 0x18;
 const FW_CFG_FILE_DIR: u16 = 0x19;
