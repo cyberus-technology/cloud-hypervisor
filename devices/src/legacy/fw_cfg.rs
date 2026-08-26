@@ -948,120 +948,90 @@ mod unit_tests {
 
     use super::*;
 
-    #[test]
-    fn test_signature() {
-        let gm = GuestMemoryAtomic::new(
-            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), RAM_64BIT_START.0 as usize)]).unwrap(),
+    /// Asserts that fw_cfg is in the correct state after a read and that the bytes read from fw_cfg
+    /// match the expected result.
+    #[track_caller]
+    fn assert_legacy_selector_read(fw_cfg: &mut FwCfg, selector: u16, expected_bytes: &[u8]) {
+        let bytes_to_read = expected_bytes.len() + 1;
+        let mut result_bytes = vec![0xCD_u8; bytes_to_read];
+        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &selector.to_le_bytes());
+        assert_eq!(
+            fw_cfg.selector, selector,
+            "fw_cfg internal selector mismatch!"
+        );
+        assert_eq!(
+            fw_cfg.data_offset, 0,
+            "fw_cfg internal offset should be zero after reset!"
         );
 
-        let mut fw_cfg = FwCfg::new(gm);
-
-        let mut data = vec![0u8];
-
-        let mut sig_iter = FW_CFG_SIGNATURE_CONTENT.into_iter();
-        fw_cfg.write(0, PORT_FW_CFG_SELECTOR_OFFSET, &[FW_CFG_SIGNATURE as u8, 0]);
-        loop {
-            if let Some(char) = sig_iter.next() {
-                fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
-                assert_eq!(data[0], char);
-            } else {
-                return;
-            }
+        for byte in result_bytes.as_mut_slice() {
+            fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
         }
+        assert_eq!(
+            fw_cfg.data_offset,
+            (bytes_to_read - 1) as u32,
+            "fw_cfg internal offset mismatch!"
+        );
+        assert_eq!(
+            expected_bytes,
+            &result_bytes[0..expected_bytes.len()],
+            "Bytes read from fw_cfg didn't match the expected bytes."
+        );
+        assert_eq!(
+            0x0,
+            result_bytes[expected_bytes.len()],
+            "fw_cfg read beyond EOF didn't return 0x0"
+        );
+    }
+
+    #[test]
+    fn test_signature() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_SIGNATURE,
+            FW_CFG_SIGNATURE_CONTENT.as_bytes(),
+        );
     }
 
     #[test]
     fn test_kernel_cmdline() {
-        let gm = GuestMemoryAtomic::new(
-            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), RAM_64BIT_START.0 as usize)]).unwrap(),
-        );
-
-        let mut fw_cfg = FwCfg::new(gm);
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
 
         let cmdline = *b"cmdline\0";
 
         fw_cfg.add_kernel_cmdline(CString::from_vec_with_nul(cmdline.to_vec()).unwrap());
 
-        let mut data = vec![0u8];
-
-        let mut cmdline_iter = cmdline.into_iter();
-        fw_cfg.write(
-            0,
-            PORT_FW_CFG_SELECTOR_OFFSET,
-            &[FW_CFG_CMDLINE_DATA as u8, 0],
-        );
-        loop {
-            if let Some(char) = cmdline_iter.next() {
-                fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
-                assert_eq!(data[0], char);
-            } else {
-                return;
-            }
-        }
+        assert_legacy_selector_read(&mut fw_cfg, FW_CFG_CMDLINE_DATA, cmdline.as_bytes());
     }
 
     #[test]
     fn test_initram_fs() {
-        let gm = GuestMemoryAtomic::new(
-            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), RAM_64BIT_START.0 as usize)]).unwrap(),
-        );
-
-        let mut fw_cfg = FwCfg::new(gm);
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
 
         let temp = TempFile::new().unwrap();
         let mut temp_file = temp.as_file();
 
         let initram_content = b"this is the initramfs";
-        let written = temp_file.write(initram_content);
-        assert_eq!(written.unwrap(), 21);
+        temp_file.write_all(initram_content).unwrap();
         let _ = fw_cfg.add_initramfs_data(temp_file);
 
-        let mut data = vec![0u8];
-
-        let mut initram_iter = (*initram_content).into_iter();
-        fw_cfg.write(
-            0,
-            PORT_FW_CFG_SELECTOR_OFFSET,
-            &[FW_CFG_INITRD_DATA as u8, 0],
-        );
-        loop {
-            if let Some(char) = initram_iter.next() {
-                fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
-                assert_eq!(data[0], char);
-            } else {
-                return;
-            }
-        }
+        assert_legacy_selector_read(&mut fw_cfg, FW_CFG_INITRD_DATA, initram_content.as_bytes());
     }
 
     #[test]
     fn test_string_item() {
-        let gm = GuestMemoryAtomic::new(
-            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), RAM_64BIT_START.0 as usize)]).unwrap(),
-        );
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
 
-        let mut fw_cfg = FwCfg::new(gm);
-
+        let expected_bytes = b"262144";
         // Simulate OVMF X-PciMmio64Mb string item for GPU CC passthrough
         let item = FwCfgItem {
             name: "opt/ovmf/X-PciMmio64Mb".to_owned(),
-            content: FwCfgContent::Bytes("262144".as_bytes().to_vec()),
+            content: FwCfgContent::Bytes(expected_bytes.to_vec()),
         };
         fw_cfg.add_item(item).unwrap();
 
-        let expected = b"262144";
-        let mut data = vec![0u8];
-
-        // Select the first file item (FW_CFG_FILE_FIRST = 0x20)
-        fw_cfg.write(
-            0,
-            PORT_FW_CFG_SELECTOR_OFFSET,
-            &[FW_CFG_FILE_FIRST as u8, 0],
-        );
-        for &byte in expected.iter() {
-            fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, &mut data);
-            assert_eq!(data[0], byte);
-        }
+        assert_legacy_selector_read(&mut fw_cfg, FW_CFG_FILE_FIRST, expected_bytes.as_bytes());
     }
 
     #[test]
@@ -1250,21 +1220,7 @@ mod unit_tests {
 
         // Read the same bytes twice, demonstrating that we can reset the cursor by selecting a new item.
         for _ in 0..2 {
-            fw_cfg.write(
-                0,
-                PORT_FW_CFG_SELECTOR_OFFSET,
-                &FW_CFG_FILE_FIRST.to_le_bytes(),
-            );
-            assert_eq!(fw_cfg.data_offset, 0);
-            let mut buffer = [0xEF_u8; 6];
-            const MAX_INDEX: usize = 4;
-            for (index, byte) in buffer.iter_mut().enumerate().take(MAX_INDEX) {
-                fw_cfg.read(0, PORT_FW_CFG_DATA_OFFSET, byte.as_mut_bytes());
-                assert_eq!(fw_cfg.data_offset as usize, index + 1);
-            }
-            assert_eq!(buffer[..MAX_INDEX], payload_bytes[..MAX_INDEX]);
-            assert_eq!(buffer[MAX_INDEX..], [0xEF; 2]);
-            assert_eq!(fw_cfg.data_offset, MAX_INDEX as u32);
+            assert_legacy_selector_read(&mut fw_cfg, FW_CFG_FILE_FIRST, payload_bytes.as_bytes());
         }
     }
 }
