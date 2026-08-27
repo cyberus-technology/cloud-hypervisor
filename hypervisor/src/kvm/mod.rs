@@ -34,7 +34,6 @@ use kvm_bindings::kvm_create_guest_memfd;
 use kvm_ioctls::{NoDatamatch, VcpuFd, VmFd};
 #[cfg(feature = "sev_snp")]
 use log::debug;
-use log::trace;
 #[cfg(target_arch = "x86_64")]
 use log::warn;
 use vmm_sys_util::errno;
@@ -1686,37 +1685,6 @@ impl hypervisor::Hypervisor for KvmHypervisor {
             msrs[pos].index = *index;
         }
         Ok(msrs)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    fn get_msr_based_features(&self) -> hypervisor::Result<Vec<MsrEntry>> {
-        let list = self
-            .kvm
-            .get_msr_feature_index_list()
-            .map_err(|e| hypervisor::HypervisorError::GetMsrList(e.into()))?;
-        let list_len = list.as_fam_struct_ref().nmsrs;
-        trace!("number of MSR-based feature register addresses:={list_len}");
-        let kvm_msrs: Vec<kvm_msr_entry> = list
-            .as_slice()
-            .iter()
-            .copied()
-            .map(|index| kvm_msr_entry {
-                index,
-                ..Default::default()
-            })
-            .collect();
-        let mut kvm_msrs = MsrEntries::from_entries(&kvm_msrs).unwrap();
-        let num_writes = self
-            .kvm
-            .get_msrs(&mut kvm_msrs)
-            .map_err(|e| hypervisor::HypervisorError::GetMsr(e.into()))?;
-        trace!("number of MSR-based feature MSRs written to by KVM:={num_writes}");
-        Ok(kvm_msrs
-            .as_slice()
-            .iter()
-            .copied()
-            .map(MsrEntry::from)
-            .collect())
     }
 
     #[cfg(target_arch = "aarch64")]
