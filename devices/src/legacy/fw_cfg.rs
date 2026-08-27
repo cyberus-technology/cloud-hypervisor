@@ -81,6 +81,7 @@ pub const PORT_FW_CFG_WIDTH: u64 = 0x10;
 const FW_CFG_SIGNATURE: u16 = 0x00;
 const FW_CFG_ID: u16 = 0x01;
 const FW_CFG_UUID: u16 = 0x02;
+const FW_CFG_RAM_SIZE: u16 = 0x03;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
@@ -212,6 +213,8 @@ pub struct FwCfgInitParams {
     pub item_list: Option<Vec<FwCfgItem>>,
     /// UUID used for populating FW_CFG_UUID.
     pub uuid: Uuid,
+    /// RAM size used to populate FW_CFG_RAM_SIZE.
+    pub ram_size: u64,
 }
 
 // ARM MMIO transport needs a rework.
@@ -529,6 +532,7 @@ impl FwCfg {
 
         self.known_items[FW_CFG_UUID as usize] =
             FwCfgContent::Bytes(Vec::from(fw_cfg_init.uuid.as_bytes()));
+        self.known_items[FW_CFG_RAM_SIZE as usize] = FwCfgContent::U64(fw_cfg_init.ram_size);
         Ok(())
     }
 
@@ -1039,6 +1043,22 @@ mod unit_tests {
         });
 
         assert_legacy_selector_read(&mut fw_cfg, FW_CFG_UUID, expected_uuid.as_bytes());
+    }
+
+    #[test]
+    fn test_cfg_ram_size() {
+        let expected_ram_size = 0x1122_3344_5566_7788_u64;
+
+        let mut fw_cfg = fw_cfg_from_init_params(FwCfgInitParams {
+            ram_size: expected_ram_size,
+            ..Default::default()
+        });
+
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_RAM_SIZE,
+            &expected_ram_size.to_le_bytes(),
+        );
     }
 
     #[test]
