@@ -16,6 +16,5 @@ pub(in crate::x86_64) use architectural_msrs::FORBIDDEN_IA32_MSR_RANGES;
 #[cfg(feature = "cpu_profile_generation")]
 pub(in crate::x86_64) use architectural_msrs::PERMITTED_IA32_MSRS;
 pub use msr_based_features::INTEL_MSR_FEATURE_DEFINITIONS;
-pub(in crate::x86_64) use msr_based_features::check_feature_msr_compatibility;
 #[cfg(feature = "cpu_profile_generation")]
 pub(in crate::x86_64) use non_architectural_msrs::NON_ARCHITECTURAL_INTEL_MSRS;
