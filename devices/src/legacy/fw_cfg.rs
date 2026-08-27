@@ -82,6 +82,7 @@ const FW_CFG_SIGNATURE: u16 = 0x00;
 const FW_CFG_ID: u16 = 0x01;
 const FW_CFG_UUID: u16 = 0x02;
 const FW_CFG_RAM_SIZE: u16 = 0x03;
+const FW_CFG_NOGRAPHIC: u16 = 0x04;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
@@ -215,6 +216,8 @@ pub struct FwCfgInitParams {
     pub uuid: Uuid,
     /// RAM size used to populate FW_CFG_RAM_SIZE.
     pub ram_size: u64,
+    /// True if the VMM doesn't emulate a VGA interface. Used to populate FW_CFG_NOGRAPHIC.
+    pub no_graphics: bool,
 }
 
 // ARM MMIO transport needs a rework.
@@ -533,6 +536,8 @@ impl FwCfg {
         self.known_items[FW_CFG_UUID as usize] =
             FwCfgContent::Bytes(Vec::from(fw_cfg_init.uuid.as_bytes()));
         self.known_items[FW_CFG_RAM_SIZE as usize] = FwCfgContent::U64(fw_cfg_init.ram_size);
+        self.known_items[FW_CFG_NOGRAPHIC as usize] =
+            FwCfgContent::U16(u16::from(fw_cfg_init.no_graphics));
         Ok(())
     }
 
@@ -1058,6 +1063,22 @@ mod unit_tests {
             &mut fw_cfg,
             FW_CFG_RAM_SIZE,
             &expected_ram_size.to_le_bytes(),
+        );
+    }
+
+    #[test]
+    fn test_cfg_nographic() {
+        let expected_nographic_value = 0x1_u16;
+
+        let mut fw_cfg = fw_cfg_from_init_params(FwCfgInitParams {
+            no_graphics: expected_nographic_value != 0,
+            ..Default::default()
+        });
+
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_NOGRAPHIC,
+            &expected_nographic_value.to_le_bytes(),
         );
     }
 
