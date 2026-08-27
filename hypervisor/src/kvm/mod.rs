@@ -1672,6 +1672,23 @@ impl hypervisor::Hypervisor for KvmHypervisor {
     }
 
     #[cfg(target_arch = "x86_64")]
+    fn get_supported_msrs(&self) -> hypervisor::Result<Vec<MsrEntry>> {
+        let msr_list = self.get_msr_list()?;
+        let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
+        let mut msrs: Vec<MsrEntry> = vec![
+            MsrEntry {
+                ..Default::default()
+            };
+            num_msrs
+        ];
+        let indices = msr_list.as_slice();
+        for (pos, index) in indices.iter().enumerate() {
+            msrs[pos].index = *index;
+        }
+        Ok(msrs)
+    }
+
+    #[cfg(target_arch = "x86_64")]
     fn get_msr_based_features(&self) -> hypervisor::Result<Vec<MsrEntry>> {
         let list = self
             .kvm
