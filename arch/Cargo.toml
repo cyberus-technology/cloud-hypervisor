@@ -36,9 +36,6 @@ uuid = { workspace = true }
 vm-memory = { workspace = true, features = ["backend-bitmap", "backend-mmap"] }
 vmm-sys-util = { workspace = true, features = ["with-serde"] }
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-flate2 = { workspace = true }
-
 [target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64"))'.dependencies]
 fdt_parser = { version = "0.1.5", package = "fdt" }
 vm-fdt = { workspace = true }
