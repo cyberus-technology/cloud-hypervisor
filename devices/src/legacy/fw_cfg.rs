@@ -87,6 +87,7 @@ const FW_CFG_NB_CPUS: u16 = 0x05;
 const FW_CFG_KERNEL_ADDR: u16 = 0x07;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
+const FW_CFG_BOOT_MENU: u16 = 0x0e;
 #[cfg(target_arch = "x86_64")]
 const FW_CFG_MAX_CPUS: u16 = 0x0f;
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
@@ -235,6 +236,9 @@ pub struct FwCfgInitParams {
     #[cfg(target_arch = "x86_64")]
     /// Used to populate the FW_CFG_MAX_CPUS selector of fw_cfg. x86 only.
     pub max_cpus: u16,
+    /// True if the VMM wants to hint the firmware to show its boot menu. Used to populate the
+    /// FW_CFG_BOOT_MENU selector of fw_cfg.
+    pub boot_menu: bool,
 }
 
 // ARM MMIO transport needs a rework.
@@ -560,6 +564,8 @@ impl FwCfg {
         {
             self.known_items[FW_CFG_MAX_CPUS as usize] = FwCfgContent::U16(fw_cfg_init.max_cpus);
         }
+        self.known_items[FW_CFG_BOOT_MENU as usize] =
+            FwCfgContent::U16(u16::from(fw_cfg_init.boot_menu));
 
         Ok(())
     }
@@ -1187,6 +1193,22 @@ mod unit_tests {
             &mut fw_cfg,
             FW_CFG_MAX_CPUS,
             &expected_num_max_cpus.to_le_bytes(),
+        );
+    }
+
+    #[test]
+    fn test_cfg_boot_menu() {
+        let expected_boot_menu_value = 0x1_u16;
+
+        let mut fw_cfg = fw_cfg_from_init_params(FwCfgInitParams {
+            boot_menu: expected_boot_menu_value != 0,
+            ..Default::default()
+        });
+
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_BOOT_MENU,
+            &expected_boot_menu_value.to_le_bytes(),
         );
     }
 
