@@ -1262,6 +1262,7 @@ impl Vm {
                 .map_err(Error::FwCfgInvalidUuid)?
                 .unwrap_or_else(Uuid::nil),
             ram_size: config.memory.size,
+            no_graphics: true,
         };
 
         fw_cfg
