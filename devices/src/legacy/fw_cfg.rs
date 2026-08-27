@@ -83,6 +83,7 @@ const FW_CFG_ID: u16 = 0x01;
 const FW_CFG_UUID: u16 = 0x02;
 const FW_CFG_RAM_SIZE: u16 = 0x03;
 const FW_CFG_NOGRAPHIC: u16 = 0x04;
+const FW_CFG_NB_CPUS: u16 = 0x05;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
@@ -218,6 +219,8 @@ pub struct FwCfgInitParams {
     pub ram_size: u64,
     /// True if the VMM doesn't emulate a VGA interface. Used to populate FW_CFG_NOGRAPHIC.
     pub no_graphics: bool,
+    /// Number of boot vCPUs. Used to populate FW_CFG_NB_CPUS.
+    pub nb_cpus: u16,
 }
 
 // ARM MMIO transport needs a rework.
@@ -538,6 +541,8 @@ impl FwCfg {
         self.known_items[FW_CFG_RAM_SIZE as usize] = FwCfgContent::U64(fw_cfg_init.ram_size);
         self.known_items[FW_CFG_NOGRAPHIC as usize] =
             FwCfgContent::U16(u16::from(fw_cfg_init.no_graphics));
+        self.known_items[FW_CFG_NB_CPUS as usize] = FwCfgContent::U16(fw_cfg_init.nb_cpus);
+
         Ok(())
     }
 
@@ -1079,6 +1084,22 @@ mod unit_tests {
             &mut fw_cfg,
             FW_CFG_NOGRAPHIC,
             &expected_nographic_value.to_le_bytes(),
+        );
+    }
+
+    #[test]
+    fn test_cfg_nb_cpus() {
+        let expected_num_boot_cpus = 0xABCD_u16;
+
+        let mut fw_cfg = fw_cfg_from_init_params(FwCfgInitParams {
+            nb_cpus: expected_num_boot_cpus,
+            ..Default::default()
+        });
+
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_NB_CPUS,
+            &expected_num_boot_cpus.to_le_bytes(),
         );
     }
 
