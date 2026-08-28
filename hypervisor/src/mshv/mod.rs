@@ -35,9 +35,9 @@ use crate::arch::aarch64::regs::{
 #[cfg(target_arch = "x86_64")]
 use crate::arch::emulator::PlatformEmulator;
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::emulator::Emulator;
+use crate::arch::x86::VcpuMsrConfigUpdate;
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::{LapicState, SpecialRegisters, VcpuMsrConfigUpdate};
+use crate::arch::x86::emulator::Emulator;
 #[cfg(target_arch = "aarch64")]
 use crate::mshv::aarch64::emulator;
 use crate::mshv::emulator::MshvEmulatorContext;
