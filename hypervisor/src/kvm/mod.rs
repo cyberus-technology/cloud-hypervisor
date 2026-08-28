@@ -567,6 +567,8 @@ struct KvmMemorySlot {
 /// Wrapper over KVM VM ioctls.
 pub struct KvmVm {
     fd: Arc<VmFd>,
+    #[cfg(target_arch = "x86_64")]
+    msrs: Vec<MsrEntry>,
     #[cfg(all(feature = "sev_snp", target_arch = "x86_64"))]
     sev_fd: Option<x86_64::sev::SevFd>,
     #[cfg(all(feature = "sev_snp", target_arch = "x86_64"))]
@@ -823,7 +825,6 @@ impl vm::Vm for KvmVm {
         &self,
         id: u32,
         vm_ops: Option<Arc<dyn VmOps>>,
-        #[cfg(target_arch = "x86_64")] msrs: Vec<MsrEntry>,
     ) -> vm::Result<Box<dyn cpu::Vcpu>> {
         let fd = self
             .fd
@@ -843,7 +844,7 @@ impl vm::Vm for KvmVm {
         let vcpu = KvmVcpu {
             fd,
             #[cfg(target_arch = "x86_64")]
-            msrs,
+            msrs: self.msrs.clone(),
             vm_ops,
             #[cfg(target_arch = "x86_64")]
             hyperv_synic: AtomicBool::new(false),
@@ -1631,6 +1632,7 @@ impl hypervisor::Hypervisor for KvmHypervisor {
 
             Ok(Arc::new(KvmVm {
                 fd: Arc::new(fd),
+                msrs,
                 dirty_log_slots: RwLock::new(HashMap::new()),
                 #[cfg(feature = "sev_snp")]
                 sev_fd,
@@ -1668,23 +1670,6 @@ impl hypervisor::Hypervisor for KvmHypervisor {
         let v = kvm_cpuid.as_slice().iter().map(|e| (*e).into()).collect();
 
         Ok(v)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    fn get_supported_msrs(&self) -> hypervisor::Result<Vec<MsrEntry>> {
-        let msr_list = self.get_msr_list()?;
-        let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
-        let mut msrs: Vec<MsrEntry> = vec![
-            MsrEntry {
-                ..Default::default()
-            };
-            num_msrs
-        ];
-        let indices = msr_list.as_slice();
-        for (pos, index) in indices.iter().enumerate() {
-            msrs[pos].index = *index;
-        }
-        Ok(msrs)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1807,7 +1792,7 @@ impl KvmVcpu {
 /// let kvm = KvmHypervisor::new().unwrap();
 /// let hypervisor = Arc::new(kvm);
 /// let vm = hypervisor.create_vm(HypervisorVmConfig::default()).expect("new VM fd creation failed");
-/// let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
+/// let vcpu = vm.create_vcpu(0, None).unwrap();
 /// ```
 impl cpu::Vcpu for KvmVcpu {
     ///
@@ -2875,7 +2860,7 @@ impl cpu::Vcpu for KvmVcpu {
     /// let hv = Arc::new(kvm);
     /// let vm = hv.create_vm(HypervisorVmConfig::default()).expect("new VM fd creation failed");
     /// vm.enable_split_irq().unwrap();
-    /// let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
+    /// let vcpu = vm.create_vcpu(0, None).unwrap();
     /// let state = vcpu.state().unwrap();
     /// ```
     fn state(&self) -> cpu::Result<CpuState> {
@@ -3114,7 +3099,7 @@ impl cpu::Vcpu for KvmVcpu {
     /// let hv = Arc::new(kvm);
     /// let vm = hv.create_vm(HypervisorVmConfig::default()).expect("new VM fd creation failed");
     /// vm.enable_split_irq().unwrap();
-    /// let vcpu = vm.create_vcpu(0, None, vec![]).unwrap();
+    /// let vcpu = vm.create_vcpu(0, None).unwrap();
     /// let state = vcpu.state().unwrap();
     /// vcpu.set_state(&state).unwrap();
     /// ```
