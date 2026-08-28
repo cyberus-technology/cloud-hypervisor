@@ -137,7 +137,6 @@ impl RequestHandler for StubApiRequestHandler {
                     max_phys_bits: 46,
                     affinity: None,
                     features: CpuFeatures::default(),
-                    profile: Default::default(),
                     nested: true,
                     core_scheduling: CoreScheduling::default(),
                     profile: Default::default(),
