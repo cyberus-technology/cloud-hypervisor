@@ -7,8 +7,6 @@ pub mod intel;
 #[cfg(all(feature = "kvm", feature = "cpu_profile_generation"))]
 pub mod kvm;
 
-pub mod hyperv;
-
 pub use crate::x86_64::cpu_profile::msr_adjustments::RegisterAddress;
 
 /// Describes a policy for how the corresponding MSR data should be considered when building
