@@ -1,6 +1,4 @@
 {
-  "hypervisor": "Kvm",
-  "cpu_vendor": "Intel",
   "adjustments": [
     [
       {
