@@ -3,23 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use serde::{Deserialize, Serialize};
 pub mod intel;
 #[cfg(all(feature = "kvm", feature = "cpu_profile_generation"))]
 pub mod kvm;
 
 pub mod hyperv;
 
-use crate::{deserialize_u32_hex, serialize_u32_hex};
-/// The register address of an MSR
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RegisterAddress(
-    #[serde(
-        serialize_with = "serialize_u32_hex",
-        deserialize_with = "deserialize_u32_hex"
-    )]
-    pub u32,
-);
+pub use crate::x86_64::cpu_profile::msr_adjustments::RegisterAddress;
 
 /// Describes a policy for how the corresponding MSR data should be considered when building
 /// a CPU profile.
