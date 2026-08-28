@@ -73,6 +73,8 @@ use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracer::trace_scoped;
+#[cfg(feature = "fw_cfg")]
+use uuid::{Error as UuidError, Uuid};
 use vm_device::Bus;
 #[cfg(feature = "tdx")]
 use vm_memory::GuestMemory;
@@ -397,6 +399,10 @@ pub enum Error {
     #[cfg(feature = "fw_cfg")]
     #[error("Error using fw_cfg while disabled")]
     FwCfgDisabled,
+
+    #[cfg(feature = "fw_cfg")]
+    #[error("Error parsing the VM's UUID")]
+    FwCfgInvalidUuid(#[source] UuidError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -1277,12 +1283,21 @@ impl Vm {
         let Some(fw_cfg) = device_manager_binding.fw_cfg() else {
             return Err(Error::FwCfgDisabled);
         };
+
         let init = FwCfgInitParams {
             e820_size: e820_option,
             cmdline: cmdline_option,
             kernel: kernel_option,
             initramfs: initramfs_option,
             item_list: fw_cfg_item_list_option,
+            uuid: config
+                .platform
+                .as_ref()
+                .and_then(|pc| pc.system_uuid.as_ref())
+                .map(|s| Uuid::parse_str(s))
+                .transpose()
+                .map_err(Error::FwCfgInvalidUuid)?
+                .unwrap_or_else(Uuid::nil),
         };
 
         fw_cfg

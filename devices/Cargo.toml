@@ -26,6 +26,7 @@ pci = { path = "../pci" }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tpm = { path = "../tpm" }
+uuid = { workspace = true }
 vm-allocator = { path = "../vm-allocator" }
 vm-device = { path = "../vm-device" }
 vm-memory = { workspace = true, features = [
