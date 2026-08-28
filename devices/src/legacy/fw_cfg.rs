@@ -35,6 +35,7 @@ use bitfield_struct::bitfield;
 use linux_loader::bootparam::boot_params;
 use log::{debug, error};
 use thiserror::Error;
+use uuid::Uuid;
 use vm_device::BusDevice;
 #[cfg(target_arch = "x86_64")]
 use vm_memory::ByteValued;
@@ -78,6 +79,7 @@ pub const FW_CFG_ADDRESS_WIDTH: u64 = 0x18;
 
 const FW_CFG_SIGNATURE: u16 = 0x00;
 const FW_CFG_ID: u16 = 0x01;
+const FW_CFG_UUID: u16 = 0x02;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
@@ -212,6 +214,8 @@ pub struct FwCfgInitParams {
     pub cmdline: Option<CString>,
     /// List of additional items used to populate the fw_cfg file directory.
     pub item_list: Option<Vec<FwCfgItem>>,
+    /// UUID used for populating FW_CFG_UUID.
+    pub uuid: Uuid,
 }
 
 // ARM MMIO transport needs a rework.
@@ -524,6 +528,9 @@ impl FwCfg {
                 self.add_item(item)?;
             }
         }
+
+        self.known_items[FW_CFG_UUID as usize] =
+            FwCfgContent::Bytes(Vec::from(fw_cfg_init.uuid.as_bytes()));
         Ok(())
     }
 
@@ -1033,6 +1040,20 @@ mod tests {
         );
     }
 
+    /// Creates a new FwCfg from the given FwCfgInitParams with no guest memory access.
+    #[track_caller]
+    fn fw_cfg_from_init_params(init_params: FwCfgInitParams) -> FwCfg {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        fw_cfg
+            .populate_fw_cfg(
+                init_params,
+                #[cfg(target_arch = "x86_64")]
+                false,
+            )
+            .unwrap();
+        fw_cfg
+    }
+
     #[test]
     fn test_signature() {
         let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
@@ -1076,6 +1097,21 @@ mod tests {
         fw_cfg.write(0, FW_CFG_SELECTOR_OFFSET, &FW_CFG_KERNEL_DATA.to_be_bytes());
         fw_cfg.read(0, FW_CFG_DATA_OFFSET, &mut data);
         assert_eq!(data, kernel);
+    }
+
+    #[test]
+    fn test_cfg_uuid() {
+        let expected_uuid = Uuid::from_bytes([
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xFF,
+            0xBC, 0xFE,
+        ]);
+
+        let mut fw_cfg = fw_cfg_from_init_params(FwCfgInitParams {
+            uuid: expected_uuid,
+            ..Default::default()
+        });
+
+        assert_legacy_selector_read(&mut fw_cfg, FW_CFG_UUID, expected_uuid.as_bytes());
     }
 
     #[test]
