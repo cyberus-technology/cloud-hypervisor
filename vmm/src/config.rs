@@ -11,7 +11,6 @@ use std::result;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use arch::CpuProfile;
 use block::ImageType;
 use clap::ArgMatches;
 use log::{debug, warn};
@@ -696,7 +695,7 @@ impl CpusConfig {
             .add("features")
             .add("nested")
             .add("core_scheduling")
-            .add("profile");
+            .add("nested");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u32 = parser
@@ -728,12 +727,6 @@ impl CpusConfig {
                     })
                     .collect()
             });
-
-        let profile = parser
-            .convert::<CpuProfile>("profile")
-            .map_err(Error::ParseCpus)?
-            .unwrap_or_default();
-
         let features_list = parser
             .convert::<StringList>("features")
             .map_err(Error::ParseCpus)?
@@ -776,7 +769,6 @@ impl CpusConfig {
             features,
             nested,
             core_scheduling,
-            profile,
         })
     }
 }
