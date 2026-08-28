@@ -432,7 +432,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                   },
 
                   ValueDefinition{
-                      short:"ALLOWED_ONE_EXTERNAL_INTERRUPT_EXITING", 
+                      short:"ALLOWED_ONE_EXTERNAL_INTERRUPT_EXITING",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (32, 32),
                       policy: ProfilePolicy::Inherit
@@ -444,7 +444,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_NMI_EXITING", 
+                      short:"ALLOWED_ONE_NMI_EXITING",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (35, 35),
                       policy: ProfilePolicy::Inherit
@@ -456,19 +456,19 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_VIRTUAL_NMIS", 
+                      short:"ALLOWED_ONE_VIRTUAL_NMIS",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (37, 37),
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_ACTIVATE_VMX__PREEMPTION_TIMER", 
+                      short:"ALLOWED_ONE_ACTIVATE_VMX__PREEMPTION_TIMER",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (38, 38),
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_PROCESS_POSTED_INTERRUPTS", 
+                      short:"ALLOWED_ONE_PROCESS_POSTED_INTERRUPTS",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (39, 39),
                       policy: ProfilePolicy::Inherit
@@ -2617,7 +2617,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                   },
 
                   ValueDefinition{
-                      short:"ALLOWED_ONE_EXTERNAL_INTERRUPT_EXITING", 
+                      short:"ALLOWED_ONE_EXTERNAL_INTERRUPT_EXITING",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (32, 32),
                       policy: ProfilePolicy::Inherit
@@ -2629,7 +2629,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_NMI_EXITING", 
+                      short:"ALLOWED_ONE_NMI_EXITING",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (35, 35),
                       policy: ProfilePolicy::Inherit
@@ -2641,19 +2641,19 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_VIRTUAL_NMIS", 
+                      short:"ALLOWED_ONE_VIRTUAL_NMIS",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (37, 37),
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_ACTIVATE_VMX__PREEMPTION_TIMER", 
+                      short:"ALLOWED_ONE_ACTIVATE_VMX__PREEMPTION_TIMER",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (38, 38),
                       policy: ProfilePolicy::Inherit
                   },
                       ValueDefinition{
-                      short:"ALLOWED_ONE_PROCESS_POSTED_INTERRUPTS", 
+                      short:"ALLOWED_ONE_PROCESS_POSTED_INTERRUPTS",
                       description: "See Intel SDM Vol.3C Section 26.6.1 Table 26-5 (Definitions of Pin-Based VM-Execution Controls)",
                       bits_range: (39, 39),
                       policy: ProfilePolicy::Inherit
@@ -3660,28 +3660,3 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
     )
     ])
 };
-
-/// Convenience function to lookup value definitions corresponding to the given MSR register address (as a const parameter).
-#[cold]
-#[inline(never)]
-pub(in crate::x86_64) const fn msr_definitions<const REG_ADDR: u32>() -> &'static [ValueDefinition]
-{
-    const {
-        let mut out = [].as_slice();
-        let intel_definitions = INTEL_MSR_FEATURE_DEFINITIONS.as_slice();
-        let mut i = 0;
-        let length = intel_definitions.len();
-        while i < length {
-            let (addr, definitions) = intel_definitions[i];
-            if addr.0 == REG_ADDR {
-                out = definitions.as_slice();
-                break;
-            }
-            i += 1;
-        }
-        if out.is_empty() {
-            panic!("MSR definition not found");
-        }
-        out
-    }
-}
