@@ -901,6 +901,7 @@ fn required_common_cpuid_updates(
             // Copy host L1 cache details if not populated by KVM
             0x8000_0005 => {
                 if entry.eax == 0 && entry.ebx == 0 && entry.ecx == 0 && entry.edx == 0 {
+                    #[allow(unused_unsafe)]
                     // SAFETY: cpuid called with valid leaves
                     if unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0005 {
                         // SAFETY: cpuid called with valid leaves
@@ -915,6 +916,7 @@ fn required_common_cpuid_updates(
             // Copy host L2 cache details if not populated by KVM
             0x8000_0006 => {
                 if entry.eax == 0 && entry.ebx == 0 && entry.ecx == 0 && entry.edx == 0 {
+                    #[allow(unused_unsafe)]
                     // SAFETY: cpuid called with valid leaves
                     if unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax } >= 0x8000_0006 {
                         // SAFETY: cpuid called with valid leaves
