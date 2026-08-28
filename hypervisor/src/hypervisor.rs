@@ -14,9 +14,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::{
-    AmxGuestSupportError, CpuIdEntry, MsrEntry, amx_supported, request_guest_amx_support,
-};
+use crate::arch::x86::{CpuIdEntry, MsrEntry, amx_supported, request_guest_amx_support};
 #[cfg(target_arch = "x86_64")]
 use crate::cpu::CpuVendor;
 #[cfg(feature = "tdx")]
@@ -211,9 +209,7 @@ pub trait Hypervisor: Send + Sync {
     #[cfg(target_arch = "x86_64")]
     fn enable_amx_state_components(&self) -> Result<()> {
         let cpu_vendor = self.get_cpu_vendor();
-        crate::arch::x86::amx_supported(cpu_vendor)
-            .map_err(HypervisorError::CouldNotEnableAmxStateComponents)?;
-        crate::arch::x86::request_guest_amx_support()
-            .map_err(HypervisorError::CouldNotEnableAmxStateComponents)
+        amx_supported(cpu_vendor).map_err(HypervisorError::CouldNotEnableAmxStateComponents)?;
+        request_guest_amx_support().map_err(HypervisorError::CouldNotEnableAmxStateComponents)
     }
 }
