@@ -1,6 +1,4 @@
 {
-  "cpu_vendor": "Intel",
-  "hypervisor_type": "Kvm",
   "adjustments": [
     [
       "0x8b",
@@ -101,7 +99,7 @@
       }
     ]
   ],
-  "permitted_msrs": [
+  "required_msrs": [
     "0x10",
     "0x11",
     "0x12",
