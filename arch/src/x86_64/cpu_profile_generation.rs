@@ -14,14 +14,18 @@ use hypervisor::arch::x86::{CpuIdEntry, MsrEntry};
 use hypervisor::{CpuVendor, Hypervisor, HypervisorError, HypervisorType};
 use log::warn;
 
-use crate::x86_64::cpu_profile::{CpuIdProfileData, FeatureMsrAdjustment, MsrProfileData};
+use crate::x86_64::CpuidReg;
+use crate::x86_64::cpu_profile::cpuid_adjustments::{
+    CpuidOutputRegisterAdjustments, CpuidProfileData,
+};
 #[cfg(feature = "kvm")]
-use crate::x86_64::cpuid_definitions::CpuidDefinitions;
+use crate::x86_64::cpu_profile::msr_adjustments::{FeatureMsrAdjustment, MsrProfileData};
 use crate::x86_64::cpuid_definitions::intel::INTEL_CPUID_DEFINITIONS;
+#[cfg(feature = "kvm")]
 use crate::x86_64::cpuid_definitions::kvm::KVM_CPUID_DEFINITIONS;
-use crate::x86_64::cpuid_definitions::{Parameters, ProfilePolicy};
+use crate::x86_64::cpuid_definitions::{CpuidDefinitions, Parameters, ProfilePolicy};
+use crate::x86_64::hyperv_msrs::HYPERV_MSRS;
 use crate::x86_64::msr_definitions::{self, MsrDefinitions, RegisterAddress};
-use crate::x86_64::{CpuidOutputRegisterAdjustments, CpuidReg};
 
 /// Generate CPU profile data and convert it to a string, embeddable as Rust code, which is
 /// written to the given `writer` (e.g. a File).
@@ -39,7 +43,7 @@ pub fn generate_profile_data(
 
     let hypervisor_type = hypervisor.hypervisor_type();
     // This is just a reality check.
-    if hypervisor_type != HypervisorType::Kvm {
+    if !matches!(hypervisor_type, HypervisorType::Kvm) {
         unimplemented!(
             "CPU profiles can only be generated when using KVM as the hypervisor at this point in time"
         );
@@ -58,8 +62,6 @@ pub fn generate_profile_data(
     } = create_files(profile_name)?;
 
     generate_cpuid_profile_data_with(
-        hypervisor_type,
-        cpu_vendor,
         &supported_cpuid_sorted,
         &INTEL_CPUID_DEFINITIONS,
         &KVM_CPUID_DEFINITIONS,
@@ -67,7 +69,7 @@ pub fn generate_profile_data(
         cpuid_data_license_file,
     )?;
 
-    let supported_feature_msrs = hypervisor.get_msr_based_features().context("CPU profile generation failed: Could not get the supported MSR-based features from the hypervisor")?;
+    let supported_feature_msrs = hypervisor.get_feature_msrs().context("CPU profile generation failed: Could not get the supported MSR-based features from the hypervisor")?;
     let supported_msrs = hypervisor
         .get_msr_index_list()
         .context("CPU profile generation failed: Could not get MSR index list")?
@@ -76,17 +78,16 @@ pub fn generate_profile_data(
 
     generate_msr_profile_data_with(
         MsrProfileDataParams {
-            hypervisor_type,
-            cpu_vendor,
             processor_feature_msr_definitions:
                 &msr_definitions::intel::INTEL_MSR_FEATURE_DEFINITIONS,
             supported_feature_msrs: &supported_feature_msrs,
             supported_msrs,
             permitted_architectural_msrs: &msr_definitions::intel::PERMITTED_IA32_MSRS[..],
             permitted_hypervisor_msrs: &msr_definitions::kvm::PROFILE_PERMITTED_KVM_MSRS[..],
-            permitted_hyperv_msrs: &msr_definitions::hyperv::HYPERV_MSRS[..],
+            permitted_hyperv_msrs: &HYPERV_MSRS[..],
             non_architectural_msrs: &msr_definitions::intel::NON_ARCHITECTURAL_INTEL_MSRS[..],
             forbidden_architectural_msrs: &msr_definitions::intel::FORBIDDEN_IA32_MSR_RANGES[..],
+            hypervisor_type,
         },
         msr_data_file,
         msr_data_license_file,
@@ -193,8 +194,6 @@ fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::
 ///
 // TODO: Consider making a snapshot test or two for this function.
 fn generate_cpuid_profile_data_with<const N: usize, const M: usize>(
-    hypervisor_type: HypervisorType,
-    cpu_vendor: CpuVendor,
     supported_cpuid_sorted: &[CpuIdEntry],
     processor_cpuid_definitions: &CpuidDefinitions<N>,
     hypervisor_cpuid_definitions: &CpuidDefinitions<M>,
@@ -256,11 +255,7 @@ fn generate_cpuid_profile_data_with<const N: usize, const M: usize>(
         }
     }
 
-    let cpuid_profile_data = CpuIdProfileData {
-        hypervisor: hypervisor_type,
-        cpu_vendor,
-        adjustments,
-    };
+    let cpuid_profile_data = CpuidProfileData { adjustments };
 
     serde_json::to_writer_pretty(&mut cpuid_data_file, &cpuid_profile_data)
         .context("Cpu profile generation failed: Could not serialize the generated cpuid profile data to the given writer")?;
@@ -272,9 +267,7 @@ fn generate_cpuid_profile_data_with<const N: usize, const M: usize>(
 
 struct MsrProfileDataParams<'a, const N: usize> {
     hypervisor_type: HypervisorType,
-    cpu_vendor: CpuVendor,
     processor_feature_msr_definitions: &'a MsrDefinitions<N>,
-
     /// MSR-based features supported by the hardware and hypervisor used to
     /// generate this CPU profile.
     supported_feature_msrs: &'a [MsrEntry],
@@ -308,7 +301,6 @@ struct MsrProfileDataParams<'a, const N: usize> {
 fn generate_msr_profile_data_with<'a, const N: usize>(
     MsrProfileDataParams {
         hypervisor_type,
-        cpu_vendor,
         processor_feature_msr_definitions,
         supported_feature_msrs,
         supported_msrs,
@@ -343,7 +335,9 @@ fn generate_msr_profile_data_with<'a, const N: usize>(
 
         // NOTE: For now this tool only supports KVM, but we insert this check so we don't forget
         // about (possible) KVM specific behavior.
-        if hypervisor_type == HypervisorType::Kvm && KVM_GET_NOT_SET_MSRS.contains(reg_addr) {
+        #[cfg(feature = "kvm")]
+        if matches!(hypervisor_type, HypervisorType::Kvm) && KVM_GET_NOT_SET_MSRS.contains(reg_addr)
+        {
             // In this case we do not want to record an update, but just that the MSR is permitted.
             permitted_msrs.insert(reg_addr.0);
             continue;
@@ -437,10 +431,8 @@ fn generate_msr_profile_data_with<'a, const N: usize>(
     };
 
     let msr_profile_data = MsrProfileData {
-        hypervisor_type,
-        cpu_vendor,
         adjustments,
-        permitted_msrs,
+        required_msrs: permitted_msrs,
     };
 
     serde_json::to_writer_pretty(&mut msr_data_file, &msr_profile_data)
@@ -455,7 +447,7 @@ fn write_license_file(mut license_file: impl Write, data_type: &str) -> anyhow::
     let license_text = {
         r#"SPDX-FileCopyrightText: 2025 Cyberus Technology GmbH
 
-SPDX-License-Identifier: Apache-2.0 
+SPDX-License-Identifier: Apache-2.0
 "#
     };
     license_file
