@@ -3491,6 +3491,8 @@ const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
 
 #[cfg(test)]
 mod unit_tests {
+    use std::path::PathBuf;
+
     use super::*;
     #[cfg(target_arch = "x86_64")]
     use crate::vm_config::DebugConsoleConfig;
@@ -3499,7 +3501,6 @@ mod unit_tests {
         CpusConfig, HotplugMethod, MemoryConfig, PayloadConfig, PciDeviceCommonConfig, RngConfig,
         SerialConfig,
     };
-    use std::path::PathBuf;
 
     fn create_dummy_vmm() -> Vmm {
         Vmm::new(
