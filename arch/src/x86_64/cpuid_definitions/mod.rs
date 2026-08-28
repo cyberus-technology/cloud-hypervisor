@@ -3,69 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::ops::RangeInclusive;
-
-use serde::{Deserialize, Serialize};
-
 use crate::x86_64::CpuidReg;
-use crate::{deserialize_u32_hex, serialize_u32_hex};
 
 pub mod intel;
 #[cfg(feature = "kvm")]
 pub mod kvm;
 
-/// Parameters for inspecting CPUID definitions.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Parameters {
-    // The leaf (EAX) parameter used with the CPUID instruction
-    #[serde(
-        serialize_with = "serialize_u32_hex",
-        deserialize_with = "deserialize_u32_hex"
-    )]
-    pub leaf: u32,
-    // The sub-leaf (ECX) parameter used with the CPUID instruction
-    #[serde(
-        serialize_with = "serialize_range_hex",
-        deserialize_with = "deserialize_range_hex"
-    )]
-    pub sub_leaf: RangeInclusive<u32>,
-    // The register we are interested in inspecting which gets filled by the CPUID instruction
-    pub register: CpuidReg,
-}
-
-// Only used for (de-)serialization
-#[derive(Debug, Serialize, Deserialize)]
-struct ProvisionalRangeInclusive {
-    #[serde(
-        serialize_with = "serialize_u32_hex",
-        deserialize_with = "deserialize_u32_hex"
-    )]
-    start: u32,
-    #[serde(
-        serialize_with = "serialize_u32_hex",
-        deserialize_with = "deserialize_u32_hex"
-    )]
-    end: u32,
-}
-
-fn serialize_range_hex<S: serde::Serializer>(
-    input: &RangeInclusive<u32>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    let provisional = ProvisionalRangeInclusive {
-        start: *input.start(),
-        end: *input.end(),
-    };
-    provisional.serialize(serializer)
-}
-
-fn deserialize_range_hex<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<RangeInclusive<u32>, D::Error> {
-    let ProvisionalRangeInclusive { start, end } =
-        ProvisionalRangeInclusive::deserialize(deserializer)?;
-    Ok(start..=end)
-}
+pub use crate::x86_64::cpu_profile::cpuid_adjustments::CpuidParameters as Parameters;
 
 /// Describes a policy for how the corresponding CPUID data should be considered when building
 /// a CPU profile.
@@ -186,48 +130,5 @@ impl<const NUM_PARAMETERS: usize> CpuidDefinitions<NUM_PARAMETERS> {
             idx += 1;
         }
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use proptest::prelude::*;
-
-    use super::Parameters;
-    use crate::x86_64::CpuidReg;
-
-    // Check that serializing and then deserializing a value of type `Parameter` results in the
-    // same value we started with.
-    //
-    // Also check that the serialized numeric values are hex strings
-    proptest! {
-        #[test]
-        fn parameter_serialization_roundtrip_works(leaf in any::<u32>(), x1 in 0u32..100, x2 in 0u32..100, reg in 0..4) {
-            let sub_leaf_range_start = std::cmp::min(x1, x2);
-            let sub_leaf_range_end = std::cmp::max(x1,x2);
-            let sub_leaf = sub_leaf_range_start..=sub_leaf_range_end;
-            let register = match reg {
-                0 => CpuidReg::EAX,
-                1 => CpuidReg::EBX,
-                2 => CpuidReg::ECX,
-                3 => CpuidReg::EDX,
-                _ => unreachable!()
-            };
-            let cpuid_parameters = Parameters {
-                leaf,
-                sub_leaf,
-                register
-            };
-            let serialized = serde_json::to_string(&cpuid_parameters).unwrap();
-            let deserialized: Parameters = serde_json::from_str(&serialized).unwrap();
-            prop_assert_eq!(&deserialized, &cpuid_parameters);
-
-            // Check that all numeric values are hex strings when serialized to json
-            let params_json = serde_json::to_value(cpuid_parameters).unwrap();
-            prop_assert!(params_json.get("leaf").unwrap().as_str().unwrap().starts_with("0x"));
-            let sub_leaf_map = params_json.get("sub_leaf").unwrap().as_object().unwrap();
-            prop_assert!(sub_leaf_map.get("start").unwrap().as_str().unwrap().starts_with("0x"));
-            prop_assert!(sub_leaf_map.get("end").unwrap().as_str().unwrap().starts_with("0x"));
-        }
     }
 }
