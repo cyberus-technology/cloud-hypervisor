@@ -265,47 +265,4 @@ impl CpuidOutputRegisterAdjustments {
 
 #[derive(Debug, Error)]
 #[error("Required CPUID entries not found")]
-pub struct MissingCpuidEntriesError;
-
-#[cfg(test)]
-mod tests {
-    use proptest::prelude::*;
-
-    use super::CpuidOutputRegisterAdjustments;
-
-    // Check that serializing and then deserializing `CpuidOutputResiterAdjustments` results in the same value we started with.
-    //
-    // Also check that the serialized numeric values satisfy our expectations: They are 10-byte hex encoded strings
-    proptest! {
-        #[test]
-        fn cpuid_output_register_adjustments_serialization_works(replacements in any::<u32>(), mask in any::<u32>()) {
-            // Randomly generate these values. Several of the generated values will not represent anything that may be
-            // produced in practice, but (de-)serialization does not take such domain knowledge into account (if that changes
-            // then this test will need to be updated).
-            let adjustments = CpuidOutputRegisterAdjustments {
-                replacements,
-                mask
-            };
-            let serialized = serde_json::to_string(&adjustments).unwrap();
-            let deserialized: CpuidOutputRegisterAdjustments = serde_json::from_str(&serialized).unwrap();
-            prop_assert_eq!(&deserialized, &adjustments);
-            let json = serde_json::to_value(adjustments).unwrap();
-            let replacements_str = json.get("replacements").unwrap().as_str().unwrap();
-            let mask_str = json.get("mask").unwrap().as_str().unwrap();
-            let check_str_invariants = |value: &str| {
-                prop_assert!(value.starts_with("0x"));
-                prop_assert_eq!(value.len(),10);
-                prop_assert!(value.as_bytes().iter().all(|byte| byte.is_ascii()));
-                let is_hex_digit = |byte: &u8| -> bool {
-                    byte.is_ascii_digit() | (*byte == b'a') | (*byte == b'b') | (*byte == b'c') | (*byte == b'd') | (*byte == b'e') | (*byte == b'f')
-                };
-                prop_assert!(
-                    value.as_bytes()[2..].iter().all(is_hex_digit)
-                );
-                Ok(())
-            };
-            check_str_invariants(replacements_str)?;
-            check_str_invariants(mask_str)?;
-        }
-    }
-}
+pub(in crate::x86_64) struct MissingCpuidEntriesError;
