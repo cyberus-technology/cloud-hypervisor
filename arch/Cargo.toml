@@ -40,6 +40,9 @@ vmm-sys-util = { workspace = true, features = ["with-serde"] }
 fdt_parser = { version = "0.1.5", package = "fdt" }
 vm-fdt = { workspace = true }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+flate2 = { workspace = true }
+
 [build-dependencies]
 anyhow = { workspace = true }
 flate2 = { workspace = true }
