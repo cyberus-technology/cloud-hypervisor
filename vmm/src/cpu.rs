@@ -564,7 +564,6 @@ impl Vcpu {
     /// * `kernel_entry_point` - Kernel entry point address in guest memory and boot protocol used.
     /// * `guest_memory` - Guest memory.
     /// * `cpuid` - (x86_64) CpuId, wrapper over the `kvm_cpuid2` structure.
-    #[cfg_attr(feature = "igvm", expect(clippy::too_many_arguments))]
     pub fn configure(
         &mut self,
         #[cfg(target_arch = "aarch64")] vm: &dyn hypervisor::Vm,
