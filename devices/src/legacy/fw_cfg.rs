@@ -31,7 +31,7 @@ use arch::layout::{
 };
 use bitfield_struct::bitfield;
 #[cfg(target_arch = "x86_64")]
-use linux_loader::bootparam::boot_params;
+use linux_loader::bootparam::{LOADED_HIGH, boot_params};
 #[cfg(target_arch = "aarch64")]
 use linux_loader::loader::pe::arm64_image_header as boot_params;
 use log::{debug, error};
@@ -84,6 +84,7 @@ const FW_CFG_UUID: u16 = 0x02;
 const FW_CFG_RAM_SIZE: u16 = 0x03;
 const FW_CFG_NOGRAPHIC: u16 = 0x04;
 const FW_CFG_NB_CPUS: u16 = 0x05;
+const FW_CFG_KERNEL_ADDR: u16 = 0x07;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
@@ -94,6 +95,10 @@ const FW_CFG_SETUP_SIZE: u16 = 0x17;
 const FW_CFG_SETUP_DATA: u16 = 0x18;
 const FW_CFG_FILE_DIR: u16 = 0x19;
 const FW_CFG_KNOWN_ITEMS: usize = 0x20;
+/// Linux PE/COFF Magic signature (see
+/// https://www.kernel.org/doc/html/latest/arch/x86/boot.html#the-real-mode-kernel-header)
+const HDRS_MAGIC: u32 = 0x5372_6448;
+const MIN_VERSION_WITH_BZIMAGE_SUPPORT: u16 = 0x200;
 
 pub const FW_CFG_FILE_FIRST: u16 = 0x20;
 pub const FW_CFG_DMA_SIGNATURE_CONTENT: [u8; 8] = *b"QEMU CFG";
@@ -208,7 +213,7 @@ pub struct FwCfgInitParams {
     /// Memory size to use for building the e820 memory map stored at etc/e820.
     pub e820_size: Option<usize>,
     /// File containing the bzImage of the kernel. Used to populate FW_CFG_KERNEL_DATA,
-    /// FW_CFG_KERNEL_SIZE, FW_CFG_SETUP_DATA and FW_CFG_SETUP_SIZE.
+    /// FW_CFG_KERNEL_SIZE, FW_CFG_SETUP_DATA, FW_CFG_SETUP_SIZE and FW_CFG_KERNEL_ADDR.
     pub kernel: Option<File>,
     /// File containing the init RAM disk. Used for populating FW_CFG_INITRD_DATA and
     /// FW_CFG_INITRD_SIZE.
@@ -775,6 +780,17 @@ impl FwCfg {
         file.read_exact_at(&mut buffer, 0)?;
         let bp = boot_params::from_mut_slice(&mut buffer).unwrap();
 
+        // We currently only support high-loaded bzImage images with Linux boot protocol version
+        // 2.00 or later.
+        if bp.hdr.header != HDRS_MAGIC
+            || bp.hdr.version < MIN_VERSION_WITH_BZIMAGE_SUPPORT
+            || bp.hdr.loadflags & LOADED_HIGH as u8 == 0
+        {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "CHV's fw_cfg currently only supports high-loaded, bzImage formatted kernels",
+            ));
+        }
         // For SEV-SNP guests on KVM, don't modify the kernel header so the
         // bytes sent via fw_cfg match what the VMM hashes for the launch digest.
         // The guest firmware handles these fields itself.
@@ -784,7 +800,6 @@ impl FwCfg {
             }
             bp.hdr.type_of_loader = 0xff;
         }
-
         let kernel_start = {
             let sects = if bp.hdr.setup_sects == 0 {
                 4
@@ -814,6 +829,9 @@ impl FwCfg {
 
         self.known_items[FW_CFG_SETUP_SIZE as usize] = FwCfgContent::U32(buffer.len() as u32);
         self.known_items[FW_CFG_SETUP_DATA as usize] = FwCfgContent::Bytes(buffer);
+        // High-loaded bzImage images with Linux boot protocol version 2.00 or later use 0x10_0000
+        // as kernel address. See the Linux boot protocol documentation.
+        self.known_items[FW_CFG_KERNEL_ADDR as usize] = FwCfgContent::U32(0x10_0000);
         let kernel_size = u32::try_from(
             file.metadata()?
                 .len()
@@ -1156,6 +1174,9 @@ mod unit_tests {
 
         // We create a buffer that follows the same rules as expected by load_kernel + canary bytes.
         let mut bp = boot_params::default();
+        bp.hdr.header = HDRS_MAGIC;
+        bp.hdr.version = MIN_VERSION_WITH_BZIMAGE_SUPPORT;
+        bp.hdr.loadflags |= u8::try_from(LOADED_HIGH).unwrap();
         let mut kernel_image = [INIT_VALUE; BUFFER_SIZE];
         kernel_image[0..size_of::<boot_params>()].copy_from_slice(bp.as_slice());
 
@@ -1202,6 +1223,45 @@ mod unit_tests {
             FW_CFG_KERNEL_DATA,
             &kernel_image[BUFFER_SIZE - EXPECTED_KERNEL_SIZE..],
         );
+
+        // Check that FW_CFG_KERNEL_ADDR is set correctly.
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_KERNEL_ADDR,
+            &0x10_0000_u32.to_le_bytes(),
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_x86_add_kernel_data_rejects_invalid_header() {
+        let mut fw_cfg = FwCfg::new(GuestMemoryAtomic::new(GuestMemoryMmap::new()));
+        // Create a compatible header for the non-SNP path.
+        let mut bp = boot_params::default();
+        bp.hdr.header = HDRS_MAGIC;
+        bp.hdr.version = MIN_VERSION_WITH_BZIMAGE_SUPPORT;
+        bp.hdr.loadflags |= u8::try_from(LOADED_HIGH).unwrap();
+
+        let mut illegal_header = bp;
+        illegal_header.hdr.header = 0;
+        let temp = TempFile::new().unwrap();
+        let mut temp_file = temp.as_file();
+        temp_file.write_all(illegal_header.as_slice()).unwrap();
+        let _ = fw_cfg.add_kernel_data(temp_file, false).unwrap_err();
+
+        let mut illegal_header = bp;
+        illegal_header.hdr.version = 0;
+        let temp = TempFile::new().unwrap();
+        let mut temp_file = temp.as_file();
+        temp_file.write_all(illegal_header.as_slice()).unwrap();
+        let _ = fw_cfg.add_kernel_data(temp_file, false).unwrap_err();
+
+        let mut illegal_header = bp;
+        illegal_header.hdr.loadflags = 0;
+        let temp = TempFile::new().unwrap();
+        let mut temp_file = temp.as_file();
+        temp_file.write_all(illegal_header.as_slice()).unwrap();
+        let _ = fw_cfg.add_kernel_data(temp_file, false).unwrap_err();
     }
 
     #[test]
