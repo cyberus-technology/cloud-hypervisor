@@ -87,6 +87,8 @@ const FW_CFG_NB_CPUS: u16 = 0x05;
 const FW_CFG_KERNEL_ADDR: u16 = 0x07;
 const FW_CFG_KERNEL_SIZE: u16 = 0x08;
 const FW_CFG_INITRD_SIZE: u16 = 0x0b;
+#[cfg(target_arch = "x86_64")]
+const FW_CFG_MAX_CPUS: u16 = 0x0f;
 const FW_CFG_KERNEL_DATA: u16 = 0x11;
 const FW_CFG_INITRD_DATA: u16 = 0x12;
 const FW_CFG_CMDLINE_SIZE: u16 = 0x14;
@@ -230,6 +232,9 @@ pub struct FwCfgInitParams {
     pub no_graphics: bool,
     /// Number of boot vCPUs. Used to populate FW_CFG_NB_CPUS.
     pub nb_cpus: u16,
+    #[cfg(target_arch = "x86_64")]
+    /// Used to populate the FW_CFG_MAX_CPUS selector of fw_cfg. x86 only.
+    pub max_cpus: u16,
 }
 
 // ARM MMIO transport needs a rework.
@@ -551,6 +556,10 @@ impl FwCfg {
         self.known_items[FW_CFG_NOGRAPHIC as usize] =
             FwCfgContent::U16(u16::from(fw_cfg_init.no_graphics));
         self.known_items[FW_CFG_NB_CPUS as usize] = FwCfgContent::U16(fw_cfg_init.nb_cpus);
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.known_items[FW_CFG_MAX_CPUS as usize] = FwCfgContent::U16(fw_cfg_init.max_cpus);
+        }
 
         Ok(())
     }
@@ -1161,6 +1170,23 @@ mod unit_tests {
             &mut fw_cfg,
             FW_CFG_NB_CPUS,
             &expected_num_boot_cpus.to_le_bytes(),
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_cfg_max_cpus() {
+        let expected_num_max_cpus = 0xABCD_u16;
+
+        let mut fw_cfg = fw_cfg_from_init_params(FwCfgInitParams {
+            max_cpus: expected_num_max_cpus,
+            ..Default::default()
+        });
+
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_MAX_CPUS,
+            &expected_num_max_cpus.to_le_bytes(),
         );
     }
 

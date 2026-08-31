@@ -1235,7 +1235,7 @@ impl VmConfig {
         Ok(())
     }
 
-    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    #[cfg(all(target_arch = "x86_64", any(feature = "kvm", feature = "fw_cfg")))]
     pub(crate) fn max_apic_id(&self) -> u32 {
         if let Some(topology) = &self.cpus.topology {
             arch::x86_64::get_max_x2apic_id((
