@@ -118,6 +118,10 @@ const FW_CFG_FILENAME_TABLE_LOADER: &str = "etc/table-loader";
 const FW_CFG_FILENAME_RSDP: &str = "acpi/rsdp";
 const FW_CFG_FILENAME_ACPI_TABLES: &str = "acpi/tables";
 
+#[cfg(target_arch = "x86_64")]
+/// https://www.kernel.org/doc/html/latest/arch/x86/boot.html#the-real-mode-kernel-header
+const PE_COFF_SECTOR_SIZE: u32 = 512;
+
 #[derive(Debug)]
 pub enum FwCfgContent {
     Bytes(Vec<u8>),
@@ -740,38 +744,68 @@ impl FwCfg {
         file: &File,
         #[cfg(target_arch = "x86_64")] kvm_sev_snp_enabled: bool,
     ) -> Result<()> {
+        #[cfg(target_arch = "aarch64")]
+        self.add_aarch_kernel_data(file)?;
+        #[cfg(target_arch = "x86_64")]
+        self.add_x86_kernel_data(file, kvm_sev_snp_enabled)?;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn add_aarch_kernel_data(&mut self, file: &File) -> Result<()> {
         let mut buffer = vec![0u8; size_of::<boot_params>()];
         file.read_exact_at(&mut buffer, 0)?;
         let bp = boot_params::from_mut_slice(&mut buffer).unwrap();
-        #[cfg(target_arch = "x86_64")]
-        {
-            // For SEV-SNP guests on KVM, don't modify the kernel header so the
-            // bytes sent via fw_cfg match what the VMM hashes for the launch digest.
-            // The guest firmware handles these fields itself.
-            if !kvm_sev_snp_enabled {
-                if bp.hdr.setup_sects == 0 {
-                    bp.hdr.setup_sects = 4;
-                }
-                bp.hdr.type_of_loader = 0xff;
-            }
-        }
-        #[cfg(target_arch = "aarch64")]
+
         let kernel_start = bp.text_offset;
-        #[cfg(target_arch = "x86_64")]
+
+        self.known_items[FW_CFG_KERNEL_SIZE as usize] =
+            FwCfgContent::U32(file.metadata()?.len() as u32 - kernel_start as u32);
+        self.known_items[FW_CFG_KERNEL_DATA as usize] =
+            FwCfgContent::File(kernel_start as u64, file.try_clone()?);
+        compile_error!(
+            "`boot_params` is not implemented for AArch64, so this will never compile. This function needs an entire rewrite."
+        );
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn add_x86_kernel_data(&mut self, file: &File, kvm_sev_snp_enabled: bool) -> Result<()> {
+        let mut buffer = vec![0u8; size_of::<boot_params>()];
+        file.read_exact_at(&mut buffer, 0)?;
+        let bp = boot_params::from_mut_slice(&mut buffer).unwrap();
+
+        // For SEV-SNP guests on KVM, don't modify the kernel header so the
+        // bytes sent via fw_cfg match what the VMM hashes for the launch digest.
+        // The guest firmware handles these fields itself.
+        if !kvm_sev_snp_enabled {
+            if bp.hdr.setup_sects == 0 {
+                bp.hdr.setup_sects = 4;
+            }
+            bp.hdr.type_of_loader = 0xff;
+        }
+
         let kernel_start = {
             let sects = if bp.hdr.setup_sects == 0 {
                 4
             } else {
                 bp.hdr.setup_sects
             };
-            (sects as usize + 1) * 512
+            (sects as u32 + 1) * PE_COFF_SECTOR_SIZE
         };
 
-        #[cfg(target_arch = "x86_64")]
-        if kernel_start <= buffer.len() {
-            buffer.truncate(kernel_start);
+        // The chance that the conversion to u32 fails is quite low, because this would mean that
+        // the boot params header is larger than 4 GiB. Better be on the safe side.
+        let buffer_len_u32 = u32::try_from(buffer.len()).map_err(|_| {
+            IoError::new(
+                ErrorKind::FileTooLarge,
+                "The Linux boot protocol header is larger than 4 GiB",
+            )
+        })?;
+        if kernel_start <= buffer_len_u32 {
+            buffer.truncate(kernel_start as usize);
         } else {
-            buffer.resize(kernel_start, 0);
+            buffer.resize(kernel_start as usize, 0);
             file.read_exact_at(
                 &mut buffer[size_of::<boot_params>()..],
                 size_of::<boot_params>() as u64,
@@ -780,8 +814,17 @@ impl FwCfg {
 
         self.known_items[FW_CFG_SETUP_SIZE as usize] = FwCfgContent::U32(buffer.len() as u32);
         self.known_items[FW_CFG_SETUP_DATA as usize] = FwCfgContent::Bytes(buffer);
-        self.known_items[FW_CFG_KERNEL_SIZE as usize] =
-            FwCfgContent::U32(file.metadata()?.len() as u32 - kernel_start as u32);
+        let kernel_size = u32::try_from(
+            file.metadata()?
+                .len()
+                .checked_sub(kernel_start as u64)
+                .ok_or(IoError::new(
+                    ErrorKind::InvalidInput,
+                    "Kernel start is located beyond EOF",
+                ))?,
+        )
+        .map_err(|_| IoError::new(ErrorKind::FileTooLarge, "Kernel size exceeds 4 GiB"))?;
+        self.known_items[FW_CFG_KERNEL_SIZE as usize] = FwCfgContent::U32(kernel_size);
         self.known_items[FW_CFG_KERNEL_DATA as usize] =
             FwCfgContent::File(kernel_start as u64, file.try_clone()?);
         Ok(())
@@ -1100,6 +1143,64 @@ mod unit_tests {
             &mut fw_cfg,
             FW_CFG_NB_CPUS,
             &expected_num_boot_cpus.to_le_bytes(),
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_x86_cfg_kernel_data() {
+        const BUFFER_SIZE: usize = 2 * 4096;
+        const INIT_VALUE: u8 = 0xFE;
+        const EXPECTED_KERNEL_START: usize = 5 * PE_COFF_SECTOR_SIZE as usize;
+        const EXPECTED_KERNEL_SIZE: usize = BUFFER_SIZE - EXPECTED_KERNEL_START;
+
+        // We create a buffer that follows the same rules as expected by load_kernel + canary bytes.
+        let mut bp = boot_params::default();
+        let mut kernel_image = [INIT_VALUE; BUFFER_SIZE];
+        kernel_image[0..size_of::<boot_params>()].copy_from_slice(bp.as_slice());
+
+        // Write test data to the file.
+        let temp = TempFile::new().unwrap();
+        let mut temp_file = temp.as_file();
+        temp_file.write_all(&kernel_image).unwrap();
+        // When adding the file to fw_cfg the header will be patched. Do the same for the expected
+        // data.
+        bp.hdr.setup_sects = 4;
+        bp.hdr.type_of_loader = 0xff;
+        kernel_image[0..size_of::<boot_params>()].copy_from_slice(bp.as_slice());
+
+        // Create fw_cfg and register the kernel data.
+        let mut fw_cfg = fw_cfg_from_init_params(FwCfgInitParams {
+            ..Default::default()
+        });
+        fw_cfg.add_kernel_data(temp_file, false).unwrap();
+
+        // Check that FW_CFG_SETUP_SIZE is set correctly. x86 only
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_SETUP_SIZE,
+            &u32::try_from(EXPECTED_KERNEL_START).unwrap().to_le_bytes(),
+        );
+
+        // Check that FW_CFG_SETUP_DATA is set correctly. x86 only.
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_SETUP_DATA,
+            &kernel_image[0..EXPECTED_KERNEL_START],
+        );
+
+        // Check that FW_CFG_KERNEL_SIZE is set correctly.
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_KERNEL_SIZE,
+            &u32::try_from(EXPECTED_KERNEL_SIZE).unwrap().to_le_bytes(),
+        );
+
+        // Check that FW_CFG_KERNEL_DATA is set correctly.
+        assert_legacy_selector_read(
+            &mut fw_cfg,
+            FW_CFG_KERNEL_DATA,
+            &kernel_image[BUFFER_SIZE - EXPECTED_KERNEL_SIZE..],
         );
     }
 
