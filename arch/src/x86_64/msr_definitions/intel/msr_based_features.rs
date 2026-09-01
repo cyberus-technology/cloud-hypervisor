@@ -295,7 +295,7 @@ pub static INTEL_MSR_FEATURE_DEFINITIONS: MsrDefinitions<24> = const {
                 description: "If 0, the hypervisor indicates that the system is not affected by indirect Target Selection. If 1, then the hypervisor
                 indicates that the system may be affected by indirect Target Selection",
                 bits_range: (62, 62),
-                policy: ProfilePolicy::Passthrough,
+                policy: ProfilePolicy::Inherit,
 
             },
 
