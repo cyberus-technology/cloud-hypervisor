@@ -18,13 +18,14 @@ kvm = ["hypervisor/kvm"]
 sev_snp = []
 tdx = []
 # Currently cpu profiles can only be generated with KVM
-cpu_profile_generation = ["dep:clap", "kvm"]
+cpu_profile_generation = ["dep:clap", "dep:jiff", "kvm"]
 
 [dependencies]
 anyhow = { workspace = true }
 byteorder = { workspace = true }
 clap = { workspace = true, optional = true }
 hypervisor = { path = "../hypervisor" }
+jiff = { workspace = true, optional = true }
 libc = { workspace = true }
 linux-loader = { workspace = true, features = ["bzimage", "elf", "pe"] }
 log = { workspace = true }
