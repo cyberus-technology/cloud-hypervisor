@@ -119,6 +119,8 @@ use crate::interrupt::{LegacyUserspaceInterruptManager, MsiInterruptManager};
 use crate::memory_manager::{Error as MemoryManagerError, MEMORY_MANAGER_ACPI_SIZE, MemoryManager};
 use crate::pci_segment::PciSegment;
 use crate::serial_manager::{Error as SerialManagerError, SerialManager};
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+use crate::vm_config::FwCfgConfig;
 #[cfg(feature = "ivshmem")]
 use crate::vm_config::IvshmemConfig;
 use crate::vm_config::{
@@ -1624,6 +1626,18 @@ impl DeviceManager {
         #[cfg(feature = "ivshmem")]
         if let Some(ivshmem) = self.config.clone().lock().unwrap().ivshmem.as_ref() {
             self.ivshmem_device = self.add_ivshmem_device(ivshmem, snapshot)?;
+        }
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        {
+            // If we have a boot order but no fw_cfg device, we must create the latter.
+            let mut vm_config = self.config.lock().unwrap();
+            if !self.boot_order.is_empty()
+                && vm_config.payload.is_some()
+                && vm_config.payload.as_mut().unwrap().fw_cfg_config.is_none()
+            {
+                vm_config.payload.as_mut().unwrap().fw_cfg_config = Some(FwCfgConfig::default());
+            }
         }
 
         Ok(())
