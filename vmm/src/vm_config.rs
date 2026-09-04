@@ -920,7 +920,7 @@ pub struct PayloadConfig {
 }
 
 #[cfg(feature = "fw_cfg")]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FwCfgConfig {
     pub e820: bool,
     pub kernel: bool,
@@ -928,20 +928,6 @@ pub struct FwCfgConfig {
     pub initramfs: bool,
     pub acpi_tables: bool,
     pub items: Option<FwCfgItemList>,
-}
-
-#[cfg(feature = "fw_cfg")]
-impl Default for FwCfgConfig {
-    fn default() -> Self {
-        FwCfgConfig {
-            e820: true,
-            kernel: true,
-            cmdline: true,
-            initramfs: true,
-            acpi_tables: true,
-            items: None,
-        }
-    }
 }
 
 #[cfg(feature = "fw_cfg")]

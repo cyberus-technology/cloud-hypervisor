@@ -34,11 +34,11 @@ This option allows the kernel to expose `fw_cfg` entries under `/sys/firmware/qe
 The `fw_cfg` device is configured using the `--fw-cfg-config` command-line option.
 
 **Parameters:**
-*   `e820=on|off`: (Default: `on`) Whether to add an E820 memory map entry to `fw_cfg`.
-*   `kernel=on|off`: (Default: `on`) Whether to add the kernel image (specified by `--kernel`) to `fw_cfg`.
-*   `cmdline=on|off`: (Default: `on`) Whether to add the kernel command line (specified by `--cmdline`) to `fw_cfg`.
-*   `initramfs=on|off`: (Default: `on`) Whether to add the initramfs image (specified by `--initramfs`) to `fw_cfg`.
-*   `acpi_table=on|off`: (Default: `on`) Whether to add generated ACPI tables to `fw_cfg`.
+*   `e820=on|off`: (Default: `off`) Whether to add an E820 memory map entry to `fw_cfg`.
+*   `kernel=on|off`: (Default: `off`) Whether to add the kernel image (specified by `--kernel`) to `fw_cfg`.
+*   `cmdline=on|off`: (Default: `off`) Whether to add the kernel command line (specified by `--cmdline`) to `fw_cfg`.
+*   `initramfs=on|off`: (Default: `off`) Whether to add the initramfs image (specified by `--initramfs`) to `fw_cfg`.
+*   `acpi_table=on|off`: (Default: `off`) Whether to add generated ACPI tables to `fw_cfg`.
 *   `items=[... : ...]`: A list of custom key-value pairs to be exposed via `fw_cfg`. Multiple items are separated by `:`.
     *   `name=<guest_sysfs_path>`: The path under which the item will appear in the guest's sysfs (e.g., `opt/org.example/my-data`).
     *   `file=<host_file_path>`: The path to a file on the host whose content will be provided to the guest for this item.
