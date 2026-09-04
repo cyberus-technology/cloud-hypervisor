@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+use std::collections::HashSet;
 use std::collections::{BTreeSet, HashMap};
 #[cfg(feature = "ivshmem")]
 use std::fs;
@@ -420,6 +422,17 @@ pub enum ValidationError {
     /// Invalid to set both 'mergeable' and 'shared' for memory
     #[error("Invalid to set both 'mergeable' and 'shared' for memory")]
     InvalidSharedMemoryWithMergeable,
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// It's invalid to use the same boot index for multiple devices.
+    #[error("The boot index {0} is used by at least two devices")]
+    BootIndexAlreadyInUse(u32),
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// It's invalid to use the boot index for devices devices connected to a PCI segment other than
+    /// 0.
+    #[error(
+        "Boot index can only be used for devices connected to PCI segment 0. Found segment ID {0} instead"
+    )]
+    BootIndexCombinedWithNonZeroSegment(u16),
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -1371,6 +1384,7 @@ impl PciDeviceCommonConfig {
 }
 
 impl DiskConfig {
+    #[cfg(not(all(target_arch = "x86_64", feature = "fw_cfg")))]
     pub const SYNTAX: &'static str = "Disk parameters \
          \"path=<disk_image_path>,readonly=on|off,direct=on|off,iommu=on|off,\
          num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,\
@@ -1382,6 +1396,20 @@ impl DiskConfig {
          queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
          serial=<serial_number>,backing_files=on|off,sparse=on|off,\
          image_type=<raw,qcow2,vhd,vhdx>,lock_granularity=byte-range|full|qemu-compatible";
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    pub const SYNTAX: &'static str = "Disk parameters \
+         \"path=<disk_image_path>,readonly=on|off,direct=on|off,iommu=on|off,\
+         num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,\
+         vhost_user=on|off,socket=<vhost_user_socket_path>,\
+         bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
+         ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,\
+         id=<device_id>,pci_segment=<segment_id>,pci_device_id=<pci_slot>,\
+         rate_limit_group=<group_id>,\
+         queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
+         serial=<serial_number>,backing_files=on|off,sparse=on|off,\
+         image_type=<raw,qcow2,vhd,vhdx>,lock_granularity=byte-range|full,\
+         bootindex=<index>";
 
     pub fn parse(disk: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1409,6 +1437,9 @@ impl DiskConfig {
             .add("image_type")
             .add("lock_granularity")
             .add_all(PciDeviceCommonConfig::OPTIONS_IOMMU);
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        parser.add("bootindex");
 
         parser.parse(disk).map_err(Error::ParseDisk)?;
 
@@ -1539,6 +1570,11 @@ impl DiskConfig {
 
         let pci_common = PciDeviceCommonConfig::parse(disk)?;
 
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        let bootindex = parser
+            .convert::<u32>("bootindex")
+            .map_err(Error::ParseDisk)?;
+
         Ok(DiskConfig {
             pci_common,
             path,
@@ -1558,6 +1594,8 @@ impl DiskConfig {
             sparse,
             image_type,
             lock_granularity,
+            #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+            bootindex,
         })
     }
 
@@ -1598,6 +1636,14 @@ impl DiskConfig {
             return Err(ValidationError::InvalidSerialLength(
                 serial.len(),
                 VIRTIO_BLK_ID_BYTES as usize,
+            ));
+        }
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        // Fail early if we attempt to set boot index for a device not connected to segment 0.
+        if self.pci_common.pci_segment != 0 && self.bootindex.is_some() {
+            return Err(ValidationError::BootIndexCombinedWithNonZeroSegment(
+                self.pci_common.pci_segment,
             ));
         }
 
@@ -2996,6 +3042,8 @@ impl VmConfig {
     // configuration.
     pub fn validate(&mut self) -> ValidationResult<BTreeSet<String>> {
         let mut id_list = BTreeSet::new();
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        let mut seen_boot_indices: HashSet<u32> = HashSet::new();
 
         // Is the payload configuration bootable?
         self.payload
@@ -3124,6 +3172,15 @@ impl VmConfig {
                         }
                     } else {
                         return Err(ValidationError::InvalidRateLimiterGroup);
+                    }
+                }
+
+                #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+                {
+                    if let Some(bootindex) = disk.bootindex
+                        && !seen_boot_indices.insert(bootindex)
+                    {
+                        return Err(ValidationError::BootIndexAlreadyInUse(bootindex));
                     }
                 }
 
@@ -4126,6 +4183,8 @@ mod unit_tests {
             sparse: true,
             image_type: ImageType::Unknown,
             lock_granularity: LockGranularityChoice::default(),
+            #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+            bootindex: Default::default(),
         }
     }
 
@@ -6181,6 +6240,50 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             invalid_config.validate(),
             Err(ValidationError::IdentifierNotUnique("test0".to_string()))
         );
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        {
+            let mut valid_config_with_bootindex = valid_config.clone();
+            valid_config_with_bootindex.disks = Some(vec![DiskConfig {
+                bootindex: Some(1),
+                ..disk_fixture()
+            }]);
+            valid_config_with_bootindex.validate().unwrap();
+
+            let expected_index = 1;
+            let mut invalid_config = valid_config.clone();
+            invalid_config.disks = Some(vec![
+                DiskConfig {
+                    bootindex: Some(expected_index),
+                    ..disk_fixture()
+                },
+                DiskConfig {
+                    bootindex: Some(expected_index),
+                    ..disk_fixture()
+                },
+            ]);
+            let e = invalid_config.validate().unwrap_err();
+            assert!(
+                matches!(e, ValidationError::BootIndexAlreadyInUse(i) if i == expected_index),
+                "Expected the bootindex of {expected_index} to be part of the error."
+            );
+
+            let expected_segment = 1;
+            let mut invalid_config = valid_config.clone();
+            invalid_config.disks = Some(vec![DiskConfig {
+                bootindex: Some(1),
+                pci_common: PciDeviceCommonConfig {
+                    pci_segment: expected_segment,
+                    ..Default::default()
+                },
+                ..disk_fixture()
+            }]);
+            let e = invalid_config.validate().unwrap_err();
+            assert!(
+                matches!(e, ValidationError::BootIndexCombinedWithNonZeroSegment(i) if i == expected_segment),
+                "Expected a segment ID of {expected_segment} to be part of the error."
+            );
+        }
     }
     #[test]
     fn test_landlock_parsing() -> Result<()> {
