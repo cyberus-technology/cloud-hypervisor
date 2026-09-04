@@ -2154,27 +2154,27 @@ impl FwCfgConfig {
         let e820 = parser
             .convert::<Toggle>("e820")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let kernel = parser
             .convert::<Toggle>("kernel")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let cmdline = parser
             .convert::<Toggle>("cmdline")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let initramfs = parser
             .convert::<Toggle>("initramfs")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let acpi_tables = parser
             .convert::<Toggle>("acpi_table")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let items = if parser.is_set("items") {
             Some(
@@ -2196,6 +2196,7 @@ impl FwCfgConfig {
             items,
         })
     }
+
     pub fn validate(&self, payload: &PayloadConfig) -> std::result::Result<(), PayloadConfigError> {
         if self.kernel && payload.kernel.is_none() {
             return Err(PayloadConfigError::FwCfgMissingKernel);
