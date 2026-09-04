@@ -40,7 +40,9 @@ use devices::AcpiNotificationFlags;
 #[cfg(target_arch = "aarch64")]
 use devices::interrupt_controller;
 #[cfg(feature = "fw_cfg")]
-use devices::legacy::fw_cfg::{FwCfgInitParams, FwCfgItem};
+use devices::legacy::fw_cfg::{FwCfgContent, FwCfgInitParams, FwCfgItem};
+#[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+use devices::legacy::open_fw::{OpenFwDevicePath, OpenFwDevicePathError};
 use event_monitor::event;
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 use gdbstub_arch::aarch64::reg::AArch64CoreRegs as CoreRegs;
@@ -94,6 +96,8 @@ use crate::console_devices::{ConsoleDeviceError, ConsoleInfo};
 use crate::coredump::{
     CpuElf64Writable, DumpState, Elf64Writable, GuestDebuggable, GuestDebuggableError, NoteDescType,
 };
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+use crate::device_manager::BootOrderEntry;
 use crate::device_manager::{DeviceManager, DeviceManagerError};
 use crate::device_tree::DeviceTree;
 #[cfg(feature = "guest_debug")]
@@ -413,6 +417,18 @@ pub enum Error {
     #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
     #[error("APIC limit cannot be represented with fw_cfg. {0} exceed the maximum of 65535")]
     FwCfgCannotRepresentNumMaxVCpus(u32),
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[error("Error creating Open Firmware path")]
+    OpenFwPathCreationFailed(#[source] OpenFwDevicePathError),
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[error("Missing BDF for boot item with boot index {0}")]
+    NoBdfForBootItem(u32),
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[error("Missing device type for boot item")]
+    NoDeviceTypeForBootItem,
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -1248,14 +1264,12 @@ impl Vm {
             initramfs_option = initramfs;
         }
         let mut fw_cfg_item_list_option: Option<Vec<FwCfgItem>> = None;
+        let mut fw_cfg_item_list = vec![];
         if let Some(fw_cfg_items) = &fw_cfg_config.items {
-            let mut fw_cfg_item_list = vec![];
             for fw_cfg_item in fw_cfg_items.item_list.clone() {
                 let content = match (fw_cfg_item.string, fw_cfg_item.file) {
-                    (Some(string_val), None) => {
-                        devices::legacy::fw_cfg::FwCfgContent::Bytes(string_val.into_bytes())
-                    }
-                    (None, Some(file_path)) => devices::legacy::fw_cfg::FwCfgContent::File(
+                    (Some(string_val), None) => FwCfgContent::Bytes(string_val.into_bytes()),
+                    (None, Some(file_path)) => FwCfgContent::File(
                         0,
                         File::open(file_path).map_err(Error::AddingFwCfgItem)?,
                     ),
@@ -1268,6 +1282,17 @@ impl Vm {
                     content,
                 });
             }
+        }
+        #[cfg(target_arch = "x86_64")]
+        // Create bootorder entry in fw_cfg
+        {
+            let mut boot_items = self.device_manager.lock().unwrap().get_boot_items();
+            boot_items.sort_by_key(|a| a.boot_index);
+
+            Self::add_boot_order_item(&boot_items, &mut fw_cfg_item_list)?;
+        }
+
+        if !fw_cfg_item_list.is_empty() {
             fw_cfg_item_list_option = Some(fw_cfg_item_list);
         }
 
@@ -1329,6 +1354,47 @@ impl Vm {
                 kvm_sev_snp_enabled,
             )
             .map_err(Error::ErrorPopulatingFwCfg)?;
+        Ok(())
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    // Helper that creates a FwCfgItem from a list of BootOrderEntries and appends it to the
+    // fw_cfg_item_list.
+    fn add_boot_order_item(
+        bootitems: &[BootOrderEntry],
+        fw_cfg_item_list: &mut Vec<FwCfgItem>,
+    ) -> Result<()> {
+        let bootorder_path = "bootorder";
+        let mut content: Vec<u8> = Vec::new();
+        for (index, boot_item) in bootitems.iter().enumerate() {
+            let bdf = boot_item
+                .device_address
+                .ok_or(Error::NoBdfForBootItem(boot_item.boot_index))?;
+            let device_type = boot_item
+                .device_type
+                .ok_or(Error::NoDeviceTypeForBootItem)?;
+            let open_fw_path = OpenFwDevicePath::from_device_and_bdf(bdf, device_type)
+                .map_err(Error::OpenFwPathCreationFailed)?;
+            let cstring = CString::new(open_fw_path.to_string().as_str()).unwrap();
+            if index == (bootitems.len() - 1) {
+                content.extend_from_slice(cstring.as_bytes_with_nul());
+            } else {
+                content.extend_from_slice(cstring.as_bytes());
+                content.extend_from_slice(CString::new("\n").unwrap().as_bytes());
+            }
+        }
+        let bootorder_item = FwCfgItem {
+            name: bootorder_path.to_owned(),
+            content: FwCfgContent::Bytes(content),
+        };
+        if let Some(user_bootorder) = fw_cfg_item_list
+            .iter_mut()
+            .find(|item| item.name.as_str() == bootorder_path)
+        {
+            *user_bootorder = bootorder_item;
+        } else {
+            fw_cfg_item_list.push(bootorder_item);
+        }
         Ok(())
     }
 
@@ -3759,6 +3825,11 @@ impl GuestDebuggable for Vm {
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[cfg(test)]
 mod unit_tests {
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    use pci::PciBdf;
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    use vm_virtio::VirtioDeviceType;
+
     use super::*;
 
     fn test_vm_state_transitions(state: VmState) {
@@ -4098,6 +4169,100 @@ mod unit_tests {
                 r => panic!("unexpected exit reason: {r:?}"),
             }
         }
+    }
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[test]
+    fn test_add_boot_order_item() {
+        let first_entry = BootOrderEntry {
+            boot_index: 1,
+            device_type: Some(VirtioDeviceType::Block),
+            device_address: Some(PciBdf::new(0, 0, 1, 0)),
+        };
+        let first_path = OpenFwDevicePath::from_device_and_bdf(
+            first_entry.device_address.unwrap(),
+            first_entry.device_type.unwrap(),
+        )
+        .unwrap();
+        let second_entry = BootOrderEntry {
+            boot_index: 2,
+            device_type: Some(VirtioDeviceType::Block),
+            device_address: Some(PciBdf::new(0, 0, 2, 0)),
+        };
+        let second_path = OpenFwDevicePath::from_device_and_bdf(
+            second_entry.device_address.unwrap(),
+            second_entry.device_type.unwrap(),
+        )
+        .unwrap();
+        let expected_content = [
+            first_path.to_string().as_bytes(),
+            b"\n",
+            second_path.to_string().as_bytes(),
+            b"\0",
+        ]
+        .concat();
+        let bootitems = vec![first_entry, second_entry];
+        let mut fw_cfg_item_list = vec![];
+        Vm::add_boot_order_item(&bootitems, &mut fw_cfg_item_list).unwrap();
+
+        assert_eq!(fw_cfg_item_list.len(), 1);
+        assert_eq!(fw_cfg_item_list[0].name, "bootorder");
+        assert!(
+            matches!(
+                &fw_cfg_item_list[0].content,
+                FwCfgContent::Bytes(bytes) if bytes == &expected_content
+            ),
+            "Got {:?}; expected {:?}",
+            fw_cfg_item_list[0].content,
+            expected_content
+        );
+    }
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[test]
+    fn test_add_boot_order_item_replaces_existing() {
+        let first_item_content = Vec::from(b"1234");
+        let item_to_replace = FwCfgItem {
+            content: FwCfgContent::Bytes(first_item_content.clone()),
+            name: String::from("bootorder"),
+        };
+        let mut fw_cfg_item_list = vec![item_to_replace];
+        assert_eq!(fw_cfg_item_list.len(), 1);
+        assert_eq!(fw_cfg_item_list[0].name, "bootorder");
+        assert!(
+            matches!(
+                &fw_cfg_item_list[0].content,
+                FwCfgContent::Bytes(bytes) if bytes == &first_item_content
+            ),
+            "Got {:?}; expected {:?}",
+            fw_cfg_item_list[0].content,
+            first_item_content
+        );
+        // Check that the bootorder item is replaced.
+        let first_entry = BootOrderEntry {
+            boot_index: 1,
+            device_type: Some(VirtioDeviceType::Block),
+            device_address: Some(PciBdf::new(0, 0, 1, 0)),
+        };
+        let first_path = OpenFwDevicePath::from_device_and_bdf(
+            first_entry.device_address.unwrap(),
+            first_entry.device_type.unwrap(),
+        )
+        .unwrap();
+        let boot_items = vec![first_entry];
+        let expected_content = [first_path.to_string().as_bytes(), b"\0"].concat();
+        Vm::add_boot_order_item(&boot_items, &mut fw_cfg_item_list).unwrap();
+        assert_eq!(fw_cfg_item_list.len(), 1);
+        assert_eq!(fw_cfg_item_list[0].name, "bootorder");
+        assert!(
+            matches!(
+                &fw_cfg_item_list[0].content,
+                FwCfgContent::Bytes(bytes) if bytes == &expected_content
+            ),
+            "Got {:?}; expected {:?}",
+            fw_cfg_item_list[0].content,
+            expected_content
+        );
     }
 }
 

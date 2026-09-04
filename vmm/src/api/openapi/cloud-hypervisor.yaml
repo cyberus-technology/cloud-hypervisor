@@ -1039,6 +1039,13 @@ components:
           $ref: "#/components/schemas/ImageType"
         lock_granularity:
           $ref: "#/components/schemas/LockGranularity"
+        bootindex:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: >
+            Boot-order priority for this disk. Available only on x86_64 builds
+            with the fw_cfg feature enabled.
 
     NetConfig:
       type: object
