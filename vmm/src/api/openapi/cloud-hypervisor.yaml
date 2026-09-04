@@ -510,6 +510,88 @@ paths:
         500:
           description: The VM migration could not be sent.
 
+  /vm.disk-mirror-start:
+    put:
+      summary: Start mirroring a disk to a destination
+      requestBody:
+        description: The disk to mirror and the destination path
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorStartData"
+        required: true
+      responses:
+        204:
+          description: Disk mirroring was successfully started.
+        400:
+          description: A mirror is already active for the disk, or the destination is not usable.
+        404:
+          description: No disk with the given identifier was found.
+        500:
+          description: Disk mirroring could not be started.
+
+  /vm.disk-mirror-status:
+    put:
+      summary: Query the status of a disk mirror
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorStatusData"
+        required: true
+      responses:
+        200:
+          description: The current status of the disk mirror.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VmDiskMirrorStatusResponse"
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        500:
+          description: The disk mirror status could not be retrieved.
+
+  /vm.disk-mirror-complete:
+    put:
+      summary: Complete a disk mirror and switch to the destination
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorCompleteData"
+        required: true
+      responses:
+        204:
+          description: The disk mirror was completed and the device now uses the destination.
+        400:
+          description: The mirror is not ready to complete.
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        500:
+          description: The disk mirror could not be completed.
+
+  /vm.disk-mirror-cancel:
+    put:
+      summary: Cancel a disk mirror and keep the source disk
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorCancelData"
+        required: true
+      responses:
+        204:
+          description: The disk mirror was cancelled and the device keeps using the source.
+        400:
+          description: The mirror cannot be cancelled because completion is already in progress.
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        500:
+          description: The disk mirror could not be cancelled.
+
 components:
   schemas:
     VmmPingResponse:
@@ -1563,4 +1645,64 @@ components:
         path:
           type: string
         access:
+          type: string
+
+    VmDiskMirrorStartData:
+      required:
+        - id
+        - destination_path
+      type: object
+      properties:
+        id:
+          type: string
+        destination_path:
+          type: string
+
+    VmDiskMirrorStatusData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
+          type: string
+
+    VmDiskMirrorStatusResponse:
+      required:
+        - phase
+        - copied_bytes
+        - total_bytes
+      type: object
+      properties:
+        phase:
+          type: string
+          enum:
+            - running
+            - ready
+            - completing
+            - completed
+            - cancelling
+            - failed
+        copied_bytes:
+          type: integer
+          format: int64
+        total_bytes:
+          type: integer
+          format: int64
+        failure:
+          type: string
+
+    VmDiskMirrorCompleteData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
+          type: string
+
+    VmDiskMirrorCancelData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
           type: string

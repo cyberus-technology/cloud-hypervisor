@@ -17,7 +17,6 @@ use std::fs::File;
 use std::io::{Read, Write, stdout};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::panic::AssertUnwindSafe;
-#[cfg(feature = "guest_debug")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
@@ -63,8 +62,8 @@ use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 
 use crate::api::{
-    ApiRequest, ApiResponse, RequestHandler, TimeoutStrategy, VmInfoResponse,
-    VmReceiveMigrationData, VmSendMigrationData, VmmPingResponse,
+    ApiRequest, ApiResponse, RequestHandler, TimeoutStrategy, VmDiskMirrorStatusResponse,
+    VmInfoResponse, VmReceiveMigrationData, VmSendMigrationData, VmmPingResponse,
 };
 use crate::config::{MemoryRestoreMode, RestoreConfig, add_to_config};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
@@ -79,7 +78,7 @@ use crate::migration_transport::{
     ReceiveAdditionalConnections, ReceiveListener, SendAdditionalConnections, SocketStream,
 };
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
-use crate::vm::{Error as VmError, PostMigrationLifecycleEvent, Vm, VmState};
+use crate::vm::{Error as VmError, PostponedLifecycleEvent, Vm, VmState};
 use crate::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, MemoryZoneConfig, NetConfig,
     PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
@@ -683,7 +682,7 @@ struct MigrationWorker {
     check_migration_evt: EventFd,
     config: VmSendMigrationData,
     // Shared with main VMM thread
-    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+    postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     cancel: Arc<AtomicBool>,
@@ -725,7 +724,7 @@ impl MigrationWorker {
         vm: Vm,
         check_migration_evt: EventFd,
         config: VmSendMigrationData,
-        postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
+        postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
             dyn hypervisor::Hypervisor,
         >,
@@ -873,10 +872,22 @@ pub struct Vmm {
     console_info: Option<ConsoleInfo>,
     no_shutdown: bool,
     check_migration_evt: EventFd,
-    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
-    received_postponed_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+    postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
+    received_postponed_lifecycle_event: Option<PostponedLifecycleEvent>,
     /// Handle to the [`MigrationWorker`] thread.
     migration_thread_handle: Option<MigrationWorkerHandle>,
+}
+
+/// Replays a postponed guest lifecycle event.
+fn replay_lifecycle_event(
+    event: PostponedLifecycleEvent,
+    reset_evt: &EventFd,
+    guest_exit_evt: &EventFd,
+) -> io::Result<()> {
+    match event {
+        PostponedLifecycleEvent::VmReboot => reset_evt.write(1),
+        PostponedLifecycleEvent::VmShutdown => guest_exit_evt.write(1),
+    }
 }
 
 /// Just a wrapper for the data that goes into
@@ -1109,21 +1120,49 @@ impl Vmm {
         })
     }
 
-    fn postpone_lifecycle_event_during_migration(&self, event: PostMigrationLifecycleEvent) {
-        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
-        if postponed_event.is_none() {
-            *postponed_event = Some(event);
-            info!("Postponed post-migration lifecycle event: {event:?}");
-        }
-    }
+    /// Postpones a lifecycle event while migration or disk mirroring is active.
+    fn postpone_lifecycle_event(
+        &mut self,
+        event: PostponedLifecycleEvent,
+    ) -> result::Result<bool, VmError> {
+        let vm = match &mut self.vm {
+            MaybeVmOwnership::Migration(_) => None,
+            MaybeVmOwnership::Vmm(vm) if vm.any_active_block_mirrors() => Some(vm),
+            _ => return Ok(false),
+        };
 
-    fn current_postponed_lifecycle_event(&self) -> Option<PostMigrationLifecycleEvent> {
-        *self.postponed_lifecycle_event.lock().unwrap()
+        {
+            let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+            if postponed_event.is_none() {
+                *postponed_event = Some(event);
+                info!("Postponed guest lifecycle event: {event:?}");
+            }
+        }
+
+        if let Some(vm) = vm
+            && vm.get_state() != VmState::Shutdown
+        {
+            vm.shutdown()?;
+        }
+
+        Ok(true)
     }
 
     fn clear_postponed_lifecycle_event(&self) {
         let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
         *postponed_event = None;
+    }
+
+    /// Replays and clears the postponed lifecycle event.
+    fn replay_postponed_lifecycle_event(&self) {
+        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+        let Some(event) = *postponed_event else {
+            return;
+        };
+        match replay_lifecycle_event(event, &self.reset_evt, &self.guest_exit_evt) {
+            Ok(()) => *postponed_event = None,
+            Err(e) => error!("Failed replaying postponed lifecycle event: {e}"),
+        }
     }
 
     /// Try to receive a file descriptor from a socket. Returns the slot number and the file descriptor.
@@ -1307,16 +1346,9 @@ impl Vmm {
                                 resume_duration.as_millis()
                             );
                         }
-                        Some(PostMigrationLifecycleEvent::VmReboot) => {
-                            self.reset_evt
-                                .write(1)
-                                .context("Failed writing reset eventfd after migration")
-                                .map_err(MigratableError::MigrateReceive)?;
-                        }
-                        Some(PostMigrationLifecycleEvent::VmShutdown) => {
-                            self.guest_exit_evt
-                                .write(1)
-                                .context("Failed writing guest exit eventfd after migration")
+                        Some(event) => {
+                            replay_lifecycle_event(event, &self.reset_evt, &self.guest_exit_evt)
+                                .context("Failed replaying lifecycle event after migration")
                                 .map_err(MigratableError::MigrateReceive)?;
                         }
                     }
@@ -1593,7 +1625,7 @@ impl Vmm {
         ctx: &mut MemoryMigrationContext,
         is_converged: impl Fn(&MemoryMigrationContext) -> result::Result<bool, MigratableError>,
         mem_send: &mut SendAdditionalConnections,
-        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<MemoryRangeTable /* remaining */, MigratableError> {
         let total_memory_size_bytes = vm
@@ -1804,7 +1836,7 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         mem_send: &mut SendAdditionalConnections,
         ctx: &mut OngoingMigrationContext,
-        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<(), MigratableError> {
         let mut mem_ctx = MemoryMigrationContext::new();
@@ -1866,7 +1898,7 @@ impl Vmm {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor: &dyn hypervisor::Hypervisor,
         send_data_migration: &VmSendMigrationData,
-        postponed_lifecycle_event: &Mutex<Option<PostMigrationLifecycleEvent>>,
+        postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
         cancel: Arc<AtomicBool>,
     ) -> result::Result<(), MigratableError> {
         // State machine that is updated with more context as we progress.
@@ -2262,24 +2294,7 @@ impl Vmm {
             // Give VMM back control.
             self.vm = MaybeVmOwnership::Vmm(vm);
 
-            if let Some(event) = self.current_postponed_lifecycle_event() {
-                match event {
-                    PostMigrationLifecycleEvent::VmReboot => {
-                        self.reset_evt
-                            .write(1)
-                            .context("Failed replaying reset event after failed migration")
-                            .inspect_err(|write_err| error!("{write_err}"))
-                            .ok();
-                    }
-                    PostMigrationLifecycleEvent::VmShutdown => {
-                        self.guest_exit_evt
-                            .write(1)
-                            .context("Failed replaying guest exit event after failed migration")
-                            .inspect_err(|write_err| error!("{write_err}"))
-                            .ok();
-                    }
-                }
-            }
+            self.replay_postponed_lifecycle_event();
         };
 
         match migration_res {
@@ -2383,11 +2398,10 @@ impl Vmm {
                         info!("VM reset event");
                         // Consume the event.
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
-                        // Workaround for guest-induced shutdown during a live-migration.
-                        if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
-                            self.postpone_lifecycle_event_during_migration(
-                                PostMigrationLifecycleEvent::VmReboot,
-                            );
+                        if self
+                            .postpone_lifecycle_event(PostponedLifecycleEvent::VmReboot)
+                            .map_err(Error::VmReboot)?
+                        {
                             continue;
                         }
                         self.vm_reboot().map_err(Error::VmReboot)?;
@@ -2395,11 +2409,10 @@ impl Vmm {
                     EpollDispatch::GuestExit => {
                         info!("VM guest exit event");
                         self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
-                        // Workaround for guest-induced shutdown during a live-migration.
-                        if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
-                            self.postpone_lifecycle_event_during_migration(
-                                PostMigrationLifecycleEvent::VmShutdown,
-                            );
+                        if self
+                            .postpone_lifecycle_event(PostponedLifecycleEvent::VmShutdown)
+                            .map_err(Error::VmShutdown)?
+                        {
                             continue;
                         }
                         if self.no_shutdown {
@@ -2612,6 +2625,10 @@ impl RequestHandler for Vmm {
     fn vm_snapshot(&mut self, destination_url: &str) -> result::Result<(), VmError> {
         match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => {
+                if vm.any_active_block_mirrors() {
+                    return Err(VmError::ActiveBlockMirror);
+                }
+
                 // Drain console_info so that FDs are not reused
                 let _ = self.console_info.take();
                 vm.snapshot()
@@ -2708,9 +2725,18 @@ impl RequestHandler for Vmm {
             MaybeVmOwnership::Migration(_) => return Err(VmError::VmMigrating),
             MaybeVmOwnership::None => return Err(VmError::VmNotRunning),
         };
+
+        if vm.any_active_block_mirrors() {
+            return Err(VmError::ActiveBlockMirror);
+        }
+
         // Drain console_info so that the FDs are not reused
         let _ = self.console_info.take();
-        let r = vm.shutdown();
+        let r = if vm.get_state() == VmState::Shutdown {
+            Ok(())
+        } else {
+            vm.shutdown()
+        };
         self.vm = MaybeVmOwnership::None;
 
         if r.is_ok() {
@@ -2729,8 +2755,15 @@ impl RequestHandler for Vmm {
             MaybeVmOwnership::Migration(_) => return Err(VmError::VmMigrating),
             MaybeVmOwnership::None => return Err(VmError::VmNotRunning),
         };
+
+        if vm.any_active_block_mirrors() {
+            return Err(VmError::ActiveBlockMirror);
+        }
+
         let config = vm.get_config();
-        vm.shutdown()?;
+        if vm.get_state() != VmState::Shutdown {
+            vm.shutdown()?;
+        }
         self.vm = MaybeVmOwnership::None;
 
         // vm.shutdown() closes all the console devices, so set console_info to None
@@ -2850,7 +2883,11 @@ impl RequestHandler for Vmm {
         }
 
         match &self.vm {
-            MaybeVmOwnership::Vmm(_vm) => {
+            MaybeVmOwnership::Vmm(vm) => {
+                if vm.any_active_block_mirrors() {
+                    return Err(VmError::ActiveBlockMirror);
+                }
+
                 event!("vm", "deleted");
 
                 // If a VM is booted, we first try to shut it down.
@@ -3356,8 +3393,14 @@ impl RequestHandler for Vmm {
             .context("Invalid send migration configuration")
             .map_err(MigratableError::MigrateSend)?;
 
-        match self.vm {
-            MaybeVmOwnership::Vmm(_) => (),
+        match &self.vm {
+            MaybeVmOwnership::Vmm(vm) => {
+                if vm.any_active_block_mirrors() {
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "Cannot start migration with active disk mirrors"
+                    )));
+                }
+            }
             MaybeVmOwnership::Migration(_) => {
                 return Err(MigratableError::MigrateSend(anyhow!(
                     "There is already an ongoing migration"
@@ -3493,6 +3536,67 @@ impl RequestHandler for Vmm {
         // enable querying the state of the last failed migration.
         let lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
         lock.clone()
+    }
+
+    fn vm_disk_mirror_start(
+        &mut self,
+        id: String,
+        destination_path: PathBuf,
+    ) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        match self.vm {
+            MaybeVmOwnership::Vmm(ref mut vm) => vm.mirror_disk(&id, &destination_path),
+            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::None => Err(VmError::DiskMirrorStart),
+        }
+    }
+
+    fn vm_disk_mirror_status(&mut self, id: String) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        match self.vm {
+            MaybeVmOwnership::Vmm(ref vm) => {
+                let status = vm.mirror_disk_status(&id)?;
+                let response: VmDiskMirrorStatusResponse = status.into();
+                let json = serde_json::to_vec(&response).map_err(|_| VmError::DiskMirrorStatus)?;
+                Ok(Some(json))
+            }
+            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::None => Err(VmError::DiskMirrorStatus),
+        }
+    }
+
+    fn vm_disk_mirror_complete(&mut self, id: String) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        let vm = match self.vm {
+            MaybeVmOwnership::Vmm(ref mut vm) => vm,
+            MaybeVmOwnership::Migration(_) => return Err(VmError::VmMigrating),
+            MaybeVmOwnership::None => return Err(VmError::DiskMirrorComplete),
+        };
+        vm.mirror_disk_complete(&id)?;
+
+        if !vm.any_active_block_mirrors() {
+            self.replay_postponed_lifecycle_event();
+        }
+        Ok(())
+    }
+
+    fn vm_disk_mirror_cancel(&mut self, id: String) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        let vm = match self.vm {
+            MaybeVmOwnership::Vmm(ref mut vm) => vm,
+            MaybeVmOwnership::Migration(_) => return Err(VmError::VmMigrating),
+            MaybeVmOwnership::None => return Err(VmError::DiskMirrorCancel),
+        };
+        vm.mirror_disk_cancel(&id)?;
+
+        if !vm.any_active_block_mirrors() {
+            self.replay_postponed_lifecycle_event();
+        }
+        Ok(())
     }
 }
 

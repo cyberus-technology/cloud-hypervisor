@@ -21,6 +21,7 @@ use std::mem::size_of;
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
@@ -36,6 +37,7 @@ use arch::x86_64::MAX_SUPPORTED_CPUS_LEGACY;
 #[cfg(feature = "tdx")]
 use arch::x86_64::tdx::TdvfSection;
 use arch::{EntryPoint, NumaNode, NumaNodes, get_host_cpu_phys_bits};
+use block::mirror::MirrorStatus;
 use devices::AcpiNotificationFlags;
 #[cfg(target_arch = "aarch64")]
 use devices::interrupt_controller;
@@ -272,6 +274,21 @@ pub enum Error {
 
     #[error("Failed resizing a disk image")]
     ResizeDisk,
+
+    #[error("Failed to start disk mirror")]
+    DiskMirrorStart,
+
+    #[error("Failed to read disk mirror state")]
+    DiskMirrorStatus,
+
+    #[error("Failed to complete disk mirror")]
+    DiskMirrorComplete,
+
+    #[error("Failed to cancel disk mirror")]
+    DiskMirrorCancel,
+
+    #[error("At least one disk mirror is active")]
+    ActiveBlockMirror,
 
     #[error("Cannot activate virtio devices")]
     ActivateVirtioDevices(#[source] DeviceManagerError),
@@ -565,11 +582,11 @@ pub struct Vm {
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
     vcpu_throttler: ThrottleThreadHandle,
-    post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+    post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PostMigrationLifecycleEvent {
+pub enum PostponedLifecycleEvent {
     VmReboot,
     VmShutdown,
 }
@@ -1431,14 +1448,14 @@ impl Vm {
         self.vcpu_throttler.reset();
     }
 
-    pub fn set_post_migration_lifecycle_event(
-        &mut self,
-        event: Option<PostMigrationLifecycleEvent>,
-    ) {
+    /// Stores a lifecycle event until migration and active disk mirrors permit
+    /// it to be replayed.
+    pub fn set_post_migration_lifecycle_event(&mut self, event: Option<PostponedLifecycleEvent>) {
         self.post_migration_lifecycle_event = event;
     }
 
-    pub fn post_migration_lifecycle_event(&self) -> Option<PostMigrationLifecycleEvent> {
+    /// Returns the lifecycle event currently waiting to be replayed.
+    pub fn post_migration_lifecycle_event(&self) -> Option<PostponedLifecycleEvent> {
         self.post_migration_lifecycle_event
     }
 
@@ -1667,6 +1684,68 @@ impl Vm {
         Ok(EntryPoint { entry_addr })
     }
 
+    /// Loads the kernel or a firmware file.
+    ///
+    /// For x86_64, the boot path is the same.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(clippy::needless_pass_by_value)]
+    fn load_kernel(
+        mut kernel: File,
+        cmdline: Option<Cmdline>,
+        memory_manager: Arc<Mutex<MemoryManager>>,
+    ) -> Result<EntryPoint> {
+        info!("Loading kernel");
+
+        let mem = {
+            let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
+            guest_memory.memory()
+        };
+
+        // Try ELF binary with PVH boot.
+        let entry_addr = linux_loader::loader::elf::Elf::load(
+            mem.deref(),
+            None,
+            &mut kernel,
+            Some(arch::layout::HIGH_RAM_START),
+        )
+        // Try loading kernel as bzImage.
+        .or_else(|_| {
+            BzImage::load(
+                mem.deref(),
+                None,
+                &mut kernel,
+                Some(arch::layout::HIGH_RAM_START),
+            )
+        })
+        .map_err(Error::KernelLoad)?;
+
+        if let Some(cmdline) = cmdline {
+            linux_loader::loader::load_cmdline(mem.deref(), arch::layout::CMDLINE_START, &cmdline)
+                .map_err(Error::LoadCmdLine)?;
+        }
+
+        if let PvhEntryPresent(entry_addr) = entry_addr.pvh_boot_cap {
+            // Use the PVH kernel entry point to boot the guest
+            info!("PVH kernel loaded: entry_addr = 0x{:x}", entry_addr.0);
+            Ok(EntryPoint {
+                entry_addr,
+                setup_header: None,
+            })
+        } else if entry_addr.setup_header.is_some() {
+            // Use the bzImage 32bit entry point to boot the guest
+            info!(
+                "bzImage kernel loaded: entry_addr = 0x{:x}",
+                entry_addr.kernel_load.0
+            );
+            Ok(EntryPoint {
+                entry_addr: entry_addr.kernel_load,
+                setup_header: entry_addr.setup_header,
+            })
+        } else {
+            Err(Error::KernelMissingPvhHeader)
+        }
+    }
+
     #[cfg(all(feature = "kvm", feature = "sev_snp"))]
     fn reserve_bootloader_regions(memory_manager: &Arc<Mutex<MemoryManager>>) -> Result<()> {
         let mut mm = memory_manager.lock().unwrap();
@@ -1730,68 +1809,6 @@ impl Vm {
             }
         };
         Ok(entry_point)
-    }
-
-    /// Loads the kernel or a firmware file.
-    ///
-    /// For x86_64, the boot path is the same.
-    #[cfg(target_arch = "x86_64")]
-    #[allow(clippy::needless_pass_by_value)]
-    fn load_kernel(
-        mut kernel: File,
-        cmdline: Option<Cmdline>,
-        memory_manager: Arc<Mutex<MemoryManager>>,
-    ) -> Result<EntryPoint> {
-        info!("Loading kernel");
-
-        let mem = {
-            let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
-            guest_memory.memory()
-        };
-
-        // Try ELF binary with PVH boot.
-        let entry_addr = linux_loader::loader::elf::Elf::load(
-            mem.deref(),
-            None,
-            &mut kernel,
-            Some(arch::layout::HIGH_RAM_START),
-        )
-        // Try loading kernel as bzImage.
-        .or_else(|_| {
-            BzImage::load(
-                mem.deref(),
-                None,
-                &mut kernel,
-                Some(arch::layout::HIGH_RAM_START),
-            )
-        })
-        .map_err(Error::KernelLoad)?;
-
-        if let Some(cmdline) = cmdline {
-            linux_loader::loader::load_cmdline(mem.deref(), arch::layout::CMDLINE_START, &cmdline)
-                .map_err(Error::LoadCmdLine)?;
-        }
-
-        if let PvhEntryPresent(entry_addr) = entry_addr.pvh_boot_cap {
-            // Use the PVH kernel entry point to boot the guest
-            info!("PVH kernel loaded: entry_addr = 0x{:x}", entry_addr.0);
-            Ok(EntryPoint {
-                entry_addr,
-                setup_header: None,
-            })
-        } else if entry_addr.setup_header.is_some() {
-            // Use the bzImage 32bit entry point to boot the guest
-            info!(
-                "bzImage kernel loaded: entry_addr = 0x{:x}",
-                entry_addr.kernel_load.0
-            );
-            Ok(EntryPoint {
-                entry_addr: entry_addr.kernel_load,
-                setup_header: entry_addr.setup_header,
-            })
-        } else {
-            Err(Error::KernelMissingPvhHeader)
-        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -3338,6 +3355,52 @@ impl Vm {
             .map_err(Error::ErrorNmi);
     }
 
+    pub fn mirror_disk(&self, id: &str, dest_path: &Path) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk(id, dest_path)
+            .map_err(Error::DeviceManager)?;
+
+        Ok(())
+    }
+
+    /// Returns the current mirror status for `id`.
+    pub fn mirror_disk_status(&self, id: &str) -> Result<MirrorStatus> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_status(id)
+            .map_err(Error::DeviceManager)
+    }
+
+    /// Completes the mirror for `id` and switches to its destination.
+    pub fn mirror_disk_complete(&self, id: &str) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_complete(id)
+            .map_err(Error::DeviceManager)?;
+        Ok(())
+    }
+
+    /// Cancels the mirror for `id` and keeps its source backend.
+    pub fn mirror_disk_cancel(&self, id: &str) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_cancel(id)
+            .map_err(Error::DeviceManager)
+    }
+
+    /// Returns true if there is an active mirror in any of the block devices, false otherwise.
+    pub fn any_active_block_mirrors(&self) -> bool {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .any_active_block_mirrors()
+    }
+
     /// Calls [`DeviceManager::post_migration_announce`].
     pub fn post_migration_announce(&self) {
         self.device_manager
@@ -3423,7 +3486,7 @@ impl Pausable for Vm {
 #[derive(Serialize, Deserialize)]
 pub struct VmSnapshot {
     #[serde(default)]
-    pub post_migration_lifecycle_event: Option<PostMigrationLifecycleEvent>,
+    pub post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
     #[cfg(target_arch = "x86_64")]
     pub clock: Option<hypervisor::ClockData>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
