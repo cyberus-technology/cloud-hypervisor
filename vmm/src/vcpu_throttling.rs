@@ -31,12 +31,12 @@
 use std::cell::Cell;
 use std::cmp::min;
 use std::sync::mpsc::{RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Mutex, Weak, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use vm_migration::Pausable;
 
 use crate::cpu::CpuManager;
@@ -439,15 +439,30 @@ impl ThrottleThreadHandle {
     ///
     /// # Parameters
     /// - `cpu_manager`: CPU manager to pause and resume vCPUs
-    pub(crate) fn new_from_cpu_manager(cpu_manager: &Arc<Mutex<CpuManager>>) -> Self {
+    pub(crate) fn new_from_cpu_manager(cpu_manager: Weak<Mutex<CpuManager>>) -> Self {
+        let cpu_manager_t = Weak::clone(&cpu_manager);
         let callback_pause_vcpus = {
-            let cpu_manager = Arc::clone(cpu_manager);
-            Box::new(move || cpu_manager.lock().unwrap().pause().unwrap())
+            Box::new(move || {
+                cpu_manager_t
+                    .upgrade()
+                    .expect("CPU manager should be alive in the vCPU throttle phase")
+                    .lock()
+                    .unwrap()
+                    .pause()
+                    .unwrap();
+            })
         };
 
         let callback_resume_vcpus = {
-            let cpu_manager = Arc::clone(cpu_manager);
-            Box::new(move || cpu_manager.lock().unwrap().resume().unwrap())
+            Box::new(move || {
+                cpu_manager
+                    .upgrade()
+                    .expect("CPU manager should be alive in the vCPU throttle phase")
+                    .lock()
+                    .unwrap()
+                    .resume()
+                    .unwrap();
+            })
         };
 
         Self::new(callback_pause_vcpus, callback_resume_vcpus)
@@ -528,30 +543,13 @@ impl ThrottleThreadHandle {
 
     /// Stops and terminates the thread gracefully.
     ///
-    /// Waits for the thread to finish. This function **must** be called before
-    /// the migration thread(s) do anything with the CPU manager to prevent
-    /// odd states.
+    /// Waits for the thread to finish.
     pub(crate) fn shutdown(&mut self) {
-        let begin = Instant::now();
-
-        {
-            // drop thread; ensure that the channel is still alive when it is dropped
-            if let Some(worker) = self.throttle_thread.take() {
-                self.state_sender
-                    .send(ThrottleCommand::Exit)
-                    .expect("channel should not be closed");
-
-                // Ensure the sender is still living when this is dropped.
-                drop(worker);
-            }
-        }
-
-        let elapsed = begin.elapsed();
-        if elapsed > Duration::from_millis(20) {
-            warn!(
-                "shutting down thread takes too long ({} ms): this increases the downtime!",
-                elapsed.as_millis()
-            );
+        // Gracefully exit throttle thread.
+        if let Some(_worker) = self.throttle_thread.take() {
+            self.state_sender
+                .send(ThrottleCommand::Exit)
+                .expect("channel should not be closed");
         }
     }
 
@@ -577,6 +575,7 @@ impl Drop for ThrottleThreadHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::sleep;
 
@@ -598,16 +597,19 @@ mod tests {
             // Dummy CpuManager
             let cpus_throttled = Arc::new(AtomicBool::new(false));
             let callback_pause_vcpus = {
-                let cpus_running = Arc::clone(&cpus_throttled);
+                let cpus_running = Arc::downgrade(&cpus_throttled);
                 Box::new(move || {
-                    let old = cpus_running.swap(true, Ordering::SeqCst);
+                    let old = cpus_running.upgrade().unwrap().swap(true, Ordering::SeqCst);
                     assert!(!old);
                 })
             };
             let callback_resume_vcpus = {
-                let cpus_running = Arc::clone(&cpus_throttled);
+                let cpus_running = Arc::downgrade(&cpus_throttled);
                 Box::new(move || {
-                    let old = cpus_running.swap(false, Ordering::SeqCst);
+                    let old = cpus_running
+                        .upgrade()
+                        .unwrap()
+                        .swap(false, Ordering::SeqCst);
                     assert!(old);
                 })
             };
