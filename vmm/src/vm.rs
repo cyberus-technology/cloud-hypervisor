@@ -786,7 +786,8 @@ impl Vm {
 
         // TODO we could also spawn the thread when a migration with auto-converge starts.
         // Probably this is the better design.
-        let vcpu_throttler = ThrottleThreadHandle::new_from_cpu_manager(&cpu_manager);
+        let vcpu_throttler =
+            ThrottleThreadHandle::new_from_cpu_manager(Arc::downgrade(&cpu_manager));
 
         Ok(Vm {
             #[cfg(feature = "tdx")]
