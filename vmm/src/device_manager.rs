@@ -2725,6 +2725,7 @@ impl DeviceManager {
                 self.console.socket = Some(listener);
                 Endpoint::Socket(Arc::new(inner))
             }
+            ConsoleTransport::TcpListen(listener) => Endpoint::TcpListen(listener),
             ConsoleTransport::Null => Endpoint::Null,
             ConsoleTransport::Off => return Ok(None),
         };
@@ -2802,7 +2803,8 @@ impl DeviceManager {
             ConsoleTransport::Off
             | ConsoleTransport::Null
             | ConsoleTransport::Pty(_)
-            | ConsoleTransport::Socket(_) => None,
+            | ConsoleTransport::Socket(_)
+            | ConsoleTransport::TcpListen(_) => None,
         };
 
         if !matches!(console_info.serial, ConsoleTransport::Off) {
@@ -2810,7 +2812,8 @@ impl DeviceManager {
             self.serial_manager = match console_info.serial {
                 ConsoleTransport::Pty(_)
                 | ConsoleTransport::Tty(_)
-                | ConsoleTransport::Socket(_) => {
+                | ConsoleTransport::Socket(_)
+                | ConsoleTransport::TcpListen(_) => {
                     let serial_manager = SerialManager::new(serial, console_info.serial)
                         .map_err(DeviceManagerError::CreateSerialManager)?;
                     if let Some(mut serial_manager) = serial_manager {
@@ -2838,7 +2841,8 @@ impl DeviceManager {
                 ConsoleTransport::Off
                 | ConsoleTransport::Null
                 | ConsoleTransport::Pty(_)
-                | ConsoleTransport::Socket(_) => None,
+                | ConsoleTransport::Socket(_)
+                | ConsoleTransport::TcpListen(_) => None,
             };
             if let Some(writer) = debug_console_writer {
                 let _ = self.add_debug_console_device(writer)?;

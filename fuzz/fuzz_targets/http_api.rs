@@ -208,6 +208,7 @@ impl RequestHandler for StubApiRequestHandler {
                         file: None,
                         mode: ConsoleOutputMode::Tty,
                         socket: None,
+                        tcp: None,
                     },
                 },
                 console: ConsoleConfig {
@@ -215,6 +216,7 @@ impl RequestHandler for StubApiRequestHandler {
                         file: None,
                         mode: ConsoleOutputMode::Tty,
                         socket: None,
+                        tcp: None,
                     },
                     pci_common: PciDeviceCommonConfig::default(),
                 },

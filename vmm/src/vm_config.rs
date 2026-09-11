@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "fw_cfg")]
 use std::str::FromStr;
-use std::{fmt, fs, result};
+use std::{fmt, fs, io, result};
 
 use arch::CpuProfile;
 use block::ImageType;
@@ -17,7 +17,7 @@ use devices::debug_console;
 use log::{debug, warn};
 use net_util::MacAddr;
 use serde::de::{Error as DeError, Visitor};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use virtio_devices::RateLimiterConfig;
 
@@ -710,7 +710,37 @@ pub enum ConsoleOutputMode {
     Tty,
     File,
     Socket,
+    Tcp,
     Null,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpConsoleConfig {
+    #[serde(deserialize_with = "deserialize_tcp_address")]
+    pub address: SocketAddr,
+    /// Client mode is not supported.
+    #[serde(default = "TcpConsoleConfig::default_server")]
+    pub server: bool,
+}
+
+pub(crate) fn parse_tcp_address(address: &str) -> io::Result<SocketAddr> {
+    address
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+fn deserialize_tcp_address<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SocketAddr, D::Error> {
+    let address = String::deserialize(deserializer)?;
+    parse_tcp_address(&address).map_err(DeError::custom)
+}
+
+impl TcpConsoleConfig {
+    fn default_server() -> bool {
+        true
+    }
 }
 
 /// Common configuration for plain console configs.
@@ -724,6 +754,8 @@ pub struct CommonConsoleConfig {
     pub mode: ConsoleOutputMode,
     #[serde(default)]
     pub socket: Option<PathBuf>,
+    #[serde(default)]
+    pub tcp: Option<TcpConsoleConfig>,
 }
 
 impl ApplyLandlock for CommonConsoleConfig {
@@ -750,7 +782,7 @@ pub struct SerialConfig {
 }
 
 impl SerialConfig {
-    pub const SYNTAX: &str = "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>\"";
+    pub const SYNTAX: &str = "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>|tcp=<loopback_ip>:<port>,server=on\"";
 }
 
 impl Default for SerialConfig {
@@ -760,6 +792,7 @@ impl Default for SerialConfig {
                 file: None,
                 mode: ConsoleOutputMode::Null,
                 socket: None,
+                tcp: None,
             },
         }
     }
@@ -781,7 +814,7 @@ pub struct ConsoleConfig {
 }
 
 impl ConsoleConfig {
-    pub const SYNTAX: &str = "Control (virtio) console: \"off|null|pty|tty|file=<path>|socket=<path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>,pci_device_id=<pci_slot>\"";
+    pub const SYNTAX: &str = "Control (virtio) console: \"off|null|pty|tty|file=<path>|socket=<path>|tcp=<loopback_ip>:<port>,server=on,iommu=on|off,id=<device_id>,pci_segment=<segment_id>,pci_device_id=<pci_slot>\"";
 }
 
 impl Default for ConsoleConfig {
@@ -791,6 +824,7 @@ impl Default for ConsoleConfig {
                 file: None,
                 mode: ConsoleOutputMode::Tty,
                 socket: None,
+                tcp: None,
             },
             pci_common: PciDeviceCommonConfig::default(),
         }
