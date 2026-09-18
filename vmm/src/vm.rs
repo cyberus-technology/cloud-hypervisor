@@ -2761,7 +2761,9 @@ impl Vm {
                     firmware_file
                         .seek(SeekFrom::Start(section.data_offset as u64))
                         .map_err(Error::LoadTdvf)?;
-                    mem.read_volatile_from(
+                    // TODO although the name indicates, there is no retry internally: https://github.com/rust-vmm/rust-vmm/issues/43
+                    // For now, we prefer to fail loudly at least.
+                    mem.read_exact_volatile_from(
                         GuestAddress(section.address),
                         &mut firmware_file,
                         section.data_size as usize,
@@ -2784,7 +2786,7 @@ impl Vm {
 
                         let mut payload_header = linux_loader::bootparam::setup_header::default();
                         payload_file
-                            .read_volatile(&mut payload_header.as_bytes())
+                            .read_exact_volatile(&mut payload_header.as_bytes())
                             .unwrap();
 
                         if payload_header.header != 0x5372_6448 {
@@ -2798,7 +2800,9 @@ impl Vm {
                         }
 
                         payload_file.rewind().map_err(Error::LoadPayload)?;
-                        mem.read_volatile_from(
+                        // TODO although the name indicates, there is no retry internally: https://github.com/rust-vmm/rust-vmm/issues/43
+                        // For now, we prefer to fail loudly at least.
+                        mem.read_exact_volatile_from(
                             GuestAddress(section.address),
                             payload_file,
                             payload_size as usize,
