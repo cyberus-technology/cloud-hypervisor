@@ -35,6 +35,7 @@ vm-memory = { workspace = true, features = [
   "backend-mmap",
 ] }
 vm-migration = { path = "../vm-migration" }
+vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = { workspace = true }
 zerocopy = { version = "0.8.48", features = [
   "alloc",
