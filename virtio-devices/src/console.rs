@@ -271,11 +271,11 @@ impl ConsoleEpollHandler {
                         }
                     };
                     let mut buf: Vec<u8> = Vec::new();
-                    if let Err(e) =
-                        desc_chain
-                            .memory()
-                            .write_volatile_to(addr, &mut buf, desc.len() as usize)
-                    {
+                    if let Err(e) = desc_chain.memory().write_all_volatile_to(
+                        addr,
+                        &mut buf,
+                        desc.len() as usize,
+                    ) {
                         warn!("Failed to read from transmitq descriptor: {e}");
                         continue;
                     }
