@@ -679,6 +679,15 @@ pub enum DeviceManagerError {
         specified: ImageType,
         detected: ImageType,
     },
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// Tried to create a boot entry for non-bootable device.
+    #[error("Cannot create boot entry for device. It is therefore non-bootable")]
+    DeviceNotBootable,
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// The device used as a boot entry has no valid PCI address. A valid BDF is
+    /// required to generate a device path for OVMF.
+    #[error("No BDF assigned to boot entry")]
+    BdfForBootDeviceMissing,
 }
 
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
@@ -955,6 +964,54 @@ pub struct AcpiPlatformAddresses {
     pub sleep_status_reg_address: Option<GenericAddress>,
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+#[derive(Clone, Debug)]
+/// Helper for collecting the information necessary to add a boot order hint for firmware.
+pub struct BootOrderEntry {
+    /// Boot index to use for this device as per configuration.
+    pub boot_index: u32,
+    /// The device type.
+    pub device_type: Option<VirtioDeviceType>,
+    /// Address of the device to generate the boot order hint from.
+    pub device_address: Option<PciBdf>,
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+impl BootOrderEntry {
+    /// Creates a new boot order entry with `device_type` and `device_address` set to `None`.
+    pub fn new(boot_index: u32) -> Self {
+        Self {
+            boot_index,
+            device_type: None,
+            device_address: None,
+        }
+    }
+
+    /// Update this [`BootOrderEntry`]'s `device_type` and `device_address` field from the given
+    /// data.
+    pub fn update_from_device_node(&mut self, node: &DeviceNode) -> DeviceManagerResult<()> {
+        let device_type =
+            if let Some(PciDeviceHandle::Virtio(virtio_device)) = node.pci_device_handle.as_ref() {
+                virtio_device
+                    .lock()
+                    .unwrap()
+                    .virtio_device()
+                    .lock()
+                    .unwrap()
+                    .device_type()
+                    .into()
+            } else {
+                return Err(DeviceManagerError::DeviceNotBootable);
+            };
+        let device_address = node
+            .pci_bdf
+            .ok_or(DeviceManagerError::BdfForBootDeviceMissing)?;
+        self.device_address = Some(device_address);
+        self.device_type = Some(device_type);
+        Ok(())
+    }
+}
+
 #[cfg(feature = "sev_snp")]
 struct SevSnpPageAccessProxy {
     vm: Arc<dyn hypervisor::Vm>,
@@ -1149,6 +1206,9 @@ pub struct DeviceManager {
     #[cfg(feature = "ivshmem")]
     // ivshmem device
     ivshmem_device: Option<Arc<Mutex<devices::IvshmemDevice>>>,
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    boot_order: HashMap<String, BootOrderEntry>,
 }
 
 /// Create per-PCI-segment MMIO allocators over the range `[start, end]`.
@@ -1439,6 +1499,8 @@ impl DeviceManager {
             #[cfg(feature = "ivshmem")]
             ivshmem_device: None,
             _acpi_cpu_hotplug_controller: acpi_cpu_hotplug_controller,
+            #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+            boot_order: HashMap::new(),
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
@@ -2894,6 +2956,25 @@ impl DeviceManager {
             .lock()
             .unwrap()
             .insert(id.clone(), device_node!(id, migratable_device));
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        if let Some(boot_index) = disk_cfg.bootindex {
+            // Validation already has excluded duplicate device IDs and boot indices. So if we
+            // encounter the same index or device ID twice, this is a programming bug.
+            assert!(
+                self.boot_order
+                    .values()
+                    .find(|entry| entry.boot_index == boot_index)
+                    .is_none(),
+                "Bootindex {boot_index} is not unique!"
+            );
+            assert!(
+                self.boot_order
+                    .insert(id.clone(), BootOrderEntry::new(boot_index))
+                    .is_none(),
+                "The device id {id} is not unique!"
+            );
+        }
 
         Ok(MetaVirtioDevice {
             virtio_device,
@@ -4402,13 +4483,18 @@ impl DeviceManager {
                 .map_err(|e| DeviceManagerError::RegisterIoevent(e.into()))?;
         }
 
-        // Update the device tree with correct resource information.
+        // Update the device tree and boot order with correct resource information.
         node.resources = new_resources;
         node.migratable = Some(Arc::clone(&virtio_pci_device) as Arc<Mutex<dyn Migratable>>);
         node.pci_bdf = Some(pci_device_bdf);
         node.pci_device_handle = Some(PciDeviceHandle::Virtio(virtio_pci_device));
-        self.device_tree.lock().unwrap().insert(id, node);
 
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        if let Some(boot_item) = self.boot_order.get_mut(virtio_device_id) {
+            boot_item.update_from_device_node(&node)?;
+        }
+
+        self.device_tree.lock().unwrap().insert(id.clone(), node);
         Ok(pci_device_bdf)
     }
 
@@ -5361,6 +5447,12 @@ impl DeviceManager {
             STEP_DELAY,
             MAX_DELAY,
         );
+    }
+
+    /// Returns a list of devices for which a boot index was configured.
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    pub fn boot_order_entries(&self) -> Vec<BootOrderEntry> {
+        self.boot_order.clone().into_values().collect()
     }
 }
 
