@@ -486,6 +486,9 @@ pub struct DiskConfig {
     pub lock_granularity: LockGranularityChoice,
     #[serde(default)]
     pub guest_block_size: Option<u32>,
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    #[serde(default)]
+    pub bootindex: Option<u32>,
 }
 
 impl ApplyLandlock for DiskConfig {
