@@ -42,6 +42,9 @@ zerocopy = { version = "0.8.50", features = [
   "derive",
 ], optional = true }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+vm-virtio = { path = "../vm-virtio", optional = true }
+
 [target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64"))'.dependencies]
 arch = { path = "../arch" }
 
@@ -51,7 +54,13 @@ iommufd-ioctls = { workspace = true }
 
 [features]
 default = []
-fw_cfg = ["arch/fw_cfg", "bitfield-struct", "linux-loader", "zerocopy"]
+fw_cfg = [
+  "arch/fw_cfg",
+  "bitfield-struct",
+  "linux-loader",
+  "vm-virtio",
+  "zerocopy",
+]
 ivshmem = []
 kvm = ["arch/kvm"]
 pvmemcontrol = ["dep:num_enum"]
