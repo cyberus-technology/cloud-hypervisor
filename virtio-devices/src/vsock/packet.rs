@@ -377,7 +377,7 @@ impl VsockPacket {
         }
 
         guest_mem
-            .write(self.hdr(), self.guest_hdr_addr)
+            .write_slice(self.hdr(), self.guest_hdr_addr)
             .map_err(|_| VsockError::GuestMemory)?;
 
         Ok(())
