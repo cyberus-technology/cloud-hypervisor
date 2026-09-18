@@ -3611,7 +3611,7 @@ impl Transportable for Vm {
             .map_err(MigratableError::MigrateSend)?;
 
         snapshot_config_file
-            .write(vm_config.as_bytes())
+            .write_all(vm_config.as_bytes())
             .context("Error writing serialized VM config")
             .map_err(MigratableError::MigrateSend)?;
 
@@ -3633,7 +3633,7 @@ impl Transportable for Vm {
             .map_err(MigratableError::MigrateSend)?;
 
         snapshot_state_file
-            .write(&vm_state)
+            .write_all(&vm_state)
             .context("Error writing serialized state snapshot")
             .map_err(MigratableError::MigrateSend)?;
 
