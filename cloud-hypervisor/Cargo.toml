@@ -47,7 +47,7 @@ wait-timeout = { workspace = true }
 # feature list below
 [features]
 dbus_api = ["vmm/dbus_api", "zbus"]
-default = ["io_uring", "kvm"]
+default = ["fw_cfg", "io_uring", "kvm"]
 dhat-heap = ["dhat", "vmm/dhat-heap"]       # For heap profiling
 fw_cfg = ["vmm/fw_cfg"]
 guest_debug = ["vmm/guest_debug"]
