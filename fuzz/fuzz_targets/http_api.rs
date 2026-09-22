@@ -310,10 +310,6 @@ impl RequestHandler for StubApiRequestHandler {
         None
     }
 
-    fn vm_cancel_migration(&mut self) -> Result<(), MigratableError> {
-        Ok(())
-    }
-
     fn vm_post_migration_announce(&mut self) -> Result<(), VmError> {
         Ok(())
     }
