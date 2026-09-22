@@ -1612,9 +1612,12 @@ impl Vmm {
         info!("stopping vcpu thread");
         vm.stop_vcpu_throttling();
         info!("stopped vcpu thread");
-        info!("pausing VM");
-        vm.pause()?;
-        info!("paused VM");
+        // Skip if already paused, e.g. when migrating a paused VM.
+        if vm.get_state() != VmState::Paused {
+            info!("pausing VM");
+            vm.pause()?;
+            info!("paused VM");
+        }
 
         // Send last batch of dirty pages: final iteration
         {
@@ -3056,14 +3059,6 @@ impl RequestHandler for Vmm {
             return Err(MigratableError::MigrateSend(anyhow!(
                 "Local migration requires shared memory or hugepages enabled"
             )));
-        }
-
-        // Cloud Hypervisor only supports the migration of running VMs.
-        let current_state = self.vm.vm_mut().as_ref().unwrap().get_state();
-        if current_state != VmState::Running {
-            return Err(MigratableError::MigrateSend(anyhow!(format!(
-                "Only running VMs can be migrated! state={current_state:?}"
-            ))));
         }
 
         // Take VM ownership. This also means that API events can no longer
