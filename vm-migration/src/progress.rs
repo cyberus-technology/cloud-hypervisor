@@ -76,12 +76,8 @@ pub struct MemoryTransmissionInfo {
     Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum MigrationStateOngoingPhase {
-    /// The migration process is initiated. No checks or connections are
-    /// established yet.
+    /// The migration starts. Handshake and transfer of VM config.
     Starting,
-    /// The initial connection is established and the migration protocol
-    /// handshake succeeded.
-    Started,
     /// Transfer of memory FDs.
     ///
     /// Only used for local migrations.
@@ -100,7 +96,6 @@ impl Display for MigrationStateOngoingPhase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Starting => write!(f, "starting"),
-            Self::Started => write!(f, "started"),
             Self::MemoryFds => write!(f, "memory FDs"),
             Self::MemoryPrecopy => write!(f, "memory (precopy)"),
             Self::Completing => write!(f, "completing"),
