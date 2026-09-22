@@ -1799,14 +1799,6 @@ impl Vmm {
             vm.stop_dirty_log()?;
         }
 
-        // Update migration progress snapshot
-        {
-            let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
-            lock.as_mut()
-                .expect("live migration should be ongoing")
-                .mark_as_finished();
-        }
-
         // Let every Migratable object know about the migration being complete
         vm.complete_migration()
     }
@@ -1953,6 +1945,7 @@ impl Vmm {
             vm,
             migration_result: migration_res,
             initial_vm_state,
+            config: migration_cfg,
         } = migration_worker_handle.join();
 
         let mut try_resume_vm_after_failed_migration = |mut vm: Vm| {
@@ -1988,7 +1981,18 @@ impl Vmm {
                     error!("Failed shutting down the VM after migration: {e}");
                 }
 
-                if let Err(e) = self.exit_evt.write(1) {
+                // Update migration progress snapshot
+                {
+                    let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+                    lock.as_mut()
+                        .expect("live migration should be ongoing")
+                        .mark_as_finished();
+                }
+
+                if migration_cfg.keep_alive {
+                    // API users can still query live-migration statistics
+                    info!("Keeping VMM alive as requested");
+                } else if let Err(e) = self.exit_evt.write(1) {
                     error!("Failed exiting the VMM after migration: {e}");
                 }
             }
