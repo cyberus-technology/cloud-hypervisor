@@ -225,13 +225,13 @@ pub struct MemoryMigrationContext {
     /// Current iteration: 0 initial total transmission, >0 delta transmission.
     pub iteration: usize,
     /// Total bytes sent across all iterations.
-    pub total_sent_bytes: u64,
+    total_sent_bytes: u64,
     /// Total bytes to send in the current iteration.
     pub current_iteration_total_bytes: u64,
     /// The currently measured bandwidth.
     ///
     /// This is updated (at least) after each completed iteration.
-    pub bandwidth_bytes_per_second: f64,
+    bandwidth_bytes_per_second: f64,
     /// Calculated downtime in milliseconds regarding the current bandwidth and
     /// the remaining memory.
     ///
