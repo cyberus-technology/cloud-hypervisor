@@ -657,9 +657,7 @@ impl SendAdditionalConnections {
                 })?;
             match message {
                 SendMemoryThreadMessage::Memory(table) => {
-                    if external_cancel.load(Ordering::Acquire)
-                        || worker_error.load(Ordering::Acquire)
-                    {
+                    if external_cancel.load(Ordering::Acquire) {
                         continue;
                     }
 
