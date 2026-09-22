@@ -885,7 +885,7 @@ impl SendAdditionalConnections {
             // All threads may have terminated, leading to a dropped receiver. Thus we ignore
             // errors here.
             self.message_tx
-                .send(SendMemoryThreadMessage::Disconnect)
+                .try_send(SendMemoryThreadMessage::Disconnect)
                 .ok();
         }
 
