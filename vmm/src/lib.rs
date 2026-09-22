@@ -61,6 +61,7 @@ use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 
+use crate::api::http::http_endpoint::ONGOING_LIVEMIGRATION;
 use crate::api::{
     ApiRequest, ApiResponse, RequestHandler, TimeoutStrategy, VmInfoResponse,
     VmReceiveMigrationData, VmSendMigrationData, VmmPingResponse,
@@ -695,7 +696,6 @@ impl MigrationWorker {
         MigrationThreadOut {
             vm: self.vm,
             migration_res: res,
-            migration_cfg: self.config,
         }
     }
 }
@@ -746,7 +746,6 @@ impl MaybeVmOwnership {
 struct MigrationThreadOut {
     vm: Vm,
     migration_res: result::Result<(), MigratableError>,
-    migration_cfg: VmSendMigrationData,
 }
 
 pub struct Vmm {
@@ -1878,6 +1877,14 @@ impl Vmm {
             vm.stop_dirty_log()?;
         }
 
+        // Update migration progress snapshot
+        {
+            let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
+            lock.as_mut()
+                .expect("live migration should be ongoing")
+                .mark_as_finished();
+        }
+
         // Let every Migratable object know about the migration being complete
         vm.complete_migration()
     }
@@ -2020,7 +2027,6 @@ impl Vmm {
         let MigrationThreadOut {
             mut vm,
             migration_res,
-            migration_cfg,
         } = self
             .migration_thread_handle
             .take()
@@ -2034,20 +2040,15 @@ impl Vmm {
                 drop(vm);
 
                 {
-                    let mut lock = MIGRATION_PROGRESS_SNAPSHOT.lock().unwrap();
-                    lock.as_mut()
-                        .expect("live migration should be ongoing")
-                        .mark_as_finished();
+                    info!("Sending Receiver in HTTP thread that migration succeeded");
+                    let (sender, _) = &*ONGOING_LIVEMIGRATION;
+                    // unblock API call; propagate migration result
+                    sender.send(Ok(())).unwrap();
                 }
 
-                if migration_cfg.keep_alive {
-                    // API users can still query live-migration statistics
-                    info!("Keeping VMM alive as requested");
-                } else {
-                    // Shutdown the VM after the migration succeeded
-                    if let Err(e) = self.exit_evt.write(1) {
-                        error!("Failed shutting down the VM after migration: {e}");
-                    }
+                // Shutdown the VM after the migration succeeded
+                if let Err(e) = self.exit_evt.write(1) {
+                    error!("Failed shutting down the VM after migration: {e}");
                 }
             }
             Err(e) => {
@@ -2085,6 +2086,14 @@ impl Vmm {
                         .expect("live migration should be ongoing")
                         .mark_as_failed(&e);
                 }
+
+                {
+                    info!("Sending Receiver in HTTP thread that migration failed");
+                    let (sender, _) = &*ONGOING_LIVEMIGRATION;
+                    // unblock API call; propagate migration result
+                    sender.send(Err(e)).unwrap();
+                }
+                // we don't fail the VMM here, it just continues running its VM
             }
         }
     }
