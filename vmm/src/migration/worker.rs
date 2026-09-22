@@ -101,6 +101,7 @@ impl MigrationWorker {
             vm,
             migration_result: res,
             initial_vm_state: self.initial_vm_state,
+            config: self.config,
         }
     }
 
@@ -159,4 +160,6 @@ pub struct MigrationWorkerResult {
     /// The result of [`Vmm::send_migration`].
     pub migration_result: Result<(), MigratableError>,
     pub initial_vm_state: VmState,
+    /// The configuration the migration was started with.
+    pub config: VmSendMigrationData,
 }
