@@ -6734,6 +6734,7 @@ mod common_parallel {
                 .args([
                     &format!("--api-socket={src_api_socket}"),
                     "send-migration",
+                    "--dispatch",
                     &format!(
                         "destination_url=tcp:{host_ip}:{migration_port},downtime_ms=1,timeout_s=1,timeout_strategy={timeout_strategy:?}"
                     ),
