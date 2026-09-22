@@ -276,7 +276,6 @@ pub enum EpollDispatch {
     ActivateVirtioDevices = 3,
     Debug = 4,
     GuestExit = 5,
-    CheckMigration = 6,
     Unknown,
 }
 
@@ -290,7 +289,6 @@ impl From<u64> for EpollDispatch {
             3 => ActivateVirtioDevices,
             4 => Debug,
             5 => GuestExit,
-            6 => CheckMigration,
             _ => Unknown,
         }
     }
@@ -657,7 +655,6 @@ pub struct Vmm {
     console_resize_pipe: Option<Arc<File>>,
     console_info: Option<ConsoleInfo>,
     no_shutdown: bool,
-    check_migration_evt: EventFd,
 }
 
 /// Just a wrapper for the data that goes into
@@ -830,7 +827,6 @@ impl Vmm {
         let reset_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
         let guest_exit_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
         let activate_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
-        let check_migration_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFdCreate)?;
 
         epoll
             .add_event(&exit_evt, EpollDispatch::Exit)
@@ -857,10 +853,6 @@ impl Vmm {
             .add_event(&debug_evt, EpollDispatch::Debug)
             .map_err(Error::Epoll)?;
 
-        epoll
-            .add_event(&check_migration_evt, EpollDispatch::CheckMigration)
-            .map_err(Error::Epoll)?;
-
         Ok(Vmm {
             epoll,
             exit_evt,
@@ -883,7 +875,6 @@ impl Vmm {
             console_resize_pipe: None,
             console_info: None,
             no_shutdown,
-            check_migration_evt,
         })
     }
 
@@ -1844,14 +1835,6 @@ impl Vmm {
         }
     }
 
-    /// Checks the migration result.
-    ///
-    /// This should be called when the migration thread indicated a state
-    /// change (and therefore, its termination). The function checks the result
-    /// of that thread and either shuts down the VMM on success or keeps the VM
-    /// and the VMM running on migration failure.
-    fn check_migration_result(&mut self) {}
-
     fn control_loop(
         &mut self,
         api_receiver: &Receiver<ApiRequest>,
@@ -1952,14 +1935,6 @@ impl Vmm {
                     }
                     #[cfg(not(feature = "guest_debug"))]
                     EpollDispatch::Debug => {}
-                    EpollDispatch::CheckMigration => {
-                        info!("VM migration check event");
-                        // Consume the event.
-                        self.check_migration_evt
-                            .read()
-                            .map_err(Error::EventFdRead)?;
-                        self.check_migration_result();
-                    }
                 }
             }
         }
