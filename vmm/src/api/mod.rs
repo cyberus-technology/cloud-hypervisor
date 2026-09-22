@@ -738,6 +738,9 @@ pub struct VmSendMigrationData {
     /// Requested memory transfer mode.
     #[serde(default)]
     pub memory_mode: MigrationMode,
+    /// Keep the VMM alive.
+    #[serde(default)]
+    pub keep_alive: bool,
 }
 
 impl VmSendMigrationData {
@@ -777,7 +780,8 @@ impl VmSendMigrationData {
             .add("timeout_strategy")
             .add("connections")
             .add("tls_dir")
-            .add("memory_mode");
+            .add("memory_mode")
+            .add("keep_alive");
         parser
             .parse(migration)
             .map_err(VmSendMigrationConfigError::ParseError)?;
@@ -844,6 +848,11 @@ impl VmSendMigrationData {
             .convert::<MigrationMode>("memory_mode")
             .map_err(VmSendMigrationConfigError::ParseError)?
             .unwrap_or_default();
+        let keep_alive = parser
+            .convert::<Toggle>("keep_alive")
+            .map_err(VmSendMigrationConfigError::ParseError)?
+            .unwrap_or(Toggle(false))
+            .0;
 
         #[expect(deprecated)]
         let data = Self {
@@ -856,6 +865,7 @@ impl VmSendMigrationData {
             connections,
             tls_dir,
             memory_mode,
+            keep_alive,
         };
 
         data.validate()?;
@@ -2873,6 +2883,7 @@ mod tests {
                 connections: VmSendMigrationData::default_connections(),
                 tls_dir: None,
                 memory_mode: MigrationMode::Precopy,
+                keep_alive: false,
             }
         );
 
@@ -2881,7 +2892,7 @@ mod tests {
         tls_dir.add_send_tls_files();
         let tls_dir_path = tls_dir.path.clone();
         let data =
-            VmSendMigrationData::parse(&format!("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4,tls_dir={}", tls_dir_path.display()))
+            VmSendMigrationData::parse(&format!("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4,tls_dir={},keep_alive=true", tls_dir_path.display()))
                 .unwrap();
         assert_eq!(
             data,
@@ -2895,6 +2906,7 @@ mod tests {
                 connections: NonZeroU32::new(4).unwrap(),
                 tls_dir: Some(tls_dir_path),
                 memory_mode: MigrationMode::Precopy,
+                keep_alive: true
             }
         );
 
