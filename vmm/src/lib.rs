@@ -1286,10 +1286,10 @@ impl Vmm {
                                 .context("Failed writing reset eventfd after migration")
                                 .map_err(MigratableError::MigrateReceive)?;
                         }
-                        Some(PostMigrationLifecycleEvent::VmShutdown) => {
-                            self.guest_exit_evt
+                        Some(PostMigrationLifecycleEvent::VmmShutdown) => {
+                            self.exit_evt
                                 .write(1)
-                                .context("Failed writing guest exit eventfd after migration")
+                                .context("Failed writing exit eventfd after migration")
                                 .map_err(MigratableError::MigrateReceive)?;
                         }
                     }
@@ -2258,10 +2258,10 @@ impl Vmm {
                             .inspect_err(|write_err| error!("{write_err}"))
                             .ok();
                     }
-                    PostMigrationLifecycleEvent::VmShutdown => {
-                        self.guest_exit_evt
+                    PostMigrationLifecycleEvent::VmmShutdown => {
+                        self.exit_evt
                             .write(1)
-                            .context("Failed replaying guest exit event after failed migration")
+                            .context("Failed replaying shutdown event after failed migration")
                             .inspect_err(|write_err| error!("{write_err}"))
                             .ok();
                     }
@@ -2359,6 +2359,13 @@ impl Vmm {
                         info!("VM exit event");
                         // Consume the event.
                         self.exit_evt.read().map_err(Error::EventFdRead)?;
+                        // Workaround for guest-induced shutdown during a live-migration.
+                        if matches!(self.vm, MaybeVmOwnership::Migration) {
+                            self.postpone_lifecycle_event_during_migration(
+                                PostMigrationLifecycleEvent::VmmShutdown,
+                            );
+                            continue;
+                        }
                         self.vmm_shutdown().map_err(Error::VmmShutdown)?;
 
                         break 'outer;
@@ -2379,13 +2386,6 @@ impl Vmm {
                     EpollDispatch::GuestExit => {
                         info!("VM guest exit event");
                         self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
-                        // Workaround for guest-induced shutdown during a live-migration.
-                        if matches!(self.vm, MaybeVmOwnership::Migration) {
-                            self.postpone_lifecycle_event_during_migration(
-                                PostMigrationLifecycleEvent::VmShutdown,
-                            );
-                            continue;
-                        }
                         if self.no_shutdown {
                             self.vm_shutdown().map_err(Error::VmShutdown)?;
                         } else {
