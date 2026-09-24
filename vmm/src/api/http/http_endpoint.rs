@@ -37,7 +37,6 @@
 use std::fs::File;
 use std::sync::mpsc::Sender;
 
-use log::info;
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -433,6 +432,7 @@ vm_action_put_handler_body!(VmRemoveDevice);
 vm_action_put_handler_body!(VmResizeDisk);
 vm_action_put_handler_body!(VmResizeZone);
 vm_action_put_handler_body!(VmSnapshot);
+vm_action_put_handler_body!(VmSendMigration);
 
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 vm_action_put_handler_body!(VmCoredump);
@@ -488,35 +488,6 @@ impl PutHandler for VmReceiveMigration {
 }
 
 impl GetHandler for VmReceiveMigration {}
-
-// Special Handling for virtio-net Devices Backed by Network File Descriptors
-//
-// See above.
-impl PutHandler for VmSendMigration {
-    fn handle_request(
-        &'static self,
-        api_notifier: EventFd,
-        api_sender: Sender<ApiRequest>,
-        body: &Option<Body>,
-        _files: Vec<File>,
-    ) -> std::result::Result<Option<Body>, HttpError> {
-        if let Some(body) = body {
-            self.send(
-                api_notifier,
-                api_sender,
-                serde_json::from_slice(body.raw())?,
-            )
-            .inspect(|_| {
-                info!("live migration started (in background)");
-            })
-            .map_err(HttpError::ApiError)
-        } else {
-            Err(HttpError::BadRequest)
-        }
-    }
-}
-
-impl GetHandler for VmSendMigration {}
 
 impl PutHandler for VmResize {
     fn handle_request(
