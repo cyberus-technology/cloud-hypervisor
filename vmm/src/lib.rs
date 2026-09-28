@@ -1456,7 +1456,6 @@ impl Vmm {
         is_converged: impl Fn(&MemoryMigrationContext) -> result::Result<bool, MigratableError>,
         mem_send: &mut SendAdditionalConnections,
         postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
-        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<MemoryRangeTable /* remaining */, MigratableError> {
         let total_memory_size_bytes = vm
             .memory_range_table()?
@@ -1495,8 +1494,6 @@ impl Vmm {
         };
 
         loop {
-            return_if_cancelled_cb(socket)?;
-
             // todo: check if auto-converge is enabled at all?
             if Self::can_increase_autoconverge_step(ctx)
                 && vm.throttle_percent() < AUTO_CONVERGE_MAX
@@ -1529,7 +1526,7 @@ impl Vmm {
 
             // Send the current dirty pages
             let transfer_begin = Instant::now();
-            mem_send.send_memory(iteration_table, socket, return_if_cancelled_cb)?;
+            mem_send.send_memory(iteration_table, socket)?;
             let transfer_duration = transfer_begin.elapsed();
             ctx.update_metrics_after_transfer(transfer_begin, transfer_duration);
 
@@ -1667,7 +1664,6 @@ impl Vmm {
         mem_send: &mut SendAdditionalConnections,
         ctx: &mut OngoingMigrationContext,
         postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
-        return_if_cancelled_cb: &impl Fn(&mut SocketStream) -> result::Result<(), MigratableError>,
     ) -> result::Result<(), MigratableError> {
         let mut mem_ctx = MemoryMigrationContext::new();
 
@@ -1680,9 +1676,7 @@ impl Vmm {
             |ctx| Self::is_precopy_converged(ctx, send_data_migration),
             mem_send,
             postponed_lifecycle_event,
-            return_if_cancelled_cb,
         );
-
         let downtime_begin = Instant::now();
         // End throttle thread
         info!("stopping vcpu throttling");
@@ -1707,7 +1701,7 @@ impl Vmm {
 
             mem_ctx.update_metrics_before_transfer(iteration_begin, &final_table);
             let transfer_begin = Instant::now();
-            mem_send.send_memory(final_table, socket, return_if_cancelled_cb)?;
+            mem_send.send_memory(final_table, socket)?;
             let transfer_duration = transfer_begin.elapsed();
             mem_ctx.update_metrics_after_transfer(transfer_begin, transfer_duration);
             mem_ctx.iteration += 1;
@@ -1768,8 +1762,6 @@ impl Vmm {
                 .update(MigrationStateOngoingPhase::Started, None, None, None);
         }
 
-        return_if_cancelled_cb(&mut socket)?;
-
         // Send config
         let vm_config = vm.get_config();
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -1808,8 +1800,6 @@ impl Vmm {
             .map_err(MigratableError::MigrateSend)?
         };
 
-        return_if_cancelled_cb(&mut socket)?;
-
         if send_data_migration.local {
             match &mut socket {
                 SocketStream::Unix(unix_socket) => {
@@ -1829,8 +1819,6 @@ impl Vmm {
             }
         }
 
-        return_if_cancelled_cb(&mut socket)?;
-
         let vm_migration_config = VmMigrationConfig {
             vm_config,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -1838,8 +1826,6 @@ impl Vmm {
             memory_manager_data: vm.memory_manager_data(),
         };
         transport::send_config(&mut socket, &vm_migration_config)?;
-
-        return_if_cancelled_cb(&mut socket)?;
 
         // Let every Migratable object know about the migration being started.
         vm.start_migration()?;
@@ -1871,7 +1857,6 @@ impl Vmm {
                 &mut mem_send,
                 &mut ctx,
                 postponed_lifecycle_event,
-                &return_if_cancelled_cb,
             )
             .inspect_err(|_| {
                 // Calling cleanup multiple times is fine, thus here we just make sure
