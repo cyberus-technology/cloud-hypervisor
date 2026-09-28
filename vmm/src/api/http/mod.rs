@@ -29,8 +29,8 @@ use self::http_endpoint::{VmActionHandler, VmCreate, VmInfo, VmmPing, VmmShutdow
 use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
-    VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCounters, VmDelete,
-    VmDiskMirrorCancel, VmDiskMirrorComplete, VmDiskMirrorStart, VmDiskMirrorStatus,
+    VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
+    VmDelete, VmDiskMirrorCancel, VmDiskMirrorComplete, VmDiskMirrorStart, VmDiskMirrorStatus,
     VmMigrationProgress, VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton, VmReboot,
     VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume,
     VmSendMigration, VmShutdown, VmSnapshot,
@@ -314,6 +314,10 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
     r.routes.insert(
         endpoint!("/vm.send-migration"),
         Box::new(VmActionHandler::new(&VmSendMigration)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.cancel-migration"),
+        Box::new(VmActionHandler::new(&VmCancelMigration)),
     );
     r.routes.insert(
         endpoint!("/vm.shutdown"),
