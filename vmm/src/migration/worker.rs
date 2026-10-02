@@ -20,7 +20,7 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use event_monitor::event;
-use log::{info, warn};
+use log::warn;
 use vm_migration::MigratableError;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -46,26 +46,20 @@ impl Debug for MigrationWorkerSpawnError {
 
 pub struct MigrationWorkerHandle {
     handle: Option<JoinHandle<MigrationWorkerResult>>,
-    cancel: Arc<AtomicBool>,
+    cancel_migration: Arc<AtomicBool>,
 }
 
 impl MigrationWorkerHandle {
-    /// Cancels the migration.
-    ///
-    /// Note that timing issues in the very last phase of the migration allow a
-    /// tiny window in that migration succeeds before they could be canceled.
-    pub fn trigger_cancellation(&self) {
-        info!("Will cancel ongoing live-migration");
-        self.cancel.store(true, Ordering::Release);
-        // we just dispatch here and do not block for the migration thread
-    }
-
     pub fn join(mut self) -> MigrationWorkerResult {
         self.handle
             .take()
             .expect("should have thread")
             .join()
             .expect("should join migration worker gracefully")
+    }
+
+    pub(crate) fn try_cancel_migration(&self) {
+        self.cancel_migration.store(true, Ordering::Release);
     }
 }
 
@@ -85,10 +79,10 @@ pub struct MigrationWorker {
     config: VmSendMigrationData,
     /// Shared with the main VMM thread.
     postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
-    cancel: Arc<AtomicBool>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     initial_vm_state: VmState,
+    cancel_migration: Arc<AtomicBool>,
 }
 
 impl MigrationWorker {
@@ -105,10 +99,17 @@ impl MigrationWorker {
             &self.config,
             self.initial_vm_state,
             self.postponed_lifecycle_event.as_ref(),
-            self.cancel.clone(),
+            &self.cancel_migration,
         )
         .inspect(|_| event!("vm", "migration-finished"))
-        .inspect_err(|_| event!("vm", "migration-failed"));
+        .inspect_err(|e| match e {
+            MigratableError::Cancelled => {
+                event!("vm", "migration-cancelled");
+            }
+            _ => {
+                event!("vm", "migration-failed");
+            }
+        });
 
         // Notify VMM thread to check migration result.
         self.check_migration_evt.write(1).unwrap();
@@ -135,17 +136,18 @@ impl MigrationWorker {
         >,
         initial_vm_state: VmState,
     ) -> Result<MigrationWorkerHandle, MigrationWorkerSpawnError> {
+        let cancel_migration = Arc::new(AtomicBool::new(false));
+
         let (vm_sender, vm_receiver) = std::sync::mpsc::sync_channel(0);
-        let cancel = Arc::new(AtomicBool::new(false));
         let worker = MigrationWorker {
             vm_receiver,
             check_migration_evt,
             config,
             postponed_lifecycle_event,
-            cancel: cancel.clone(),
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             hypervisor,
             initial_vm_state,
+            cancel_migration: Arc::clone(&cancel_migration),
         };
 
         let inner_handle = match thread::Builder::new()
@@ -165,7 +167,7 @@ impl MigrationWorker {
 
         Ok(MigrationWorkerHandle {
             handle: Some(inner_handle),
-            cancel,
+            cancel_migration,
         })
     }
 }
