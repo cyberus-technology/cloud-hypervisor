@@ -28,9 +28,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 #[cfg(feature = "sev_snp")]
 use kvm_bindings::kvm_create_guest_memfd;
+use kvm_bindings::{
+    KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2, KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE, kvm_clear_dirty_log,
+};
 use kvm_ioctls::{NoDatamatch, VcpuFd, VmFd};
 #[cfg(feature = "sev_snp")]
 use log::debug;
@@ -128,10 +131,12 @@ pub use kvm_ioctls::{self, Cap, Kvm, VcpuExit};
 use log::error;
 use thiserror::Error;
 use vfio_ioctls::VfioDeviceFd;
+use vmm_sys_util::ioctl::ioctl_with_ref;
+#[cfg(feature = "tdx")]
+use vmm_sys_util::ioctl::ioctl_with_val;
+use vmm_sys_util::ioctl_iowr_nr;
 #[cfg(target_arch = "x86_64")]
 use vmm_sys_util::{fam::FamStruct, ioctl_io_nr};
-#[cfg(feature = "tdx")]
-use vmm_sys_util::{ioctl::ioctl_with_val, ioctl_iowr_nr};
 
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use crate::RegList;
@@ -142,6 +147,50 @@ use crate::kvm::x86_64::XsaveStateError;
 
 #[cfg(target_arch = "x86_64")]
 ioctl_io_nr!(KVM_NMI, kvm_bindings::KVMIO, 0x9a);
+
+ioctl_iowr_nr!(
+    KVM_CLEAR_DIRTY_LOG,
+    kvm_bindings::KVMIO,
+    0xc0,
+    kvm_clear_dirty_log
+);
+
+// Bound each reprotection operation to 1 GiB regardless of the host page size.
+// This limits clear-ioctl overhead on TiB-sized VMs while avoiding holding KVM's
+// MMU lock for an entire large memory slot.
+const DIRTY_LOG_CHUNK_SIZE: usize = 1024 << 20;
+
+#[derive(Debug, PartialEq, Eq)]
+struct DirtyLogChunk<'a> {
+    /// Offset from the start of the slot, in host pages.
+    first_page: u64,
+    num_pages: u32,
+    bitmap: &'a [u64],
+}
+
+/// Yields chunks of a slot's dirty bitmap for KVM_CLEAR_DIRTY_LOG, skipping chunks
+/// without dirty bits.
+fn dirty_log_chunks(
+    bitmap: &[u64],
+    num_pages: u64,
+    page_size: usize,
+) -> impl Iterator<Item = DirtyLogChunk<'_>> {
+    let chunk_pages = DIRTY_LOG_CHUNK_SIZE / page_size;
+    bitmap
+        .chunks(chunk_pages / u64::BITS as usize)
+        .enumerate()
+        .filter(|(_, chunk)| chunk.iter().any(|word| *word != 0))
+        .map(move |(index, chunk)| {
+            let first_page = index as u64 * chunk_pages as u64;
+            // Only the last range may have a page count not divisible by 64.
+            let count = (num_pages - first_page).min(chunk_pages as u64);
+            DirtyLogChunk {
+                first_page,
+                num_pages: count as u32,
+                bitmap: chunk,
+            }
+        })
+}
 
 #[cfg(feature = "sev_snp")]
 use igvm_defs::PAGE_SIZE_4K;
@@ -1322,9 +1371,44 @@ impl vm::Vm for KvmVm {
     /// Get dirty pages bitmap (one bit per page)
     ///
     fn get_dirty_log(&self, slot: u32, _base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
-        self.fd
+        let bitmap = self
+            .fd
             .get_dirty_log(slot, memory_size as usize)
-            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
+            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))?;
+
+        // Match the host-page granularity used by kvm-ioctls::get_dirty_log.
+        // SAFETY: sysconf takes no pointers and _SC_PAGESIZE is a valid name.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return Err(vm::HypervisorVmError::GetDirtyLog(anyhow!(
+                "Failed to obtain host page size: {}",
+                errno::Error::last()
+            )));
+        }
+        let num_pages = memory_size.div_ceil(page_size as u64);
+        for chunk in dirty_log_chunks(&bitmap, num_pages, page_size as usize) {
+            let clear = kvm_clear_dirty_log {
+                slot,
+                num_pages: chunk.num_pages,
+                first_page: chunk.first_page,
+                __bindgen_anon_1: kvm_bindings::kvm_clear_dirty_log__bindgen_ty_1 {
+                    dirty_bitmap: chunk.bitmap.as_ptr() as *mut libc::c_void,
+                },
+            };
+            // SAFETY: The bitmap slice remains valid throughout the ioctl and
+            // covers chunk.num_pages bits. KVM only reads this buffer.
+            let ret = unsafe { ioctl_with_ref(self.fd.as_ref(), KVM_CLEAR_DIRTY_LOG(), &clear) };
+            if ret != 0 {
+                return Err(vm::HypervisorVmError::GetDirtyLog(
+                    anyhow::Error::from(errno::Error::last()).context(format!(
+                        "KVM_CLEAR_DIRTY_LOG failed for slot {slot}, first page {}, page count {}",
+                        chunk.first_page, chunk.num_pages
+                    )),
+                ));
+            }
+        }
+
+        Ok(bitmap)
     }
 
     ///
@@ -1603,6 +1687,15 @@ impl hypervisor::Hypervisor for KvmHypervisor {
             break;
         }
 
+        let cap = kvm_bindings::kvm_enable_cap {
+            cap: KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2,
+            args: [KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE.into(), 0, 0, 0],
+            ..Default::default()
+        };
+        fd.enable_cap(&cap)
+            .context("Failed to enable manual dirty-log protection")
+            .map_err(hypervisor::HypervisorError::VmCreate)?;
+
         #[cfg(target_arch = "x86_64")]
         {
             let msr_list = self.get_msr_list()?;
@@ -1672,7 +1765,18 @@ impl hypervisor::Hypervisor for KvmHypervisor {
 
     fn check_required_extensions(&self) -> hypervisor::Result<()> {
         check_required_kvm_extensions(&self.kvm)
-            .map_err(|e| hypervisor::HypervisorError::CheckExtensions(e.into()))
+            .map_err(|e| hypervisor::HypervisorError::CheckExtensions(e.into()))?;
+
+        let supported = self
+            .kvm
+            .check_extension_raw(KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2.into());
+        if supported <= 0 || supported as u32 & KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE == 0 {
+            return Err(hypervisor::HypervisorError::CheckExtensions(anyhow!(
+                "KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2 with KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE is required"
+            )));
+        }
+
+        Ok(())
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -3690,6 +3794,84 @@ impl KvmVcpu {
 
 #[cfg(test)]
 mod unit_tests {
+    use super::{DIRTY_LOG_CHUNK_SIZE, DirtyLogChunk, dirty_log_chunks};
+
+    #[test]
+    fn test_dirty_log_chunks_dense_and_partial_tail() {
+        for page_size in [4096, 16384, 65536] {
+            let chunk_pages = DIRTY_LOG_CHUNK_SIZE / page_size;
+            for tail_pages in [0, 1, 63, 64, 65] {
+                let num_pages = 2 * chunk_pages + tail_pages;
+                let mut bitmap = vec![u64::MAX; num_pages.div_ceil(64)];
+                if !num_pages.is_multiple_of(64) {
+                    *bitmap.last_mut().unwrap() = (1 << (num_pages % 64)) - 1;
+                }
+                let mut next_page = 0;
+                let chunks: Vec<_> =
+                    dirty_log_chunks(&bitmap, num_pages as u64, page_size).collect();
+                assert_eq!(chunks.len(), if tail_pages == 0 { 2 } else { 3 });
+                for chunk in chunks {
+                    assert_eq!(chunk.first_page, next_page);
+                    assert_eq!(chunk.first_page % 64, 0);
+                    assert!(chunk.num_pages > 0 && chunk.num_pages as usize <= chunk_pages);
+                    if chunk.first_page < (2 * chunk_pages) as u64 {
+                        assert_eq!(chunk.num_pages as usize * page_size, DIRTY_LOG_CHUNK_SIZE);
+                    }
+                    assert_eq!(chunk.bitmap.len(), (chunk.num_pages as usize).div_ceil(64));
+                    next_page += u64::from(chunk.num_pages);
+                    assert!(chunk.num_pages % 64 == 0 || next_page == num_pages as u64);
+                }
+                assert_eq!(next_page, num_pages as u64);
+            }
+        }
+    }
+
+    #[test]
+    fn test_dirty_log_chunks_sparse() {
+        for page_size in [4096, 16384, 65536] {
+            let chunk_pages = DIRTY_LOG_CHUNK_SIZE / page_size;
+            let words_per_chunk = chunk_pages / 64;
+            let mut bitmap = vec![0; 3 * words_per_chunk + 1];
+            bitmap[words_per_chunk] = 1;
+            bitmap[2 * words_per_chunk - 1] = 1 << 63;
+            bitmap[3 * words_per_chunk] = 1;
+            let original = bitmap.clone();
+            let chunks: Vec<_> =
+                dirty_log_chunks(&bitmap, (3 * chunk_pages + 1) as u64, page_size).collect();
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(
+                chunks[0],
+                DirtyLogChunk {
+                    first_page: chunk_pages as u64,
+                    num_pages: chunk_pages as u32,
+                    bitmap: &bitmap[words_per_chunk..2 * words_per_chunk],
+                }
+            );
+            assert_eq!(
+                chunks[1],
+                DirtyLogChunk {
+                    first_page: (3 * chunk_pages) as u64,
+                    num_pages: 1,
+                    bitmap: &bitmap[3 * words_per_chunk..],
+                }
+            );
+            assert_eq!(bitmap, original);
+        }
+    }
+
+    #[test]
+    fn test_dirty_log_chunks_empty() {
+        for page_size in [4096, 16384, 65536] {
+            assert_eq!(dirty_log_chunks(&[], 0, page_size).count(), 0);
+            let num_pages = 2 * DIRTY_LOG_CHUNK_SIZE / page_size + 1;
+            let bitmap = vec![0; num_pages.div_ceil(64)];
+            assert_eq!(
+                dirty_log_chunks(&bitmap, num_pages as u64, page_size).count(),
+                0
+            );
+        }
+    }
+
     #[test]
     #[cfg(target_arch = "riscv64")]
     fn test_get_and_set_regs() {

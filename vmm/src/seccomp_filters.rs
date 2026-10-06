@@ -103,6 +103,7 @@ mod kvm {
     pub const KVM_GET_MP_STATE: u64 = 0x8004_ae98;
     pub const KVM_GET_DEVICE_ATTR: u64 = 0x4018_aee2;
     pub const KVM_GET_DIRTY_LOG: u64 = 0x4010_ae42;
+    pub const KVM_CLEAR_DIRTY_LOG: u64 = 0xc018_aec0;
     pub const KVM_GET_VCPU_EVENTS: u64 = 0x8040_ae9f;
     pub const KVM_GET_ONE_REG: u64 = 0x4010_aeab;
     pub const KVM_GET_REGS: u64 = 0x8090_ae81;
@@ -242,6 +243,7 @@ fn create_vmm_ioctl_seccomp_rule_common_kvm() -> Result<Vec<SeccompRule>, Backen
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_API_VERSION,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_DEVICE_ATTR,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_DIRTY_LOG)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, KVM_CLEAR_DIRTY_LOG)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_MP_STATE)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_ONE_REG)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_GET_REGS)?],
