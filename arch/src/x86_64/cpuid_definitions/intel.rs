@@ -1430,12 +1430,11 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     bits_range: (4, 4),
                     policy: ProfilePolicy::Passthrough,
                 },
-                // TODO: Revisit this decision. Setting this to 0 for now in order to be compatible with QEMU
                 ValueDefinition {
                     short: "waitpkg",
                     description: "WAITPKG instructions",
                     bits_range: (5, 5),
-                    policy: ProfilePolicy::Static(0),
+                    policy: ProfilePolicy::Inherit,
                 },
                 ValueDefinition {
                     short: "avx512_vbmi2",
