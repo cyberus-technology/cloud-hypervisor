@@ -44,14 +44,14 @@ impl CpuProfile {
         let mut data: CpuIdProfileData = match self {
             Self::Host => None,
             Self::Skylake => Some(
-                serde_json::from_slice(include_bytes!("cpu_profiles/skylake.cpuid.json"))
+                serde_json::from_slice(include_bytes!("cpu_profiles/skylake.json"))
                     .inspect_err(|e| {
                         error!("BUG: could not deserialize CPU profile. Got error: {e:?}");
                     })
                     .expect("should be able to deserialize pre-generated data"),
             ),
             Self::SapphireRapids => Some(
-                serde_json::from_slice(include_bytes!("cpu_profiles/sapphire-rapids.cpuid.json"))
+                serde_json::from_slice(include_bytes!("cpu_profiles/sapphire-rapids.json"))
                     .inspect_err(|e| {
                         error!("BUG: could not deserialize CPU profile. Got error: {e:?}");
                     })
@@ -97,23 +97,7 @@ impl CpuProfile {
     /// Loads pre-generated MSR data associated with a CPU profile.
     #[cfg(feature = "kvm")]
     pub(in crate::x86_64) fn msr_data(&self) -> Option<MsrProfileData> {
-        match self {
-            Self::Host => None,
-            Self::Skylake => Some(
-                serde_json::from_slice(include_bytes!("cpu_profiles/skylake.msr.json"))
-                    .inspect_err(|e| {
-                        error!("BUG: could not deserialize CPU profile. Got error: {e:?}");
-                    })
-                    .expect("should be able to deserialize pre-generated data"),
-            ),
-            Self::SapphireRapids => Some(
-                serde_json::from_slice(include_bytes!("cpu_profiles/sapphire-rapids.msr.json"))
-                    .inspect_err(|e| {
-                        error!("BUG: could not deserialize CPU profile. Got error: {e:?}");
-                    })
-                    .expect("should be able to deserialize pre-generated data"),
-            ),
-        }
+        todo!()
     }
 
     #[cfg(not(feature = "kvm"))]
