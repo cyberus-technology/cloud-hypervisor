@@ -20,7 +20,6 @@ pub mod regs;
 pub mod tdx;
 
 mod helpers;
-mod hyperv_msrs;
 mod mpspec;
 mod mptable;
 mod smbios;
