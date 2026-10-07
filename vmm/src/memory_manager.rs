@@ -19,7 +19,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::{ffi, result, thread};
 
 use acpi_tables::{Aml, aml};
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use arch::RegionType;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
@@ -3162,8 +3162,7 @@ impl Transportable for MemoryManager {
             .write(true)
             .create_new(true)
             .open(&memory_file_path)
-            .context("Error creating snapshot file for memory")
-            .map_err(MigratableError::MigrateSend)?;
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
         let total_len: u64 = self
             .snapshot_memory_ranges
@@ -3225,8 +3224,7 @@ impl Transportable for MemoryManager {
                             &mut memory_file,
                             (range.length - offset) as usize,
                         )
-                        .context("Error writing guest memory to snapshot file")
-                        .map_err(MigratableError::MigrateSend)?;
+                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
                     offset += bytes_written as u64;
                     if offset == range.length {
                         break;
@@ -3248,10 +3246,9 @@ impl Migratable for MemoryManager {
     // Just before we do a bulk copy we want to start/clear the dirty log so that
     // pages touched during our bulk copy are tracked.
     fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
-        self.vm
-            .start_dirty_log()
-            .context("Error starting VM dirty log")
-            .map_err(MigratableError::MigrateSend)?;
+        self.vm.start_dirty_log().map_err(|e| {
+            MigratableError::MigrateSend(anyhow!("Error starting VM dirty log {e}"))
+        })?;
 
         for r in self.guest_memory.memory().iter() {
             (**r).bitmap().reset();
@@ -3261,10 +3258,9 @@ impl Migratable for MemoryManager {
     }
 
     fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
-        self.vm
-            .stop_dirty_log()
-            .context("Error stopping VM dirty log")
-            .map_err(MigratableError::MigrateSend)?;
+        self.vm.stop_dirty_log().map_err(|e| {
+            MigratableError::MigrateSend(anyhow!("Error stopping VM dirty log {e}"))
+        })?;
 
         Ok(())
     }
@@ -3274,11 +3270,9 @@ impl Migratable for MemoryManager {
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
         let mut table = MemoryRangeTable::default();
         for r in &self.guest_ram_mappings {
-            let vm_dirty_bitmap = self
-                .vm
-                .get_dirty_log(r.slot, r.gpa, r.size)
-                .context("Error getting VM dirty log")
-                .map_err(MigratableError::MigrateSend)?;
+            let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.gpa, r.size).map_err(|e| {
+                MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {e}"))
+            })?;
             let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
             {
                 Some(region) => {
