@@ -56,7 +56,7 @@ use vm_migration::progress::{
 use vm_migration::protocol::*;
 use vm_migration::{
     MemoryMigrationContext, Migratable, MigratableError, OngoingMigrationContext, Pausable,
-    Snapshot, Snapshottable, Transportable,
+    Snapshot, Snapshottable, Transportable, nested_error_to_flat_chain_as_string,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
@@ -2213,37 +2213,6 @@ impl Vmm {
         self.vm.vm_mut().unwrap().restore()
     }
 
-    /// Prints the error chain to `error!()` level, akin to user-facing errors when Cloud Hypervisor
-    /// or ch-remote fail.
-    // TODO: For upstreaming, we should unify this with the code-paths used by ch-remote and
-    // Cloud Hypervisor on failure.
-    fn log_print_error_chain<'a>(top_error: &'a (dyn std::error::Error + 'static)) {
-        // Print chain of errors
-        if top_error.source().is_none() {
-            error!("Migration failed with the following error:");
-            error!("  {top_error}");
-        } else {
-            // In cli_print_error_chain(), we also print the
-            // <top_err as Debug>::fmt() as oneliner so that we can see all
-            // properties. As we use anyhow errors in the migration path,
-            // Debug::fmt() is not helpful for us as it doesn't print the
-            // underlying properties (like the default Debug::fmt() impl would
-            // do). Instead, it would print a trace itself, which is not what
-            // we want to do here.
-
-            error!("Migration failed with the following chain of errors:");
-            std::iter::successors(Some(top_error), |sub_error| {
-                // Dereference necessary to mitigate rustc compiler bug.
-                // See <https://github.com/rust-lang/rust/issues/141673>
-                (*sub_error).source()
-            })
-            .enumerate()
-            .for_each(|(level, error)| {
-                error!("  {level}: {error}");
-            });
-        }
-    }
-
     /// Checks the migration result.
     ///
     /// This should be called when the migration thread indicated a state
@@ -2345,7 +2314,10 @@ impl Vmm {
                 }
             }
             Err(e) => {
-                Self::log_print_error_chain(&e);
+                error!(
+                    "Migration failed: {}",
+                    nested_error_to_flat_chain_as_string(&e)
+                );
                 try_resume_vm(vm);
 
                 // Update migration progress snapshot
