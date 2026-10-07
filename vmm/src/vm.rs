@@ -1201,19 +1201,20 @@ impl Vm {
 
     #[cfg(feature = "fw_cfg")]
     fn populate_fw_cfg(
-        &self,
         fw_cfg_config: &FwCfgConfig,
+        device_manager: &Arc<Mutex<DeviceManager>>,
+        config: &Arc<Mutex<VmConfig>>,
         #[cfg(target_arch = "x86_64")] kvm_sev_snp_enabled: bool,
     ) -> Result<()> {
-        let config = self.config.lock().unwrap();
-
         let mut e820_option: Option<usize> = None;
         if fw_cfg_config.e820 {
-            e820_option = Some(config.memory.size as usize);
+            e820_option = Some(config.lock().unwrap().memory.size as usize);
         }
         let mut kernel_option: Option<File> = None;
         if fw_cfg_config.kernel {
             let kernel = config
+                .lock()
+                .unwrap()
                 .payload
                 .as_ref()
                 .map(|p| p.kernel.as_ref().map(File::open))
@@ -1225,9 +1226,9 @@ impl Vm {
         let mut cmdline_option: Option<std::ffi::CString> = None;
         if fw_cfg_config.cmdline {
             let cmdline = Vm::generate_cmdline(
-                config.payload.as_ref().unwrap(),
+                config.lock().unwrap().payload.as_ref().unwrap(),
                 #[cfg(target_arch = "aarch64")]
-                self.device_manager,
+                device_manager,
             )
             .map_err(|_| Error::MissingFwCfgCmdline)?
             .as_cstring()
@@ -1237,6 +1238,8 @@ impl Vm {
         let mut initramfs_option: Option<File> = None;
         if fw_cfg_config.initramfs {
             let initramfs = config
+                .lock()
+                .unwrap()
                 .payload
                 .as_ref()
                 .map(|p| p.initramfs.as_ref().map(File::open))
@@ -1271,7 +1274,7 @@ impl Vm {
             fw_cfg_item_list_option = Some(fw_cfg_item_list);
         }
 
-        let device_manager_binding = self.device_manager.lock().unwrap();
+        let device_manager_binding = device_manager.lock().unwrap();
         let Some(fw_cfg) = device_manager_binding.fw_cfg() else {
             return Err(Error::FwCfgDisabled);
         };
@@ -2896,8 +2899,10 @@ impl Vm {
                     }
                 };
 
-                self.populate_fw_cfg(
+                Self::populate_fw_cfg(
                     &fw_cfg_config,
+                    &self.device_manager,
+                    &self.config,
                     #[cfg(target_arch = "x86_64")]
                     kvm_sev_snp_enabled,
                 )?;
