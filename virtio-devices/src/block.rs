@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
@@ -979,22 +979,16 @@ impl Block {
         has_feature(self.features(), VIRTIO_BLK_F_RO.into())
     }
 
-    /// Returns the advisory lock granularity to use for `disk_image`.
-    ///
-    /// The granularity follows the `lock_granularity` choice in the block config.
-    fn lock_granularity(
-        &self,
-        disk_image: &dyn AsyncFullDiskFile,
-        disk_path: &Path,
-    ) -> LockGranularity {
+    /// Returns the granularity for the advisory lock for this disk.
+    fn lock_granularity(&mut self) -> LockGranularity {
         match self.lock_granularity_choice {
             LockGranularityChoice::Full => LockGranularity::WholeFile,
             LockGranularityChoice::ByteRange => {
                 // Byte range lock covering [0, max(logical, physical))
                 // logical > physical for sparse files, physical > logical
                 // for small dense files due to filesystem block rounding.
-                let logical = disk_image.logical_size();
-                let physical = disk_image.physical_size();
+                let logical = self.disk_image.logical_size();
+                let physical = self.disk_image.physical_size();
                 match (logical, physical) {
                     (Ok(l), Ok(p)) => LockGranularity::ByteRange(0, max(l, p)),
                     (Ok(l), Err(_)) => LockGranularity::ByteRange(0, l),
@@ -1004,7 +998,7 @@ impl Block {
                         warn!(
                             "Can't get disk size for id={},path={}, falling back to {:?}: error: {e}",
                             self.id,
-                            disk_path.display(),
+                            self.disk_path.display(),
                             fallback
                         );
                         fallback
@@ -1021,7 +1015,7 @@ impl Block {
             true => LockType::Read,
             false => LockType::Write,
         };
-        let granularity = self.lock_granularity(self.disk_image.as_ref(), &self.disk_path);
+        let granularity = self.lock_granularity();
         debug!(
             "Attempting to acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
             self.id,
@@ -1054,7 +1048,7 @@ impl Block {
 
     /// Releases the advisory lock held for the corresponding disk image.
     pub fn unlock_image(&mut self) -> Result<()> {
-        let granularity = self.lock_granularity(self.disk_image.as_ref(), &self.disk_path);
+        let granularity = self.lock_granularity();
 
         // It is very unlikely that this fails;
         // Should we remove the Result to simplify the error propagation on
