@@ -49,9 +49,8 @@ use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, NetConfig, VmAddDevice, VmAddFs,
     VmAddGenericVhostUser, VmAddNet, VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot,
     VmCancelMigration, VmConfig, VmCounters, VmDelete, VmMigrationProgress, VmNmi, VmPause,
-    VmPostMigrationAnnounce, VmPowerButton, VmReboot, VmReceiveMigration, VmReceiveMigrationData,
-    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
-    VmShutdown, VmSnapshot,
+    VmPowerButton, VmReboot, VmReceiveMigration, VmReceiveMigrationData, VmRemoveDevice, VmResize,
+    VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::RestoreConfig;
 use crate::cpu::Error as CpuError;
@@ -416,7 +415,6 @@ vm_action_put_handler!(VmShutdown);
 vm_action_put_handler!(VmReboot);
 vm_action_put_handler!(VmPause);
 vm_action_put_handler!(VmResume);
-vm_action_put_handler!(VmPostMigrationAnnounce);
 vm_action_put_handler!(VmPowerButton);
 vm_action_put_handler!(VmNmi);
 vm_action_put_handler!(VmCancelMigration);
