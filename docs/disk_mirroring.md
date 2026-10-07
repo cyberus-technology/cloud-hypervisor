@@ -144,11 +144,8 @@ While a mirror is active, the VMM rejects operations that would disturb it:
 snapshotting, live migration, resizing the disk, removing the device, and
 API requests to reboot the VM. The operator must complete or cancel
 the mirror first. Operator requests through `vm.shutdown`, `vmm.shutdown`, or
-`vm.delete` cancel all active disk mirrors. If the guest requests a reboot or
-shutdown, the VMM postpones the event and keeps the mirror and API available.
-The requested lifecycle operation continues after the operator completes or
-cancels every active mirror. Pausing the VM is allowed, but a mirror cannot be
-started, completed, or cancelled while the device is paused.
+`vm.delete` cancel all active disk mirrors. Pausing the VM is allowed, but a
+mirror cannot be started, completed, or cancelled while the device is paused.
 
 ## Implementation details
 

@@ -955,30 +955,12 @@ impl Vmm {
         })
     }
 
-    /// Postpones a lifecycle event while migration or disk mirroring is active.
-    fn postpone_lifecycle_event(
-        &mut self,
-        event: PostponedLifecycleEvent,
-    ) -> result::Result<bool, VmError> {
-        let vm = match &mut self.vm {
-            VmOwnership::Migration { .. } => None,
-            VmOwnership::Owned(vm) if vm.any_active_block_mirrors() => Some(vm),
-            VmOwnership::Owned(_) | VmOwnership::None => return Ok(false),
-        };
-
-        {
-            let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
-            if postponed_event.is_none() {
-                *postponed_event = Some(event);
-                info!("Postponed guest lifecycle event: {event:?}");
-            }
+    fn postpone_lifecycle_event(&self, event: PostponedLifecycleEvent) {
+        let mut postponed_event = self.postponed_lifecycle_event.lock().unwrap();
+        if postponed_event.is_none() {
+            *postponed_event = Some(event);
+            info!("Postponed post-migration lifecycle event: {event:?}");
         }
-
-        if let Some(vm) = vm {
-            vm.shutdown()?;
-        }
-
-        Ok(true)
     }
 
     fn clear_postponed_lifecycle_event(&self) {
@@ -2234,10 +2216,10 @@ impl Vmm {
                         info!("VM reset event");
                         // Consume the event.
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
-                        if self
-                            .postpone_lifecycle_event(PostponedLifecycleEvent::VmReboot)
-                            .map_err(Error::VmReboot)?
-                        {
+                        // The migration worker owns the VM, so the lifecycle
+                        // change is applied once the migration finished.
+                        if matches!(self.vm, VmOwnership::Migration { .. }) {
+                            self.postpone_lifecycle_event(PostponedLifecycleEvent::VmReboot);
                             continue;
                         }
                         self.vm_reboot().map_err(Error::VmReboot)?;
@@ -2245,10 +2227,10 @@ impl Vmm {
                     EpollDispatch::GuestExit => {
                         info!("VM guest exit event");
                         self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
-                        if self
-                            .postpone_lifecycle_event(PostponedLifecycleEvent::VmShutdown)
-                            .map_err(Error::VmShutdown)?
-                        {
+                        // The migration worker owns the VM, so the lifecycle
+                        // change is applied once the migration finished.
+                        if matches!(self.vm, VmOwnership::Migration { .. }) {
+                            self.postpone_lifecycle_event(PostponedLifecycleEvent::VmShutdown);
                             continue;
                         }
                         if self.no_shutdown {
@@ -3463,33 +3445,21 @@ impl RequestHandler for Vmm {
     fn vm_disk_mirror_complete(&mut self, id: String) -> result::Result<(), VmError> {
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
 
-        let vm = match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm,
-            VmOwnership::Migration { .. } => return Err(VmError::VmMigrating),
-            VmOwnership::None => return Err(VmError::DiskMirrorComplete),
-        };
-        vm.mirror_disk_complete(&id)?;
-
-        if !vm.any_active_block_mirrors() {
-            self.replay_postponed_lifecycle_event();
+        match self.vm {
+            VmOwnership::Owned(ref mut vm) => vm.mirror_disk_complete(&id),
+            VmOwnership::Migration { .. } => Err(VmError::VmMigrating),
+            VmOwnership::None => Err(VmError::DiskMirrorComplete),
         }
-        Ok(())
     }
 
     fn vm_disk_mirror_cancel(&mut self, id: String) -> result::Result<(), VmError> {
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
 
-        let vm = match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm,
-            VmOwnership::Migration { .. } => return Err(VmError::VmMigrating),
-            VmOwnership::None => return Err(VmError::DiskMirrorCancel),
-        };
-        vm.mirror_disk_cancel(&id)?;
-
-        if !vm.any_active_block_mirrors() {
-            self.replay_postponed_lifecycle_event();
+        match self.vm {
+            VmOwnership::Owned(ref mut vm) => vm.mirror_disk_cancel(&id),
+            VmOwnership::Migration { .. } => Err(VmError::VmMigrating),
+            VmOwnership::None => Err(VmError::DiskMirrorCancel),
         }
-        Ok(())
     }
 }
 
