@@ -771,9 +771,6 @@ pub struct Block {
     queue_affinity: BTreeMap<u16, Box<[usize]>>,
     disable_sector0_writes: bool,
     lock_granularity_choice: LockGranularityChoice,
-    /// The current lock status.
-    // There is no way to query what locks are already held, so we need to cache that information.
-    held_lock: LockType,
     device_status: Arc<AtomicU8>,
     active_request_count: Arc<AtomicUsize>,
     draining_active_requests: Arc<AtomicBool>,
@@ -940,7 +937,6 @@ impl Block {
             queue_affinity,
             disable_sector0_writes,
             lock_granularity_choice: lock_granularity,
-            held_lock: LockType::Unlock,
             device_status: Arc::new(AtomicU8::new(0)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             draining_active_requests: Arc::new(AtomicBool::new(false)),
@@ -1005,7 +1001,6 @@ impl Block {
                     }
                 }
             }
-            LockGranularityChoice::QemuCompatible => LockGranularity::QemuCompatible,
         }
     }
 
@@ -1023,7 +1018,7 @@ impl Block {
         );
         let fd = self.disk_image.fd();
         granularity
-            .try_acquire_lock(&fd, lock_type, self.held_lock)
+            .try_acquire_lock(&fd, lock_type)
             .map_err(|error| {
                 error!(
                     "Cannot acquire {lock_type:?} lock for disk image: id={},path={},granularity={granularity:?}",
@@ -1037,7 +1032,6 @@ impl Block {
                     lock_type,
                 }
             })?;
-        self.held_lock = lock_type;
         info!(
             "Acquired {lock_type:?} lock for disk image id={},path={}",
             self.id,
@@ -1060,9 +1054,7 @@ impl Block {
                 path: self.disk_path.clone(),
                 error,
                 lock_type: LockType::Unlock,
-            })?;
-        self.held_lock = LockType::Unlock;
-        Ok(())
+            })
     }
 
     fn state(&self) -> BlockState {

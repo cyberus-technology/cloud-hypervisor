@@ -983,7 +983,7 @@ components:
 
     LockGranularity:
       type: string
-      enum: [ByteRange, Full, QemuCompatible]
+      enum: [ByteRange, Full]
       default: ByteRange
 
     DiskConfig:
