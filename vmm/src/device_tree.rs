@@ -114,7 +114,7 @@ impl<'a> BftIter<'a> {
         let mut nodes = Vec::with_capacity(hash_map.len());
         let mut i = 0;
 
-        for node in hash_map.values() {
+        for (_, node) in hash_map.iter() {
             if node.parent.is_none() {
                 nodes.push(node);
             }
