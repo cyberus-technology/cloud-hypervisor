@@ -3278,6 +3278,10 @@ impl RequestHandler for Vmm {
             let req = Request::read_from(&mut socket)?;
             trace!("Command {:?} received", req.command());
 
+            if req.command() == Command::KeepAlive {
+                continue;
+            }
+
             let (response, new_state, mut maybe_error) = match self.vm_receive_migration_step(
                 &mut socket,
                 &listener,
