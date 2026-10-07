@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
-use std::{io, mem, result, thread};
+use std::{io, result, thread};
 
 use anyhow::{Context, anyhow};
 #[cfg(feature = "dbus_api")]
@@ -633,43 +633,6 @@ pub struct VmmThreadHandle {
     pub http_api_handle: Option<HttpApiHandle>,
 }
 
-/// Models the current ownership and associated state of the VM from the
-/// perspective of the VMM.
-#[cfg_attr(feature = "tdx", expect(clippy::large_enum_variant))]
-pub enum VmOwnership {
-    Owned(Vm),
-    None,
-}
-
-impl VmOwnership {
-    /// Returns a shared reference to the underlying VM, if available.
-    fn as_ref(&self) -> Option<&Vm> {
-        match self {
-            VmOwnership::Owned(vm) => Some(vm),
-            _ => None,
-        }
-    }
-
-    /// Returns a mutable reference to the underlying VM, if available.
-    fn as_mut(&mut self) -> Option<&mut Vm> {
-        match self {
-            VmOwnership::Owned(vm) => Some(vm),
-            _ => None,
-        }
-    }
-
-    /// Takes the inner VM if it is currently owned.
-    fn take_owned(&mut self) -> Option<Vm> {
-        match mem::replace(self, VmOwnership::None) {
-            VmOwnership::Owned(vm) => Some(vm),
-            old => {
-                *self = old;
-                None
-            }
-        }
-    }
-}
-
 pub struct Vmm {
     epoll: EpollContext,
     exit_evt: EventFd,
@@ -681,7 +644,7 @@ pub struct Vmm {
     #[cfg(feature = "guest_debug")]
     vm_debug_evt: EventFd,
     version: VmmVersionInfo,
-    vm: VmOwnership,
+    vm: Option<Vm>,
     vm_config: Option<Arc<Mutex<VmConfig>>>,
     seccomp_action: SeccompAction,
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
@@ -901,7 +864,7 @@ impl Vmm {
             #[cfg(feature = "guest_debug")]
             vm_debug_evt,
             version: vmm_version,
-            vm: VmOwnership::None,
+            vm: None,
             vm_config: None,
             seccomp_action,
             hypervisor,
@@ -1075,10 +1038,9 @@ impl Vmm {
                     Ok(Completed)
                 }
                 Command::Complete => {
-                    let vm = self
-                        .vm
-                        .as_mut()
-                        .expect("VM should have been created by now");
+                    // The unwrap is safe, because the state machine makes sure we called
+                    // vm_receive_state before, which creates the VM.
+                    let vm = self.vm.as_mut().unwrap();
 
                     // Advertise new VM location to network switches.
                     // The thread in background periodically sends multiple messages.
@@ -1329,7 +1291,7 @@ impl Vmm {
             Ok(vm)
         })?;
 
-        self.vm = VmOwnership::Owned(vm);
+        self.vm = Some(vm);
 
         Ok((receive_duration, restore_duration))
     }
@@ -1851,7 +1813,7 @@ impl Vmm {
             Some(prefault),
             Some(memory_restore_mode),
         )?;
-        self.vm = VmOwnership::Owned(vm);
+        self.vm = Some(vm);
 
         if self
             .vm_config
@@ -1866,8 +1828,11 @@ impl Vmm {
         }
 
         // Now we can restore the rest of the VM.
-        // PANIC: won't panic, we just checked that the VM is there.
-        self.vm.as_mut().unwrap().restore()
+        if let Some(ref mut vm) = self.vm {
+            vm.restore()
+        } else {
+            Err(VmError::VmNotCreated)
+        }
     }
 
     fn control_loop(
@@ -1930,7 +1895,7 @@ impl Vmm {
                         }
                     }
                     EpollDispatch::ActivateVirtioDevices => {
-                        if let VmOwnership::Owned(ref vm) = self.vm {
+                        if let Some(ref vm) = self.vm {
                             let count = self.activate_evt.read().map_err(Error::EventFdRead)?;
                             info!("Trying to activate pending virtio devices: count = {count}");
                             vm.activate_virtio_devices()
@@ -1955,7 +1920,7 @@ impl Vmm {
                             // Read from the API receiver channel
                             let gdb_request = gdb_receiver.recv().map_err(Error::GdbRequestRecv)?;
 
-                            let response = if let VmOwnership::Owned(ref mut vm) = self.vm {
+                            let response = if let Some(ref mut vm) = self.vm {
                                 vm.debug_request(&gdb_request.payload, gdb_request.cpu_id)
                             } else {
                                 Err(VmError::VmNotRunning)
@@ -2034,7 +1999,7 @@ impl RequestHandler for Vmm {
             }
 
             // Create a new VM if we don't have one yet.
-            if matches!(&self.vm, VmOwnership::None) {
+            if self.vm.is_none() {
                 let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
                 let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
                 let guest_exit_evt = self
@@ -2071,12 +2036,12 @@ impl RequestHandler for Vmm {
                         None,
                     )?;
 
-                    self.vm = VmOwnership::Owned(vm);
+                    self.vm = Some(vm);
                 }
             }
 
             // Now we can boot the VM.
-            if let VmOwnership::Owned(vm) = &mut self.vm {
+            if let Some(ref mut vm) = self.vm {
                 vm.boot()
             } else {
                 Err(VmError::VmNotCreated)
@@ -2090,51 +2055,51 @@ impl RequestHandler for Vmm {
     }
 
     fn vm_pause(&mut self) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm.pause().map_err(VmError::Pause),
-            VmOwnership::None => Err(VmError::VmNotRunning),
+        if let Some(ref mut vm) = self.vm {
+            vm.pause().map_err(VmError::Pause)
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
     fn vm_resume(&mut self) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm.resume().map_err(VmError::Resume),
-            VmOwnership::None => Err(VmError::VmNotRunning),
+        if let Some(ref mut vm) = self.vm {
+            vm.resume().map_err(VmError::Resume)
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
     fn vm_post_migration_announce(&mut self) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref vm) => {
-                if vm.get_state() != VmState::Running {
-                    return Err(VmError::VmNotRunning);
-                }
-
-                vm.post_migration_announce();
-                Ok(())
+        if let Some(ref vm) = self.vm {
+            if vm.get_state() != VmState::Running {
+                return Err(VmError::VmNotRunning);
             }
-            VmOwnership::None => Err(VmError::VmNotRunning),
+
+            vm.post_migration_announce();
+            Ok(())
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
     fn vm_snapshot(&mut self, destination_url: &str) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                // Drain console_info so that FDs are not reused
-                let _ = self.console_info.take();
-                vm.snapshot()
-                    .map_err(VmError::Snapshot)
-                    .and_then(|snapshot| {
-                        vm.send(&snapshot, destination_url)
-                            .map_err(VmError::SnapshotSend)
-                    })
-            }
-            VmOwnership::None => Err(VmError::VmNotRunning),
+        if let Some(ref mut vm) = self.vm {
+            // Drain console_info so that FDs are not reused
+            let _ = self.console_info.take();
+            vm.snapshot()
+                .map_err(VmError::Snapshot)
+                .and_then(|snapshot| {
+                    vm.send(&snapshot, destination_url)
+                        .map_err(VmError::SnapshotSend)
+                })
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
     fn vm_restore(&mut self, restore_cfg: RestoreConfig) -> result::Result<(), VmError> {
-        if self.vm_config.is_some() || matches!(self.vm, VmOwnership::Owned(_)) {
+        if self.vm.is_some() || self.vm_config.is_some() {
             return Err(VmError::VmAlreadyCreated);
         }
 
@@ -2194,19 +2159,21 @@ impl RequestHandler for Vmm {
 
     #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
     fn vm_coredump(&mut self, destination_url: &str) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                vm.coredump(destination_url).map_err(VmError::Coredump)
-            }
-            VmOwnership::None => Err(VmError::VmNotRunning),
+        if let Some(ref mut vm) = self.vm {
+            vm.coredump(destination_url).map_err(VmError::Coredump)
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
     fn vm_shutdown(&mut self) -> result::Result<(), VmError> {
-        let mut vm = self.vm.take_owned().ok_or(VmError::VmNotRunning)?;
-        // Drain console_info so that the FDs are not reused
-        let _ = self.console_info.take();
-        let r = vm.shutdown();
+        let r = if let Some(ref mut vm) = self.vm.take() {
+            // Drain console_info so that the FDs are not reused
+            let _ = self.console_info.take();
+            vm.shutdown()
+        } else {
+            Err(VmError::VmNotRunning)
+        };
 
         if r.is_ok() {
             event!("vm", "shutdown");
@@ -2218,14 +2185,13 @@ impl RequestHandler for Vmm {
     fn vm_reboot(&mut self) -> result::Result<(), VmError> {
         event!("vm", "rebooting");
 
-        // Drop VM early to release disk locks and free other resources before
-        // we reboot.
-        let config = {
-            let mut vm = self.vm.take_owned().ok_or(VmError::VmNotCreated)?;
+        // First we stop the current VM
+        let config = if let Some(mut vm) = self.vm.take() {
             let config = vm.get_config();
-            // First we stop the current VM
             vm.shutdown()?;
             config
+        } else {
+            return Err(VmError::VmNotCreated);
         };
 
         // vm.shutdown() closes all the console devices, so set console_info to None
@@ -2281,7 +2247,7 @@ impl RequestHandler for Vmm {
         // And we boot it
         vm.boot()?;
 
-        self.vm = VmOwnership::Owned(vm);
+        self.vm = Some(vm);
 
         event!("vm", "rebooted");
 
@@ -2292,14 +2258,14 @@ impl RequestHandler for Vmm {
         match &self.vm_config {
             Some(vm_config) => {
                 let state = match &self.vm {
-                    VmOwnership::Owned(vm) => vm.get_state(),
-                    VmOwnership::None => VmState::Created,
+                    Some(vm) => vm.get_state(),
+                    None => VmState::Created,
                 };
                 let config = vm_config.lock().unwrap().clone();
 
                 let mut memory_actual_size =
                     config.memory.total_size() - config.memory.hotplugged_size();
-                if let VmOwnership::Owned(vm) = &self.vm {
+                if let Some(vm) = &self.vm {
                     memory_actual_size = memory_actual_size.saturating_sub(vm.balloon_size());
                     memory_actual_size += vm.virtio_mem_plugged_size();
                 }
@@ -2339,15 +2305,13 @@ impl RequestHandler for Vmm {
             return Ok(());
         }
 
-        match &self.vm {
-            VmOwnership::Owned(_vm) => {
-                // If a VM is booted, we first try to shut it down.
-                self.vm_shutdown()?;
-            }
-            VmOwnership::None => {}
+        // If a VM is booted, we first try to shut it down.
+        if self.vm.is_some() {
+            self.vm_shutdown()?;
         }
 
         self.vm_config = None;
+
         event!("vm", "deleted");
 
         Ok(())
@@ -2371,63 +2335,59 @@ impl RequestHandler for Vmm {
             todo!("doesn't work currently with our thread-local KVM_RUN approach");
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm
-                .resize(desired_vcpus, desired_ram, desired_balloon)
-                .inspect_err(|e| error!("Error when resizing VM: {e:?}")),
-            VmOwnership::None => {
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                if let Some(desired_vcpus) = desired_vcpus {
-                    config.cpus.boot_vcpus = desired_vcpus;
-                }
-                if let Some(desired_ram) = desired_ram {
-                    config.memory.size = desired_ram;
-                }
-                if let Some(desired_balloon) = desired_balloon
-                    && let Some(balloon_config) = &mut config.balloon
-                {
-                    balloon_config.size = desired_balloon;
-                }
-
-                Ok(())
+        if let Some(ref mut vm) = self.vm {
+            vm.resize(desired_vcpus, desired_ram, desired_balloon)
+                .inspect_err(|e| error!("Error when resizing VM: {e:?}"))?;
+            Ok(())
+        } else {
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            if let Some(desired_vcpus) = desired_vcpus {
+                config.cpus.boot_vcpus = desired_vcpus;
             }
+            if let Some(desired_ram) = desired_ram {
+                config.memory.size = desired_ram;
+            }
+            if let Some(desired_balloon) = desired_balloon
+                && let Some(balloon_config) = &mut config.balloon
+            {
+                balloon_config.size = desired_balloon;
+            }
+            Ok(())
         }
     }
 
     fn vm_resize_disk(&mut self, id: String, desired_size: u64) -> result::Result<(), VmError> {
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm.resize_disk(&id, desired_size),
-            VmOwnership::None => Err(VmError::ResizeDisk),
+        if let Some(ref mut vm) = self.vm {
+            return vm.resize_disk(&id, desired_size);
         }
+
+        Err(VmError::ResizeDisk)
     }
 
     fn vm_resize_zone(&mut self, id: String, desired_ram: u64) -> result::Result<(), VmError> {
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                vm.resize_zone(&id, desired_ram)
-                    .inspect_err(|e| error!("Error when resizing zone: {e:?}"))?;
-                Ok(())
-            }
-            VmOwnership::None => {
-                // Update VmConfig by setting the new desired ram.
-                let memory_config = &mut self.vm_config.as_ref().unwrap().lock().unwrap().memory;
+        if let Some(ref mut vm) = self.vm {
+            vm.resize_zone(&id, desired_ram)
+                .inspect_err(|e| error!("Error when resizing zone: {e:?}"))?;
+            Ok(())
+        } else {
+            // Update VmConfig by setting the new desired ram.
+            let memory_config = &mut self.vm_config.as_ref().unwrap().lock().unwrap().memory;
 
-                if let Some(zones) = &mut memory_config.zones {
-                    for zone in zones.iter_mut() {
-                        if zone.id == id {
-                            zone.size = desired_ram;
-                            return Ok(());
-                        }
+            if let Some(zones) = &mut memory_config.zones {
+                for zone in zones.iter_mut() {
+                    if zone.id == id {
+                        zone.size = desired_ram;
+                        return Ok(());
                     }
                 }
-
-                error!("Could not find the memory zone {id} for the resize");
-                Err(VmError::ResizeZone)
             }
+
+            error!("Could not find the memory zone {id} for the resize");
+            Err(VmError::ResizeZone)
         }
     }
 
@@ -2444,21 +2404,18 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_device(device_cfg).inspect_err(|e| {
-                    error!("Error when adding new device to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.devices, device_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_device(device_cfg).inspect_err(|e| {
+                error!("Error when adding new device to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.devices, device_cfg);
+            Ok(None)
         }
     }
 
@@ -2475,43 +2432,35 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_user_device(device_cfg).inspect_err(|e| {
-                    error!("Error when adding new user device to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.user_devices, device_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_user_device(device_cfg).inspect_err(|e| {
+                error!("Error when adding new user device to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.user_devices, device_cfg);
+            Ok(None)
         }
     }
 
     fn vm_remove_device(&mut self, id: String) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                vm.remove_device(&id)
-                    .inspect_err(|e| error!("Error when removing device from the VM: {e:?}"))?;
+        if let Some(ref mut vm) = self.vm {
+            vm.remove_device(&id)
+                .inspect_err(|e| error!("Error when removing device from the VM: {e:?}"))?;
+            Ok(())
+        } else if let Some(ref config) = self.vm_config {
+            let mut config = config.lock().unwrap();
+            if config.remove_device(&id) {
                 Ok(())
+            } else {
+                Err(VmError::NoDeviceToRemove(id))
             }
-            VmOwnership::None => {
-                if let Some(ref config) = self.vm_config {
-                    let mut config = config.lock().unwrap();
-                    if config.remove_device(&id) {
-                        Ok(())
-                    } else {
-                        Err(VmError::NoDeviceToRemove(id))
-                    }
-                } else {
-                    Err(VmError::VmNotCreated)
-                }
-            }
+        } else {
+            Err(VmError::VmNotCreated)
         }
     }
 
@@ -2525,21 +2474,18 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_disk(disk_cfg).inspect_err(|e| {
-                    error!("Error when adding new disk to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.disks, disk_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_disk(disk_cfg).inspect_err(|e| {
+                error!("Error when adding new disk to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.disks, disk_cfg);
+            Ok(None)
         }
     }
 
@@ -2553,21 +2499,18 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_fs(fs_cfg).inspect_err(|e| {
-                    error!("Error when adding new fs to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.fs, fs_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_fs(fs_cfg).inspect_err(|e| {
+                error!("Error when adding new fs to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.fs, fs_cfg);
+            Ok(None)
         }
     }
 
@@ -2587,23 +2530,20 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm
-                    .add_generic_vhost_user(generic_vhost_user_cfg)
-                    .inspect_err(|e| {
-                        error!("Error when adding new generic vhost-user device to the VM: {e:?}");
-                    })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.generic_vhost_user, generic_vhost_user_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm
+                .add_generic_vhost_user(generic_vhost_user_cfg)
+                .inspect_err(|e| {
+                    error!("Error when adding new generic vhost-user device to the VM: {e:?}");
+                })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.generic_vhost_user, generic_vhost_user_cfg);
+            Ok(None)
         }
     }
 
@@ -2617,21 +2557,18 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_pmem(pmem_cfg).inspect_err(|e| {
-                    error!("Error when adding new pmem device to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.pmem, pmem_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_pmem(pmem_cfg).inspect_err(|e| {
+                error!("Error when adding new pmem device to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.pmem, pmem_cfg);
+            Ok(None)
         }
     }
 
@@ -2645,21 +2582,18 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_net(net_cfg).inspect_err(|e| {
-                    error!("Error when adding new network device to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.net, net_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_net(net_cfg).inspect_err(|e| {
+                error!("Error when adding new network device to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.net, net_cfg);
+            Ok(None)
         }
     }
 
@@ -2673,21 +2607,18 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_vdpa(vdpa_cfg).inspect_err(|e| {
-                    error!("Error when adding new vDPA device to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                add_to_config(&mut config.vdpa, vdpa_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_vdpa(vdpa_cfg).inspect_err(|e| {
+                error!("Error when adding new vDPA device to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.vdpa, vdpa_cfg);
+            Ok(None)
         }
     }
 
@@ -2706,49 +2637,47 @@ impl RequestHandler for Vmm {
             config.validate().map_err(VmError::ConfigValidation)?;
         }
 
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.add_vsock(vsock_cfg).inspect_err(|e| {
-                    error!("Error when adding new vsock device to the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => {
-                // Update VmConfig by adding the new device.
-                let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                config.vsock = Some(vsock_cfg);
-                Ok(None)
-            }
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_vsock(vsock_cfg).inspect_err(|e| {
+                error!("Error when adding new vsock device to the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            config.vsock = Some(vsock_cfg);
+            Ok(None)
         }
     }
 
     fn vm_counters(&mut self) -> result::Result<Option<Vec<u8>>, VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => {
-                let info = vm.counters().inspect_err(|e| {
-                    error!("Error when getting counters from the VM: {e:?}");
-                })?;
-                serde_json::to_vec(&info)
-                    .map(Some)
-                    .map_err(VmError::SerializeJson)
-            }
-            VmOwnership::None => Err(VmError::VmNotRunning),
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.counters().inspect_err(|e| {
+                error!("Error when getting counters from the VM: {e:?}");
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
     fn vm_power_button(&mut self) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm.power_button(),
-            VmOwnership::None => Err(VmError::VmNotRunning),
+        if let Some(ref mut vm) = self.vm {
+            vm.power_button()
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
     fn vm_nmi(&mut self) -> result::Result<(), VmError> {
-        match self.vm {
-            VmOwnership::Owned(ref mut vm) => vm.nmi(),
-            VmOwnership::None => Err(VmError::VmNotRunning),
+        if let Some(ref mut vm) = self.vm {
+            vm.nmi()
+        } else {
+            Err(VmError::VmNotRunning)
         }
     }
 
@@ -2820,7 +2749,7 @@ impl RequestHandler for Vmm {
 
         if matches!(res, Err(_) | Ok(ReceiveMigrationState::Aborted)) {
             event!("vm", "migration-receive-failed");
-            self.vm = VmOwnership::None;
+            self.vm = None;
             self.vm_config = None;
             return match res {
                 Ok(_) => Err(MigratableError::CompleteMigration(anyhow!(
