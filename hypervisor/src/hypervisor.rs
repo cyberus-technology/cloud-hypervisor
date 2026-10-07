@@ -14,9 +14,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::{
-    AmxGuestSupportError, CpuIdEntry, MsrEntry, amx_supported, request_guest_amx_support,
-};
+use crate::arch::x86::CpuIdEntry;
 #[cfg(target_arch = "x86_64")]
 use crate::cpu::CpuVendor;
 #[cfg(feature = "tdx")]
@@ -103,16 +101,6 @@ pub enum HypervisorError {
     ///
     #[error("Failed to retrieve SEV-SNP capabilities:{0}")]
     SevSnpCapabilities(#[source] anyhow::Error),
-    ///
-    /// Unable to read the requested feature MSRs
-    ///
-    #[error("Failed to get feature MSRs")]
-    GetFeatureMsrs(#[source] anyhow::Error),
-    ///
-    /// Unable to read all feature MSRs advertised by the Hypervisor
-    ///
-    #[error("Unable to read all feature MSRs")]
-    GetFeatureMsrsPartial,
 }
 
 ///
@@ -140,11 +128,6 @@ pub trait Hypervisor: Send + Sync {
     /// Get the supported CpuID
     ///
     fn get_supported_cpuid(&self) -> Result<Vec<CpuIdEntry>>;
-    #[cfg(target_arch = "x86_64")]
-    ///
-    /// Get feature MSRs supported by the hardware and hypervisor
-    ///
-    fn get_feature_msrs(&self) -> Result<Vec<MsrEntry>>;
     ///
     /// Check particular extensions if any
     ///
