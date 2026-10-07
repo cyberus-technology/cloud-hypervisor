@@ -1924,17 +1924,27 @@ impl Vmm {
                 )));
             }
 
-            let amx = vm_config.lock().unwrap().cpus.features.amx;
-            let phys_bits =
-                vm::physical_bits(hypervisor, vm_config.lock().unwrap().cpus.max_phys_bits);
+            let (amx, phys_bits, profile, kvm_hyperv) = {
+                let guard = vm_config.lock().unwrap();
+                let amx = guard.cpus.features.amx;
+                let max_phys_bits = guard.cpus.max_phys_bits;
+                let profile = guard.cpus.profile;
+                let kvm_hyperv = guard.cpus.kvm_hyperv;
+                // Drop lock before function call
+                core::mem::drop(guard);
+                let phys_bits = vm::physical_bits(hypervisor, max_phys_bits);
+                (amx, phys_bits, profile, kvm_hyperv)
+            };
+
             arch::generate_common_cpuid(
                 hypervisor,
                 &arch::CpuidConfig {
                     phys_bits,
-                    kvm_hyperv: vm_config.lock().unwrap().cpus.kvm_hyperv,
+                    kvm_hyperv,
                     #[cfg(feature = "tdx")]
                     tdx: false,
                     amx,
+                    profile,
                 },
             )
             .context("Error generating common cpuid")
@@ -2118,6 +2128,7 @@ impl Vmm {
                     #[cfg(feature = "tdx")]
                     tdx: false,
                     amx: vm_config.cpus.features.amx,
+                    profile: vm_config.cpus.profile,
                 },
             )
             .context("Error generating common cpuid")
@@ -3491,6 +3502,10 @@ const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
 
 #[cfg(test)]
 mod unit_tests {
+    use std::path::PathBuf;
+
+    use arch::CpuProfile;
+
     use super::*;
     #[cfg(target_arch = "x86_64")]
     use crate::vm_config::DebugConsoleConfig;
@@ -3499,7 +3514,6 @@ mod unit_tests {
         CpusConfig, HotplugMethod, MemoryConfig, PayloadConfig, PciDeviceCommonConfig, RngConfig,
         SerialConfig,
     };
-    use std::path::PathBuf;
 
     fn create_dummy_vmm() -> Vmm {
         Vmm::new(
@@ -3529,6 +3543,7 @@ mod unit_tests {
                 features: CpuFeatures::default(),
                 nested: true,
                 core_scheduling: CoreScheduling::default(),
+                profile: CpuProfile::default(),
             },
             memory: MemoryConfig {
                 size: 536_870_912,
