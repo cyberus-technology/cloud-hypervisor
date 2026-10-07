@@ -107,7 +107,10 @@ epoll = "4.4.0"
 flate2 = "1.1.9"
 flume = "0.12.0"
 itertools = "0.14.0"
-jiff = { version = "0.2", default-features = false, features = ["std"] }
+jiff = { version = "0.2.23", default-features = false, features = [
+  "std",
+  "tz-system",
+] }
 libc = "0.2.186"
 log = "0.4.29"
 rustls = { version = "0.23.38", default-features = false, features = [
