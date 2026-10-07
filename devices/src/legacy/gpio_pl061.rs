@@ -255,15 +255,16 @@ impl Gpio {
 
 impl BusDevice for Gpio {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+        let value;
         let mut read_ok = true;
 
-        let value = if (GPIO_ID_LOW..GPIO_ID_HIGH).contains(&offset) {
+        if (GPIO_ID_LOW..GPIO_ID_HIGH).contains(&offset) {
             let index = ((offset - GPIO_ID_LOW) >> 2) as usize;
-            u32::from(GPIO_ID[index])
+            value = u32::from(GPIO_ID[index]);
         } else if offset < OFS_DATA {
-            self.data & ((offset >> 2) as u32)
+            value = self.data & ((offset >> 2) as u32);
         } else {
-            match offset {
+            value = match offset {
                 GPIODIR => self.dir,
                 GPIOIS => self.isense,
                 GPIOIBE => self.ibe,
@@ -276,8 +277,8 @@ impl BusDevice for Gpio {
                     read_ok = false;
                     0
                 }
-            }
-        };
+            };
+        }
 
         if read_ok && data.len() <= 4 {
             write_le_u32(data, value);
