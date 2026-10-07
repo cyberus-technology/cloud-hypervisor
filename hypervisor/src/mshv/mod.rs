@@ -395,10 +395,6 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         Ok(cpuid)
     }
 
-    fn get_supported_msrs(&self) -> hypervisor::Result<Vec<MsrEntry>> {
-        todo!()
-    }
-
     /// Get maximum number of vCPUs
     fn get_max_vcpus(&self) -> u32 {
         // TODO: Using HV_MAXIMUM_PROCESSORS would be better
@@ -1942,7 +1938,6 @@ impl vm::Vm for MshvVm {
         &self,
         id: u32,
         vm_ops: Option<Arc<dyn VmOps>>,
-        #[cfg(target_arch = "x86_64")] _msrs: Vec<MsrEntry>,
     ) -> vm::Result<Box<dyn cpu::Vcpu>> {
         let id: u8 = id.try_into().unwrap();
         let vcpu_fd = self

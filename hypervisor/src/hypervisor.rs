@@ -16,8 +16,6 @@ use thiserror::Error;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::CpuIdEntry;
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::MsrEntry;
-#[cfg(target_arch = "x86_64")]
 use crate::cpu::CpuVendor;
 #[cfg(feature = "tdx")]
 use crate::kvm::TdxCapabilities;
@@ -130,9 +128,6 @@ pub trait Hypervisor: Send + Sync {
     /// Get the supported CpuID
     ///
     fn get_supported_cpuid(&self) -> Result<Vec<CpuIdEntry>>;
-    /// Get the supported MSRs.
-    #[cfg(target_arch = "x86_64")]
-    fn get_supported_msrs(&self) -> Result<Vec<MsrEntry>>;
     ///
     /// Check particular extensions if any
     ///
