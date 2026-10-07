@@ -2981,7 +2981,7 @@ impl RequestHandler for Vmm {
 
         let mut state = ReceiveMigrationState::Established;
 
-        let res: result::Result<ReceiveMigrationState, MigratableError> = loop {
+        while !state.finished() {
             let req = Request::read_from(&mut socket)?;
             trace!("Command {:?} received", req.command());
 
@@ -2989,45 +2989,36 @@ impl RequestHandler for Vmm {
                 continue;
             }
 
-            let (response, new_state, mut maybe_error) = match self.vm_receive_migration_step(
+            let (response, new_state) = match self.vm_receive_migration_step(
                 &mut socket,
                 &listener,
                 state,
                 &req,
                 &receive_data_migration,
             ) {
-                Ok(next_state) => (Response::ok(), next_state, None),
+                Ok(next_state) => (Response::ok(), next_state),
                 Err(err) => {
                     warn!(
                         "Migration aborted as migration command {:?} failed: {}",
                         req.command(),
                         err
                     );
-                    (Response::error(), ReceiveMigrationState::Aborted, Some(err))
+                    (Response::error(), ReceiveMigrationState::Aborted)
                 }
             };
 
             state = new_state;
             assert_eq!(response.length(), 0);
             response.write_to(&mut socket)?;
+        }
 
-            if maybe_error.is_some() {
-                break Err(maybe_error.take().unwrap());
-            } else if state.finished() {
-                break Ok(state);
-            }
-        };
-
-        if matches!(res, Err(_) | Ok(ReceiveMigrationState::Aborted)) {
+        if let ReceiveMigrationState::Aborted = state {
             event!("vm", "migration-receive-failed");
             self.vm = MaybeVmOwnership::None;
             self.vm_config = None;
-            return match res {
-                Ok(_) => Err(MigratableError::CompleteMigration(anyhow!(
-                    "Migration was aborted by sender"
-                ))),
-                Err(e) => Err(MigratableError::CompleteMigration(e.into())),
-            };
+            return Err(MigratableError::CompleteMigration(anyhow!(
+                "Migration was aborted"
+            )));
         }
         event!("vm", "migration-receive-finished");
         Ok(())
