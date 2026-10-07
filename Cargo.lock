@@ -655,7 +655,6 @@ dependencies = [
  "serde",
  "thiserror",
  "tpm",
- "uuid",
  "vm-allocator",
  "vm-device",
  "vm-memory",
