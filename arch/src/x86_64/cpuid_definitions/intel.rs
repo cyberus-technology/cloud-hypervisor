@@ -1417,19 +1417,18 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     bits_range: (2, 2),
                     policy: ProfilePolicy::Inherit,
                 },
-                // TODO: This is however set by QEMU for CPU models from what we can tell?
+                // Also set by QEMU for CPU models from what we can tell
                 ValueDefinition {
                     short: "pku",
                     description: "Protection keys for user-space",
                     bits_range: (3, 3),
-                    policy: ProfilePolicy::Static(0),
+                    policy: ProfilePolicy::Inherit,
                 },
-                // NOTE: This field is mutable in principle and can be changed by the OS (TODO: Under which circumstances?)
                 ValueDefinition {
                     short: "ospke",
                     description: "OS protection keys enable",
                     bits_range: (4, 4),
-                    policy: ProfilePolicy::Static(0),
+                    policy: ProfilePolicy::Passthrough,
                 },
                 // TODO: Revisit this decision. Setting this to 0 for now in order to be compatible with QEMU
                 ValueDefinition {
