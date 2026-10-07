@@ -1167,13 +1167,6 @@ pub(crate) fn receive_memory_ranges(
                         "Error receiving memory from socket: {e}"
                     ))
                 })?;
-
-            // EOF: Don't spin forever on closed connection
-            if bytes_read == 0 {
-                return Err(MigratableError::MigrateReceive(anyhow!(
-                    "Connection closed while receiving memory: EOF"
-                )));
-            }
             offset += bytes_read as u64;
 
             if offset == range.length {
