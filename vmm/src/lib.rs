@@ -1456,7 +1456,6 @@ impl Vmm {
         is_converged: impl Fn(&MemoryMigrationContext) -> result::Result<bool, MigratableError>,
         mem_send: &mut SendAdditionalConnections,
         postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
-        cancel_migration: &AtomicBool,
     ) -> result::Result<MemoryRangeTable /* remaining */, MigratableError> {
         let total_memory_size_bytes = vm
             .memory_range_table()?
@@ -1527,7 +1526,7 @@ impl Vmm {
 
             // Send the current dirty pages
             let transfer_begin = Instant::now();
-            mem_send.send_memory(iteration_table, socket, cancel_migration)?;
+            mem_send.send_memory(iteration_table, socket)?;
             let transfer_duration = transfer_begin.elapsed();
             ctx.update_metrics_after_transfer(transfer_begin, transfer_duration);
 
@@ -1665,7 +1664,6 @@ impl Vmm {
         mem_send: &mut SendAdditionalConnections,
         ctx: &mut OngoingMigrationContext,
         postponed_lifecycle_event: &Mutex<Option<PostponedLifecycleEvent>>,
-        cancel_migration: &AtomicBool,
     ) -> result::Result<(), MigratableError> {
         let mut mem_ctx = MemoryMigrationContext::new();
 
@@ -1678,7 +1676,6 @@ impl Vmm {
             |ctx| Self::is_precopy_converged(ctx, send_data_migration),
             mem_send,
             postponed_lifecycle_event,
-            cancel_migration,
         );
         let downtime_begin = Instant::now();
         // End throttle thread
@@ -1704,7 +1701,7 @@ impl Vmm {
 
             mem_ctx.update_metrics_before_transfer(iteration_begin, &final_table);
             let transfer_begin = Instant::now();
-            mem_send.send_memory(final_table, socket, cancel_migration)?;
+            mem_send.send_memory(final_table, socket)?;
             let transfer_duration = transfer_begin.elapsed();
             mem_ctx.update_metrics_after_transfer(transfer_begin, transfer_duration);
             mem_ctx.iteration += 1;
@@ -1849,7 +1846,6 @@ impl Vmm {
                 send_data_migration.connections,
                 send_data_migration.tls_dir.as_deref(),
                 &vm.guest_memory(),
-                cancel_migration,
             )?;
 
             Self::do_memory_migration(
@@ -1859,7 +1855,6 @@ impl Vmm {
                 &mut mem_send,
                 &mut ctx,
                 postponed_lifecycle_event,
-                cancel_migration,
             )
             .inspect_err(|_| {
                 // Calling cleanup multiple times is fine, thus here we just make sure
