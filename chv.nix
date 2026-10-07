@@ -62,7 +62,7 @@ let
       # Don't execute tests here. Too expensive for local development with
       # frequent rebuilds + little benefit.
       doCheck = false;
-      cargoExtraArgs = "--features 'kvm fw_cfg'";
+      cargoExtraArgs = "--features kvm";
     }
   );
 in
