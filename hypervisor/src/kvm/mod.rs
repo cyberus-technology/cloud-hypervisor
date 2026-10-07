@@ -3522,10 +3522,6 @@ impl cpu::Vcpu for KvmVcpu {
 
         Ok(())
     }
-
-    fn hypervisor_type(&self) -> HypervisorType {
-        HypervisorType::Kvm
-    }
 }
 
 impl KvmVcpu {
