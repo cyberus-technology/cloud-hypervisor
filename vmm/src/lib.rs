@@ -21,7 +21,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 #[cfg(not(target_arch = "riscv64"))]
@@ -71,7 +71,6 @@ use crate::config::{MemoryRestoreMode, RestoreConfig, add_to_config};
 use crate::coredump::GuestDebuggable;
 #[cfg(feature = "kvm")]
 use crate::cpu::IS_IN_SHUTDOWN;
-use crate::device_manager::DeviceManager;
 use crate::landlock::Landlock;
 use crate::memory_manager::MemoryManager;
 use crate::migration::{get_vm_snapshot, recv_vm_config, recv_vm_state};
@@ -782,40 +781,13 @@ pub struct VmmThreadHandle {
     pub http_api_handle: Option<HttpApiHandle>,
 }
 
-struct MigrationVmState {
-    // The migration worker owns the VM during migration, so this should stop
-    // working once that VM has been dropped.
-    device_manager: Weak<Mutex<DeviceManager>>,
-}
-
-impl MigrationVmState {
-    fn new(vm: &Vm) -> Self {
-        Self {
-            device_manager: Arc::downgrade(vm.device_manager()),
-        }
-    }
-
-    fn activate_virtio_devices(&self) -> result::Result<(), VmError> {
-        self.device_manager
-            .upgrade()
-            .expect("device manager should remain alive during migration")
-            .lock()
-            .unwrap()
-            .activate_virtio_devices()
-            .map_err(VmError::ActivateVirtioDevices)
-    }
-}
-
 /// Describes the current ownership of a running VM.
 #[allow(clippy::large_enum_variant)]
-enum MaybeVmOwnership {
+pub enum MaybeVmOwnership {
     /// The VMM holds the ownership of the VM.
     Vmm(Vm),
     /// The VM is temporarily blocked by the current ongoing migration.
-    ///
-    /// We still keep the device manager reachable so the epoll thread can
-    /// drain pending virtio activations while the migration worker owns the VM.
-    Migration(MigrationVmState),
+    Migration,
     /// No VM is running.
     None,
 }
@@ -826,12 +798,13 @@ impl MaybeVmOwnership {
     /// # Panics
     /// This method panics if `self` is not [`Self::Vmm`].
     fn take_vm_for_migration(&mut self) -> Vm {
-        match mem::replace(self, Self::None) {
-            Self::Vmm(vm) => {
-                *self = Self::Migration(MigrationVmState::new(&vm));
-                vm
-            }
-            _ => panic!("should only be called when a migration can start"),
+        if !matches!(self, Self::Vmm(_)) {
+            panic!("should only be called when a migration can start");
+        }
+
+        match mem::replace(self, Self::Migration) {
+            MaybeVmOwnership::Vmm(vm) => vm,
+            _ => unreachable!(),
         }
     }
 
@@ -2106,7 +2079,7 @@ impl Vmm {
         prefault: bool,
         memory_restore_mode: MemoryRestoreMode,
     ) -> std::result::Result<(), VmError> {
-        if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
+        if matches!(self.vm, MaybeVmOwnership::Migration) {
             return Err(VmError::VmMigrating);
         }
 
@@ -2372,7 +2345,7 @@ impl Vmm {
                         // Consume the event.
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
                         // Workaround for guest-induced shutdown during a live-migration.
-                        if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
+                        if matches!(self.vm, MaybeVmOwnership::Migration) {
                             self.postpone_lifecycle_event_during_migration(
                                 PostMigrationLifecycleEvent::VmReboot,
                             );
@@ -2384,7 +2357,7 @@ impl Vmm {
                         info!("VM guest exit event");
                         self.guest_exit_evt.read().map_err(Error::EventFdRead)?;
                         // Workaround for guest-induced shutdown during a live-migration.
-                        if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
+                        if matches!(self.vm, MaybeVmOwnership::Migration) {
                             self.postpone_lifecycle_event_during_migration(
                                 PostMigrationLifecycleEvent::VmShutdown,
                             );
@@ -2398,18 +2371,11 @@ impl Vmm {
                         }
                     }
                     EpollDispatch::ActivateVirtioDevices => {
-                        let count = self.activate_evt.read().map_err(Error::EventFdRead)?;
-                        info!("Trying to activate pending virtio devices: count = {count}");
-                        match &self.vm {
-                            MaybeVmOwnership::Vmm(vm) => vm
-                                .activate_virtio_devices()
-                                .map_err(Error::ActivateVirtioDevices)?,
-                            MaybeVmOwnership::Migration(state) => {
-                                state
-                                    .activate_virtio_devices()
-                                    .map_err(Error::ActivateVirtioDevices)?;
-                            }
-                            MaybeVmOwnership::None => {}
+                        if let MaybeVmOwnership::Vmm(ref vm) = self.vm {
+                            let count = self.activate_evt.read().map_err(Error::EventFdRead)?;
+                            info!("Trying to activate pending virtio devices: count = {count}");
+                            vm.activate_virtio_devices()
+                                .map_err(Error::ActivateVirtioDevices)?;
                         }
                     }
                     EpollDispatch::Api => {
@@ -2504,7 +2470,7 @@ impl RequestHandler for Vmm {
         info!("Booting VM");
         event!("vm", "booting");
 
-        if matches!(self.vm, MaybeVmOwnership::Migration(_)) {
+        if matches!(self.vm, MaybeVmOwnership::Migration) {
             return Err(VmError::VmMigrating);
         }
 
@@ -2569,7 +2535,7 @@ impl RequestHandler for Vmm {
     fn vm_pause(&mut self) -> result::Result<(), VmError> {
         match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => vm.pause().map_err(VmError::Pause),
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating)?,
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating)?,
             MaybeVmOwnership::None => Err(VmError::VmNotRunning)?,
         }
     }
@@ -2577,7 +2543,7 @@ impl RequestHandler for Vmm {
     fn vm_resume(&mut self) -> result::Result<(), VmError> {
         match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => vm.resume().map_err(VmError::Resume),
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating)?,
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating)?,
             MaybeVmOwnership::None => Err(VmError::VmNotRunning)?,
         }
     }
@@ -2594,7 +2560,7 @@ impl RequestHandler for Vmm {
                             .map_err(VmError::SnapshotSend)
                     })
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating)?,
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating)?,
             MaybeVmOwnership::None => Err(VmError::VmNotRunning)?,
         }
     }
@@ -2602,7 +2568,7 @@ impl RequestHandler for Vmm {
     fn vm_restore(&mut self, restore_cfg: RestoreConfig) -> result::Result<(), VmError> {
         match &self.vm {
             MaybeVmOwnership::Vmm(_vm) => return Err(VmError::VmAlreadyCreated),
-            MaybeVmOwnership::Migration(_) => return Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => return Err(VmError::VmMigrating),
             MaybeVmOwnership::None => (),
         }
 
@@ -2670,7 +2636,7 @@ impl RequestHandler for Vmm {
             MaybeVmOwnership::Vmm(ref mut vm) => {
                 vm.coredump(destination_url).map_err(VmError::Coredump)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => Err(VmError::VmNotRunning),
         }
     }
@@ -2678,7 +2644,7 @@ impl RequestHandler for Vmm {
     fn vm_shutdown(&mut self) -> result::Result<(), VmError> {
         let vm = match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => vm,
-            MaybeVmOwnership::Migration(_) => return Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => return Err(VmError::VmMigrating),
             MaybeVmOwnership::None => return Err(VmError::VmNotRunning),
         };
         // Drain console_info so that the FDs are not reused
@@ -2699,7 +2665,7 @@ impl RequestHandler for Vmm {
         // First we stop the current VM
         let vm = match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => vm,
-            MaybeVmOwnership::Migration(_) => return Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => return Err(VmError::VmMigrating),
             MaybeVmOwnership::None => return Err(VmError::VmNotRunning),
         };
         let config = vm.get_config();
@@ -2773,7 +2739,7 @@ impl RequestHandler for Vmm {
         let state = match &self.vm {
             MaybeVmOwnership::Vmm(vm) => vm.get_state(),
             // TODO in theory one could live-migrate a non-running VM ..
-            MaybeVmOwnership::Migration(_) => VmState::Running,
+            MaybeVmOwnership::Migration => VmState::Running,
             MaybeVmOwnership::None => VmState::Created,
         };
 
@@ -2784,14 +2750,14 @@ impl RequestHandler for Vmm {
                 memory_actual_size = memory_actual_size.saturating_sub(vm.balloon_size());
                 memory_actual_size += vm.virtio_mem_plugged_size();
             }
-            MaybeVmOwnership::Migration(_) => {}
+            MaybeVmOwnership::Migration => {}
             MaybeVmOwnership::None => {}
         }
 
         let device_tree = match &self.vm {
             MaybeVmOwnership::Vmm(vm) => Some(vm.device_tree().lock().unwrap().clone()),
             // TODO we need to fix this
-            MaybeVmOwnership::Migration(_) => None,
+            MaybeVmOwnership::Migration => None,
             MaybeVmOwnership::None => None,
         };
 
@@ -2833,7 +2799,7 @@ impl RequestHandler for Vmm {
             MaybeVmOwnership::None => {
                 self.vm_config = None;
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating)?,
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating)?,
         }
 
         Ok(())
@@ -2863,7 +2829,7 @@ impl RequestHandler for Vmm {
                     .inspect_err(|e| error!("Error when resizing VM: {e:?}"))?;
                 Ok(())
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
                 if let Some(desired_vcpus) = desired_vcpus {
@@ -2896,7 +2862,7 @@ impl RequestHandler for Vmm {
                     Ok(())
                 }
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => Err(VmError::ResizeDisk),
         }
     }
@@ -2910,7 +2876,7 @@ impl RequestHandler for Vmm {
                     .inspect_err(|e| error!("Error when resizing zone: {e:?}"))?;
                 Ok(())
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by setting the new desired ram.
                 let memory_config = &mut self.vm_config.as_ref().unwrap().lock().unwrap().memory;
@@ -2952,7 +2918,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -2984,7 +2950,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -3001,7 +2967,7 @@ impl RequestHandler for Vmm {
                     .inspect_err(|e| error!("Error when removing device from the VM: {e:?}"))?;
                 Ok(())
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 if let Some(ref config) = self.vm_config {
                     let mut config = config.lock().unwrap();
@@ -3036,7 +3002,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -3065,7 +3031,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -3103,7 +3069,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -3132,7 +3098,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -3161,7 +3127,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -3195,7 +3161,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => {
                 // Update VmConfig by adding the new device.
                 let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
@@ -3215,7 +3181,7 @@ impl RequestHandler for Vmm {
                     .map(Some)
                     .map_err(VmError::SerializeJson)
             }
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => Err(VmError::VmNotRunning),
         }
     }
@@ -3223,7 +3189,7 @@ impl RequestHandler for Vmm {
     fn vm_power_button(&mut self) -> result::Result<(), VmError> {
         match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => vm.power_button(),
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => Err(VmError::VmNotRunning),
         }
     }
@@ -3231,7 +3197,7 @@ impl RequestHandler for Vmm {
     fn vm_nmi(&mut self) -> result::Result<(), VmError> {
         match self.vm {
             MaybeVmOwnership::Vmm(ref mut vm) => vm.nmi(),
-            MaybeVmOwnership::Migration(_) => Err(VmError::VmMigrating),
+            MaybeVmOwnership::Migration => Err(VmError::VmMigrating),
             MaybeVmOwnership::None => Err(VmError::VmNotRunning),
         }
     }
@@ -3337,7 +3303,7 @@ impl RequestHandler for Vmm {
 
         match self.vm {
             MaybeVmOwnership::Vmm(_) => (),
-            MaybeVmOwnership::Migration(_) => {
+            MaybeVmOwnership::Migration => {
                 return Err(MigratableError::MigrateSend(anyhow!(
                     "There is already an ongoing migration"
                 )));
@@ -3449,7 +3415,7 @@ impl RequestHandler for Vmm {
 
     fn vm_cancel_migration(&mut self) -> result::Result<(), MigratableError> {
         match self.vm {
-            MaybeVmOwnership::Migration(_) => (),
+            MaybeVmOwnership::Migration => (),
             _ => {
                 return Err(MigratableError::CancelMigration(anyhow!(
                     "There is no ongoing migration"
