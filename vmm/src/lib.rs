@@ -1610,7 +1610,7 @@ impl Vmm {
                     MigrationStateOngoingPhase::MemoryPrecopy,
                     Some(MemoryTransmissionInfo {
                         memory_iteration: s.iteration as u64,
-                        memory_transmission_bps: s.current_iteration_total_bytes,
+                        memory_transmission_bps: s.bandwidth_bytes_per_second as u64,
                         memory_bytes_total: total_memory_size_bytes,
                         memory_bytes_transmitted: s.total_sent_bytes,
                         memory_pages_4k_transmitted: s.total_sent_bytes.div_ceil(PAGE_SIZE as u64),
