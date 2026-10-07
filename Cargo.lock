@@ -373,7 +373,6 @@ dependencies = [
  "byteorder",
  "cfg-if",
  "crc-any",
- "event_monitor",
  "flate2",
  "io-uring",
  "libc",
