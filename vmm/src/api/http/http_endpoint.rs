@@ -509,8 +509,7 @@ vm_action_put_handler_body!(VmDiskMirrorStart, |error| {
             | DeviceManagerError::BlockMirrorStart(
                 MirrorError::DeviceNotActive
                 | MirrorError::DevicePaused
-                | MirrorError::DestinationSizeMismatch { .. }
-                | MirrorError::DestinationLock { .. },
+                | MirrorError::DestinationSizeMismatch { .. },
             ) => return HttpError::BadRequestWithApiError(error),
             _ => {}
         }
@@ -537,12 +536,7 @@ vm_action_put_handler_body!(VmDiskMirrorComplete, |error| match &error {
         DeviceManagerError::BlockMirrorComplete(MirrorError::NotActive),
     )) => HttpError::NotFoundWithApiError(error),
     ApiError::VmDiskMirrorComplete(VmError::DeviceManager(
-        DeviceManagerError::BlockMirrorComplete(
-            MirrorError::DestinationChanged { .. }
-            | MirrorError::DestinationLock { .. }
-            | MirrorError::DevicePaused
-            | MirrorError::NotReady,
-        ),
+        DeviceManagerError::BlockMirrorComplete(MirrorError::DevicePaused | MirrorError::NotReady),
     )) => HttpError::BadRequestWithApiError(error),
     _ => HttpError::ApiError(error),
 });
