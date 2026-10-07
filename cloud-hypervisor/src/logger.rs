@@ -8,7 +8,6 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use jiff::tz::TimeZone;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -186,9 +185,6 @@ pub struct Logger {
     start: Instant,
     pid: u32,
     tokens: Vec<Token>,
-    // Saving the timezone when Logger is constructed avoids potential seccomp violations when the
-    // internal libc timezone cache expires as the affected thread is unpredictable.
-    local_tz: TimeZone,
 }
 
 impl Logger {
@@ -198,7 +194,6 @@ impl Logger {
             start: Instant::now(),
             pid: std::process::id(),
             tokens: parse_format(format)?,
-            local_tz: TimeZone::try_system().unwrap_or(TimeZone::UTC),
         })
     }
 }
@@ -237,9 +232,7 @@ impl log::Log for Logger {
                     write!(&mut *out, "{}", zoned.strftime("%m%d %H:%M:%S%.6f"))
                 }
                 Token::LocalGlog => {
-                    let zoned = zoned_local.get_or_insert_with(|| {
-                        jiff::Timestamp::now().to_zoned(self.local_tz.clone())
-                    });
+                    let zoned = zoned_local.get_or_insert_with(jiff::Zoned::now);
                     write!(&mut *out, "{}", zoned.strftime("%m%d %H:%M:%S%.6f"))
                 }
                 Token::Pid => write!(&mut *out, "{}", self.pid),
@@ -262,9 +255,7 @@ impl log::Log for Logger {
                         Zone::Utc => zoned_utc.get_or_insert_with(|| {
                             jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC)
                         }),
-                        Zone::Local => zoned_local.get_or_insert_with(|| {
-                            jiff::Timestamp::now().to_zoned(self.local_tz.clone())
-                        }),
+                        Zone::Local => zoned_local.get_or_insert_with(jiff::Zoned::now),
                     };
                     write_time_field(&mut *out, *field, zoned)
                 }
