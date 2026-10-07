@@ -10,7 +10,7 @@ use std::{mem, result};
 
 use hypervisor::arch::x86::gdt::{gdt_entry, segment_from_gdt};
 use hypervisor::arch::x86::regs::CR0_PE;
-use hypervisor::arch::x86::{FpuState, MsrEntry, SpecialRegisters};
+use hypervisor::arch::x86::{FpuState, SpecialRegisters};
 use thiserror::Error;
 use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError};
 
@@ -33,8 +33,6 @@ pub enum Error {
     /// Setting up MSRs failed.
     #[error("Setting up MSRs failed")]
     SetModelSpecificRegisters(#[source] hypervisor::HypervisorCpuError),
-    #[error("Setting up MSRs failed: Not all MSRs could be set. See logs for more info.")]
-    SetModelSpecificRegistersPartial,
     /// Failed to set SREGs for this CPU.
     #[error("Failed to set SREGs for this CPU")]
     SetStatusRegisters(#[source] hypervisor::HypervisorCpuError),
@@ -83,35 +81,11 @@ pub fn setup_fpu(vcpu: &dyn hypervisor::Vcpu) -> Result<()> {
 /// # Arguments
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-/// * `feature_msr_updates` - A (possibly empty) slice of MSR-based features
-///   that should be set as as part of the setup. If the slice is empty then
-///   only boot msr entries are set, otherwise the given slice will also be
-///   included in the setup.
-pub fn setup_msrs(vcpu: &dyn hypervisor::Vcpu, feature_msr_updates: &[MsrEntry]) -> Result<()> {
-    let boot_entries = vcpu.boot_msr_entries();
-    let mut entries_for_update = Vec::new();
-    let setup_entries: &mut &[MsrEntry] = &mut (&boot_entries[..]);
-
-    if !feature_msr_updates.is_empty() {
-        entries_for_update.extend_from_slice(feature_msr_updates);
-        entries_for_update.extend_from_slice(boot_entries);
-        *setup_entries = &entries_for_update[..];
-    }
-    let num_msrs_written = vcpu
-        .set_msrs(setup_entries)
+pub fn setup_msrs(vcpu: &dyn hypervisor::Vcpu) -> Result<()> {
+    vcpu.set_msrs(vcpu.boot_msr_entries())
         .map_err(Error::SetModelSpecificRegisters)?;
-    if num_msrs_written < setup_entries.len() {
-        for msr in &setup_entries[num_msrs_written..] {
-            log::error!(
-                "Could not set MSR with register address:={:#x} and value:={:#x}",
-                msr.index,
-                msr.data
-            );
-        }
-        Err(Into::into(Error::SetModelSpecificRegistersPartial))
-    } else {
-        Ok(())
-    }
+
+    Ok(())
 }
 
 /// Configure base registers for a given CPU.
