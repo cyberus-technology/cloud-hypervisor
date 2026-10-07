@@ -2620,4 +2620,13 @@ impl vm::Vm for MshvVm {
         }
         Ok(())
     }
+
+    #[cfg(target_arch = "x86_64")]
+    fn msr_filter<'a>(
+        &self,
+        _filter: &[crate::MsrFilterRange<'a>],
+        _default_deny: bool,
+    ) -> vm::Result<()> {
+        todo!()
+    }
 }

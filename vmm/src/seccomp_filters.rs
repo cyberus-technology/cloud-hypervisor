@@ -84,6 +84,7 @@ mod kvm {
     pub const KVM_CHECK_EXTENSION: u64 = 0xae03;
     pub const KVM_GET_VCPU_MMAP_SIZE: u64 = 0xae04;
     pub const KVM_CREATE_VCPU: u64 = 0xae41;
+    pub const KVM_X86_SET_MSR_FILTER: u64 = 0x4188aec6;
     pub const KVM_CREATE_IRQCHIP: u64 = 0xae60;
     pub const KVM_RUN: u64 = 0xae80;
     pub const KVM_SET_MP_STATE: u64 = 0x4004_ae99;
@@ -235,6 +236,7 @@ fn create_vmm_ioctl_seccomp_rule_common_kvm() -> Result<Vec<SeccompRule>, Backen
     Ok(or![
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CHECK_EXTENSION)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_DEVICE,)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, KVM_X86_SET_MSR_FILTER,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_IRQCHIP,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_VCPU)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_VM)?],
