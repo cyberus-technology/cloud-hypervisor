@@ -4,7 +4,6 @@
 //
 
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -18,6 +17,8 @@ use crate::protocol::Request;
 /// The `KeepAliveStream` is a stream that is intended to be used for the main
 /// connection of live migrations. If the `KeepAliveStream` does not read or
 /// write often enough, it will send keep alive messages on the given stream.
+/// The `KeepAliveStream` should not be used to send or receive memory, because
+/// the `read_volatile()` and `write_volatile()` functions will be very slow.
 ///
 /// The `KeepAliveStream` is designed to be compatible with the `SocketStream`
 /// enum, and thus it should be really easy to use it.
@@ -49,13 +50,15 @@ enum KeepAliveStreamAnswer {
     Flush(io::Result<()>),
 }
 
-struct KeepAliveWorker<S: Read + Write + AsFd> {
+// The [`KeepAliveStream`] should only be used by the sender, not the receiver.
+// Thus it doesn't have to implement `AsFd`.
+struct KeepAliveWorker<S: Read + Write> {
     stream: S,
 }
 
 impl<S> KeepAliveWorker<S>
 where
-    S: Read + Write + AsFd,
+    S: Read + Write,
 {
     pub fn new(stream: S) -> Self {
         Self { stream }
@@ -84,8 +87,6 @@ where
 pub struct KeepAliveStream {
     /// The `KeepAliveWorker`.
     thread: Option<JoinHandle<()>>,
-    /// Duplicated file descriptor for `AsFd`.
-    fd: OwnedFd,
 
     /// Used to send messages to the worker.
     message_tx: SyncSender<KeepAliveStreamMessage>,
@@ -98,12 +99,10 @@ pub struct KeepAliveStream {
 }
 
 impl KeepAliveStream {
-    pub fn new<T: Read + Write + Send + AsFd + 'static>(
+    pub fn new<T: Read + Write + Send + 'static>(
         stream: T,
         timeout: Duration,
     ) -> result::Result<Self, io::Error> {
-        let fd = stream.as_fd().try_clone_to_owned()?;
-
         // We want to block on send and on recv if nobody listens. Thus we set the bound to 0.
         let (message_tx, message_rx) = sync_channel::<KeepAliveStreamMessage>(0);
         let (answer_tx, answer_rx) = sync_channel::<KeepAliveStreamAnswer>(0);
@@ -155,7 +154,6 @@ impl KeepAliveStream {
 
         Ok(Self {
             thread: Some(thread),
-            fd,
             message_tx,
             answer_rx,
             read_buf: Vec::new(),
@@ -170,12 +168,6 @@ impl Drop for KeepAliveStream {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
-    }
-}
-
-impl AsFd for KeepAliveStream {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
     }
 }
 
