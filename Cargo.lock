@@ -118,7 +118,6 @@ dependencies = [
  "fdt",
  "flate2",
  "hypervisor",
- "jiff",
  "libc",
  "linux-loader",
  "log",

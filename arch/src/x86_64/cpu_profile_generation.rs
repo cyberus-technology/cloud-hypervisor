@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use anyhow::{Context, anyhow};
 use hypervisor::arch::x86::{CpuIdEntry, MsrEntry};
 use hypervisor::{CpuVendor, Hypervisor, HypervisorError, HypervisorType};
-use jiff::Zoned;
 use log::warn;
 
 use crate::x86_64::CpuidReg;
@@ -445,14 +444,11 @@ fn generate_msr_profile_data_with<'a, const N: usize>(
 }
 
 fn write_license_file(mut license_file: impl Write, data_type: &str) -> anyhow::Result<()> {
-    let year = Zoned::now().year();
     let license_text = {
-        format!(
-            r#"SPDX-FileCopyrightText: {year} Cyberus Technology GmbH
+        r#"SPDX-FileCopyrightText: 2025 Cyberus Technology GmbH
 
 SPDX-License-Identifier: Apache-2.0
 "#
-        )
     };
     license_file
         .write_all(license_text.as_bytes())
