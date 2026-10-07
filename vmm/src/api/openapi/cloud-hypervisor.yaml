@@ -798,12 +798,10 @@ components:
           type: string
         serial_number:
           type: string
-          deprecated: true
         system_uuid:
           type: string
         uuid:
           type: string
-          deprecated: true
         oem_strings:
           type: array
           items:
