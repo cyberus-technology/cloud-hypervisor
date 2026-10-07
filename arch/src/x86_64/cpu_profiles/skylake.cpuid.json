@@ -110,7 +110,7 @@
         "register": "EDX"
       },
       {
-        "replacements": "0x078bfbff",
+        "replacements": "0x078bbbff",
         "mask": "0x08000000"
       }
     ],
