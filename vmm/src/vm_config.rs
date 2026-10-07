@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, result};
 
-use arch::CpuProfile;
 use block::ImageType;
 pub use block::fcntl::LockGranularityChoice;
 use log::{debug, warn};
@@ -84,8 +83,6 @@ pub struct CpusConfig {
     pub nested: bool,
     #[serde(default)]
     pub core_scheduling: CoreScheduling,
-    #[serde(default)]
-    pub profile: CpuProfile,
 }
 
 pub const DEFAULT_VCPUS: u32 = 1;
@@ -102,7 +99,6 @@ impl Default for CpusConfig {
             features: CpuFeatures::default(),
             nested: true,
             core_scheduling: CoreScheduling::default(),
-            profile: CpuProfile::default(),
         }
     }
 }
