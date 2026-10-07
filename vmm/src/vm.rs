@@ -1298,7 +1298,6 @@ impl Vm {
                 .transpose()
                 .map_err(Error::FwCfgInvalidUuid)?
                 .unwrap_or_else(Uuid::nil),
-            ram_size: config.memory.size,
         };
 
         fw_cfg
