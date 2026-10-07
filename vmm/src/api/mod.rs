@@ -877,11 +877,16 @@ pub trait RequestHandler {
         receive_data_migration: VmReceiveMigrationData,
     ) -> Result<(), MigratableError>;
 
+    /// Dispatches the migration.
     fn vm_send_migration(
         &mut self,
         send_data_migration: VmSendMigrationData,
     ) -> Result<(), MigratableError>;
 
+    /// Triggers a migration cancellation.
+    ///
+    /// The cancellation is not guaranteed to succeed, as the migration may have
+    /// succeeded already.
     fn vm_cancel_migration(&mut self) -> Result<(), MigratableError>;
 
     fn vm_nmi(&mut self) -> Result<(), VmError>;
