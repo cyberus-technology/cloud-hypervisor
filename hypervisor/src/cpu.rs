@@ -28,7 +28,7 @@ use crate::kvm::{TdxExitDetails, TdxExitStatus};
 use crate::{CpuState, MpState, StandardRegisters};
 
 #[cfg(target_arch = "x86_64")]
-#[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+#[derive(Copy, Clone, Default)]
 pub enum CpuVendor {
     #[default]
     Unknown,
