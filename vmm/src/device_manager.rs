@@ -18,7 +18,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 #[cfg(not(target_arch = "riscv64"))]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
@@ -5380,22 +5380,16 @@ impl DeviceManager {
         0
     }
 
-    /// Locks and returns the block device with the given id.
-    ///
-    /// Returns [`DeviceManagerError::UnknownDeviceId`] when no attached
-    /// block device matches.
-    fn find_block_device(&self, device_id: &str) -> DeviceManagerResult<MutexGuard<'_, Block>> {
-        self.block_devices
-            .iter()
-            .map(|dev| dev.lock().unwrap())
-            .find(|disk| disk.id() == device_id)
-            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))
-    }
-
     pub fn resize_disk(&mut self, device_id: &str, new_size: u64) -> DeviceManagerResult<()> {
-        self.find_block_device(device_id)?
-            .resize(new_size)
-            .map_err(DeviceManagerError::DiskResize)
+        for dev in &self.block_devices {
+            let mut disk = dev.lock().unwrap();
+            if disk.id() == device_id {
+                return disk
+                    .resize(new_size)
+                    .map_err(DeviceManagerError::DiskResize);
+            }
+        }
+        Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))
     }
 
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
@@ -5517,7 +5511,12 @@ impl DeviceManager {
     /// Returns an error if no disk with the given identifier is attached
     /// to the VM, or the destination cannot be opened.
     pub fn mirror_disk(&self, device_id: &str, dest_path: &Path) -> DeviceManagerResult<()> {
-        let mut disk = self.find_block_device(device_id)?;
+        let mut disk = self
+            .block_devices
+            .iter()
+            .map(|dev| dev.lock().unwrap())
+            .find(|disk| disk.id() == device_id)
+            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))?;
 
         if disk.mirror_status().is_some() {
             return Err(DeviceManagerError::BlockMirrorAlreadyActive(
@@ -5560,7 +5559,11 @@ impl DeviceManager {
     /// Returns an error if no disk with the given identifier is
     /// attached to the VM, or if the disk has no active mirror.
     pub fn mirror_disk_status(&self, device_id: &str) -> DeviceManagerResult<MirrorStatus> {
-        self.find_block_device(device_id)?
+        self.block_devices
+            .iter()
+            .map(|dev| dev.lock().unwrap())
+            .find(|disk| disk.id() == device_id)
+            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))?
             .mirror_status()
             .ok_or_else(|| DeviceManagerError::BlockMirrorNotActive(device_id.to_string()))
     }
@@ -5571,28 +5574,33 @@ impl DeviceManager {
     /// Returns an error if the disk is not attached, no mirror is active, or the
     /// mirror is not ready.
     pub fn mirror_disk_complete(&self, device_id: &str) -> DeviceManagerResult<()> {
-        let mut disk = self.find_block_device(device_id)?;
-        let new_path = disk
-            .complete_mirror()
-            .map_err(DeviceManagerError::BlockMirrorComplete)?;
+        for dev in &self.block_devices {
+            let mut disk = dev.lock().unwrap();
+            if disk.id() == device_id {
+                let new_path = disk
+                    .complete_mirror()
+                    .map_err(DeviceManagerError::BlockMirrorComplete)?;
 
-        // Repoint the config entry so a rebuild reopens the destination.
-        if let Some(cfg) = self
-            .config
-            .lock()
-            .unwrap()
-            .disks
-            .as_mut()
-            .and_then(|disks| {
-                disks
-                    .iter_mut()
-                    .find(|disk_config| disk_config.pci_common.id.as_deref() == Some(device_id))
-            })
-        {
-            cfg.path = Some(new_path);
+                // Repoint the config entry so a rebuild reopens the destination.
+                if let Some(cfg) = self
+                    .config
+                    .lock()
+                    .unwrap()
+                    .disks
+                    .as_mut()
+                    .and_then(|disks| {
+                        disks.iter_mut().find(|disk_config| {
+                            disk_config.pci_common.id.as_deref() == Some(device_id)
+                        })
+                    })
+                {
+                    cfg.path = Some(new_path);
+                }
+
+                return Ok(());
+            }
         }
-
-        Ok(())
+        Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))
     }
 
     /// Cancels the active block mirror for the disk identified by
@@ -5602,9 +5610,15 @@ impl DeviceManager {
     /// Returns an error if the disk is not attached, no mirror is active,
     /// mirror completion has started, or reverting a virtqueue worker fails.
     pub fn mirror_disk_cancel(&self, device_id: &str) -> DeviceManagerResult<()> {
-        self.find_block_device(device_id)?
-            .cancel_mirror()
-            .map_err(DeviceManagerError::BlockMirrorCancel)
+        for dev in &self.block_devices {
+            let mut disk = dev.lock().unwrap();
+            if disk.id() == device_id {
+                return disk
+                    .cancel_mirror()
+                    .map_err(DeviceManagerError::BlockMirrorCancel);
+            }
+        }
+        Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))
     }
 
     /// Helps the environment converge quickly after a live migration by
