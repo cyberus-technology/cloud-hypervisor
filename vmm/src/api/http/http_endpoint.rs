@@ -510,8 +510,7 @@ vm_action_put_handler_body!(VmDiskMirrorStart, |error| {
                 MirrorError::DeviceNotActive
                 | MirrorError::DevicePaused
                 | MirrorError::DestinationSizeMismatch { .. }
-                | MirrorError::DestinationLock { .. }
-                | MirrorError::Unsupported(_),
+                | MirrorError::DestinationLock { .. },
             ) => return HttpError::BadRequestWithApiError(error),
             _ => {}
         }

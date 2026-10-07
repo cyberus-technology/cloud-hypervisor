@@ -113,11 +113,7 @@ impl disk_file::Resizable for RawDisk {
     }
 }
 
-impl disk_file::DiskFile for RawDisk {
-    fn supports_mirroring(&self) -> BlockResult<()> {
-        Ok(())
-    }
-}
+impl disk_file::DiskFile for RawDisk {}
 
 impl disk_file::AsyncDiskFile for RawDisk {
     fn try_clone(&self) -> BlockResult<Box<dyn disk_file::AsyncDiskFile>> {
