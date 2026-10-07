@@ -1134,7 +1134,7 @@ pub(crate) fn start_live_migration(
         .args([
             &format!("--api-socket={dest_api_socket}"),
             "receive-migration",
-            &format!("unix:{migration_socket}"),
+            &format! {"unix:{migration_socket}"},
         ])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
