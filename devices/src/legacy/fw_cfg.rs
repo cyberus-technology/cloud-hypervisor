@@ -11,7 +11,6 @@
 //! https://cateee.net/lkddb/web-lkddb/FW_CFG_SYSFS.html
 //! No kernel requirement if above functionality is not required,
 //! only firmware must implement mechanism to interact with this fw_cfg device
-use std::ffi::CString;
 use std::fs::File;
 use std::io::{Error as IoError, ErrorKind, Read, Result};
 use std::mem::offset_of;
@@ -191,23 +190,6 @@ impl FwCfgContent {
 pub struct FwCfgItem {
     pub name: String,
     pub content: FwCfgContent,
-}
-
-/// Helper struct for initialization of FwCfg.
-#[derive(Debug, Default)]
-pub struct FwCfgInitParams {
-    /// Memory size to use for building the e820 memory map stored at etc/e820.
-    pub e820_size: Option<usize>,
-    /// File containing the bzImage of the kernel. Used to populate FW_CFG_KERNEL_DATA,
-    /// FW_CFG_KERNEL_SIZE, FW_CFG_SETUP_DATA and FW_CFG_SETUP_SIZE.
-    pub kernel: Option<File>,
-    /// File containing the init RAM disk. Used for populating FW_CFG_INITRD_DATA and
-    /// FW_CFG_INITRD_SIZE.
-    pub initramfs: Option<File>,
-    /// Command line for the kernel. Used to populate FW_CFG_CMDLINE_SIZE and FW_CFG_CMDLINE_DATA.
-    pub cmdline: Option<CString>,
-    /// List of additional items used to populate the fw_cfg file directory.
-    pub item_list: Option<Vec<FwCfgItem>>,
 }
 
 // ARM MMIO transport needs a rework.
@@ -498,26 +480,30 @@ impl FwCfg {
 
     pub fn populate_fw_cfg(
         &mut self,
-        fw_cfg_init: FwCfgInitParams,
+        mem_size: Option<usize>,
+        kernel: Option<File>,
+        initramfs: Option<File>,
+        cmdline: Option<std::ffi::CString>,
+        fw_cfg_item_list: Option<Vec<FwCfgItem>>,
         #[cfg(target_arch = "x86_64")] kvm_sev_snp_enabled: bool,
     ) -> Result<()> {
-        if let Some(e820_size) = fw_cfg_init.e820_size {
-            self.add_e820(e820_size)?;
+        if let Some(mem_size) = mem_size {
+            self.add_e820(mem_size)?;
         }
-        if let Some(kernel) = &fw_cfg_init.kernel {
+        if let Some(kernel) = kernel {
             self.add_kernel_data(
-                kernel,
+                &kernel,
                 #[cfg(target_arch = "x86_64")]
                 kvm_sev_snp_enabled,
             )?;
         }
-        if let Some(cmdline) = fw_cfg_init.cmdline {
+        if let Some(cmdline) = cmdline {
             self.add_kernel_cmdline(cmdline);
         }
-        if let Some(initramfs) = &fw_cfg_init.initramfs {
-            self.add_initramfs_data(initramfs)?;
+        if let Some(initramfs) = initramfs {
+            self.add_initramfs_data(&initramfs)?;
         }
-        if let Some(fw_cfg_item_list) = fw_cfg_init.item_list {
+        if let Some(fw_cfg_item_list) = fw_cfg_item_list {
             for item in fw_cfg_item_list {
                 self.add_item(item)?;
             }
