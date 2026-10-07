@@ -260,6 +260,11 @@ impl Response {
         Self::new(Status::Error, 0)
     }
 
+    // TODO(keepalive): remove this constructor when gardenlinux-release-26-09-18 compatibility ends.
+    pub fn keep_alive() -> Self {
+        Self::new(Status::KeepAlive, 0)
+    }
+
     pub fn status(&self) -> Status {
         self.status
     }

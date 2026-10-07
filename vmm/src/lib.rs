@@ -3172,7 +3172,7 @@ impl RequestHandler for Vmm {
         )?;
         // Accept the connection and get the socket
         let mut socket = listener
-            .accept()
+            .accept(true)
             .inspect_err(|e| warn!("{e}"))
             .context("Failed to accept incoming migration")
             .map_err(MigratableError::MigrateReceive)?;

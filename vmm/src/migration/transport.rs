@@ -25,6 +25,7 @@ use vm_memory::{
     Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, ReadVolatile, VolatileMemoryError,
     VolatileSlice, WriteVolatile,
 };
+use vm_migration::keep_alive_stream::KeepAliveStream;
 use vm_migration::protocol::{Command, MemoryRangeTable, Request, Response};
 use vm_migration::tls::{TlsServerConfig, TlsStream};
 use vm_migration::{MigratableError, Snapshot};
@@ -37,6 +38,11 @@ use crate::{GuestMemoryMmap, VmMigrationConfig};
 /// Hard upper bound for migration worker connections on both the sender and
 /// receiver side.
 pub(crate) const MAX_MIGRATION_CONNECTIONS: u32 = 128;
+
+/// Interval at which the [`KeepAliveStream`] sends keep alive messages.
+/// This must remain shorter than the old sender's 10-second read timeout.
+// TODO(keepalive): remove this interval when gardenlinux-release-26-09-18 compatibility ends.
+const MIGRATION_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The timeout of the migration-receiver.
 ///
@@ -57,7 +63,11 @@ pub(crate) enum ReceiveListener {
 
 impl ReceiveListener {
     /// Block until a connection is accepted.
-    pub(crate) fn accept(&mut self) -> Result<SocketStream, MigratableError> {
+    pub(crate) fn accept(
+        &mut self,
+        // TODO(keepalive): remove this parameter when gardenlinux-release-26-09-18 compatibility ends.
+        main_connection: bool,
+    ) -> Result<SocketStream, MigratableError> {
         match self {
             ReceiveListener::Tcp(listener) => {
                 info!(
@@ -67,7 +77,17 @@ impl ReceiveListener {
                 let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
                     .context("Failed to accept TCP migration connection")
                     .map_err(MigratableError::MigrateReceive)?;
-                Ok(SocketStream::Tcp(socket))
+
+                let socket = SocketStream::Tcp(socket);
+                // TODO(keepalive): remove this wrapper when gardenlinux-release-26-09-18 compatibility ends.
+                if main_connection {
+                    KeepAliveStream::new(socket, MIGRATION_KEEP_ALIVE_INTERVAL)
+                        .map(SocketStream::KeepAlive)
+                        .context("Error creating keep-alive migration stream")
+                        .map_err(MigratableError::MigrateReceive)
+                } else {
+                    Ok(socket)
+                }
             }
             ReceiveListener::Unix(listener) => listener
                 .accept()
@@ -82,11 +102,22 @@ impl ReceiveListener {
                 let (socket, _) = accept_with_timeout(listener, MIGRATION_ACCEPT_TIMEOUT_DURATION)
                     .context("Failed to accept TCP connection")
                     .map_err(MigratableError::MigrateReceive)?;
-                TlsStream::new_server(socket, config)
+
+                let socket = TlsStream::new_server(socket, config)
                     .map(Box::new)
                     .map(SocketStream::Tls)
                     .context("Failed to accept TLS migration connection")
-                    .map_err(MigratableError::MigrateReceive)
+                    .map_err(MigratableError::MigrateReceive)?;
+
+                // TODO(keepalive): remove this wrapper when gardenlinux-release-26-09-18 compatibility ends.
+                if main_connection {
+                    KeepAliveStream::new(socket, MIGRATION_KEEP_ALIVE_INTERVAL)
+                        .map(SocketStream::KeepAlive)
+                        .context("Error creating keep-alive migration stream")
+                        .map_err(MigratableError::MigrateReceive)
+                } else {
+                    Ok(socket)
+                }
             }
         }
     }
@@ -101,7 +132,7 @@ impl ReceiveListener {
             .map_err(MigratableError::MigrateReceive)?
         {
             // The listener is readable; accept the connection.
-            Ok(Some(self.accept()?))
+            Ok(Some(self.accept(false)?))
         } else {
             // The abort event was signaled before any connection arrived.
             Ok(None)
@@ -165,6 +196,8 @@ pub(crate) enum SocketStream {
     Unix(UnixStream),
     Tcp(TcpStream),
     Tls(Box<TlsStream>),
+    // TODO(keepalive): remove this variant when gardenlinux-release-26-09-18 compatibility ends.
+    KeepAlive(KeepAliveStream),
 }
 
 impl Read for SocketStream {
@@ -173,6 +206,7 @@ impl Read for SocketStream {
             SocketStream::Unix(stream) => stream.read(buf),
             SocketStream::Tcp(stream) => stream.read(buf),
             SocketStream::Tls(stream) => stream.read(buf),
+            SocketStream::KeepAlive(stream) => stream.read(buf),
         }
     }
 }
@@ -183,6 +217,7 @@ impl Write for SocketStream {
             SocketStream::Unix(stream) => stream.write(buf),
             SocketStream::Tcp(stream) => stream.write(buf),
             SocketStream::Tls(stream) => stream.write(buf),
+            SocketStream::KeepAlive(stream) => stream.write(buf),
         }
     }
 
@@ -191,6 +226,7 @@ impl Write for SocketStream {
             SocketStream::Unix(stream) => stream.flush(),
             SocketStream::Tcp(stream) => stream.flush(),
             SocketStream::Tls(stream) => stream.flush(),
+            SocketStream::KeepAlive(stream) => stream.flush(),
         }
     }
 }
@@ -201,6 +237,7 @@ impl AsFd for SocketStream {
             SocketStream::Unix(s) => s.as_fd(),
             SocketStream::Tcp(s) => s.as_fd(),
             SocketStream::Tls(s) => s.as_fd(),
+            SocketStream::KeepAlive(s) => s.as_fd(),
         }
     }
 }
@@ -214,6 +251,8 @@ impl ReadVolatile for SocketStream {
             SocketStream::Unix(s) => s.read_volatile(buf),
             SocketStream::Tcp(s) => s.read_volatile(buf),
             SocketStream::Tls(s) => s.read_volatile(buf),
+
+            SocketStream::KeepAlive(s) => s.read_volatile(buf),
         }
     }
 }
@@ -227,6 +266,7 @@ impl WriteVolatile for SocketStream {
             SocketStream::Unix(s) => s.write_volatile(buf),
             SocketStream::Tcp(s) => s.write_volatile(buf),
             SocketStream::Tls(s) => s.write_volatile(buf),
+            SocketStream::KeepAlive(s) => s.write_volatile(buf),
         }
     }
 }
