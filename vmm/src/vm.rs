@@ -207,9 +207,6 @@ pub enum Error {
     #[error("VM is not running")]
     VmNotRunning,
 
-    #[error("VM is currently migrating and can't be modified")]
-    VmMigrating,
-
     #[error("Cannot clone EventFd")]
     EventFdClone(#[source] io::Error),
 
