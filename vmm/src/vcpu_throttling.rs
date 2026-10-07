@@ -42,7 +42,7 @@ use vm_migration::Pausable;
 use crate::cpu::CpuManager;
 
 /// The possible command of the thread, i.e., the current state.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum ThrottleCommand {
     /// Waiting for next event.
     Waiting,
@@ -347,7 +347,7 @@ impl ThrottleWorker {
                             &callback_pause_vcpus,
                             &callback_resume_vcpus,
                         );
-                        if matches!(next_task, ThrottleCommand::Exiting) {
+                        if next_task == ThrottleCommand::Exiting {
                             break 'control;
                         }
                         // else: thread is in Waiting state
