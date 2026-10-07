@@ -113,9 +113,6 @@ pub enum MigratableError {
     #[error("Failed to complete migration for migratable component")]
     CompleteMigration(#[source] anyhow::Error),
 
-    #[error("Migration was cancelled")]
-    Cancelled,
-
     #[error("Failed to release a disk lock")]
     UnlockError(#[source] anyhow::Error),
 
