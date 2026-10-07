@@ -469,7 +469,7 @@ pub static INTEL_CPUID_DEFINITIONS: CpuidDefinitions<167> = const {
                     short: "mca",
                     description: "Machine Check Architecture",
                     bits_range: (14, 14),
-                    policy: ProfilePolicy::Inherit,
+                    policy: ProfilePolicy::Static(0),
                 },
                 ValueDefinition {
                     short: "cmov",
