@@ -76,10 +76,9 @@
 
 use std::io::{Read, Write};
 
-use anyhow::anyhow;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use vm_memory::ByteValued;
 
 use crate::MigratableError;
 use crate::bitpos_iterator::BitposIteratorExt;
@@ -109,9 +108,7 @@ use crate::bitpos_iterator::BitposIteratorExt;
 ///
 /// [live-migration protocol]: super::protocol
 #[repr(u16)]
-#[derive(
-    Debug, Copy, Clone, Default, PartialEq, Eq, Immutable, IntoBytes, KnownLayout, TryFromBytes,
-)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub enum Command {
     #[default]
     Invalid = 0,
@@ -135,12 +132,15 @@ pub enum Command {
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
+#[derive(Default, Copy, Clone)]
 pub struct Request {
     command: Command,
     padding: [u8; 6],
     length: u64, // Length of payload for command excluding the Request struct
 }
+
+// SAFETY: Request contains a series of integers with no implicit padding
+unsafe impl ByteValued for Request {}
 
 impl Request {
     pub fn new(command: Command, length: u64) -> Self {
@@ -198,40 +198,32 @@ impl Request {
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Request, MigratableError> {
-        /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
-        #[repr(C, align(8))]
-        struct RequestBuffer([u8; const { size_of::<Request>() }]);
-        const _: () = const {
-            // Check that the alignment of the buffer matches `Self`.
-            assert!(align_of::<RequestBuffer>() == align_of::<Request>());
-        };
-        let mut buffer = RequestBuffer([0; size_of::<Self>()]);
-        let RequestBuffer(request) = &mut buffer;
+        let mut request = Request::default();
 
         loop {
-            fd.read_exact(request)
+            fd.read_exact(Self::as_mut_slice(&mut request))
                 .map_err(MigratableError::MigrateSocket)?;
-
-            let request = Self::try_mut_from_bytes(request)
-                .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
 
             // If we read a keep alive message, we throw it away and keep reading.
             if request.command() == Command::KeepAlive {
-                *request = Request::default();
+                request = Request::default();
                 continue;
             }
-            return Ok(*request);
+
+            break;
         }
+
+        Ok(request)
     }
 
     pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
-        fd.write_all(self.as_bytes())
+        fd.write_all(Self::as_slice(self))
             .map_err(MigratableError::MigrateSocket)
     }
 }
 
 #[repr(u16)]
-#[derive(Copy, Clone, PartialEq, Eq, Default, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub enum Status {
     #[default]
     Invalid,
@@ -241,12 +233,15 @@ pub enum Status {
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Immutable, IntoBytes, KnownLayout, TryFromBytes)]
+#[derive(Default, Copy, Clone)]
 pub struct Response {
     status: Status,
     padding: [u8; 6],
     length: u64, // Length of payload for command excluding the Response struct
 }
+
+// SAFETY: Response contains a series of integers with no implicit padding
+unsafe impl ByteValued for Response {}
 
 impl Response {
     pub fn new(status: Status, length: u64) -> Self {
@@ -278,30 +273,22 @@ impl Response {
     }
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigratableError> {
-        /// A byte buffer that matches `Self` in size and alignment to allow deserializing `Self` into.
-        #[repr(C, align(8))]
-        struct ResponseBuffer([u8; const { size_of::<Response>() }]);
-        const _: () = const {
-            // Check that the alignment of the buffer matches `Self`.
-            assert!(align_of::<ResponseBuffer>() == align_of::<Response>());
-        };
-        let mut buffer = ResponseBuffer([0; size_of::<Self>()]);
-        let ResponseBuffer(response) = &mut buffer;
+        let mut response = Response::default();
 
         loop {
-            fd.read_exact(response)
+            fd.read_exact(Self::as_mut_slice(&mut response))
                 .map_err(MigratableError::MigrateSocket)?;
-
-            let response = Self::try_mut_from_bytes(response)
-                .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
 
             // If we read a keep alive message, we throw it away and keep reading.
             if response.status() == Status::KeepAlive {
-                *response = Response::default();
+                response = Response::default();
                 continue;
             }
-            return Ok(*response);
+
+            break;
         }
+
+        Ok(response)
     }
 
     pub fn ok_or_abandon<T>(
@@ -321,7 +308,7 @@ impl Response {
     }
 
     pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
-        fd.write_all(self.as_bytes())
+        fd.write_all(Self::as_slice(self))
             .map_err(MigratableError::MigrateSocket)
     }
 }
