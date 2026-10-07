@@ -15,7 +15,6 @@ use crate::protocol::MemoryRangeTable;
 
 mod bitpos_iterator;
 mod context;
-pub mod keep_alive_stream;
 pub mod progress;
 pub mod protocol;
 pub mod tls;
@@ -51,6 +50,7 @@ pub enum UffdError {
     #[error("Handler failed after startup")]
     HandlerFailed(#[source] std::io::Error),
 }
+
 #[derive(Error, Debug)]
 pub enum MigratableError {
     #[error("Failed to pause migratable component")]
