@@ -286,11 +286,6 @@ fn virtio_watchdog_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     ]
 }
 
-/// Rules needed to print absolute timestamps.
-fn logging_rules() -> Vec<(i64, Vec<SeccompRule>)> {
-    vec![(libc::SYS_readlink, vec![]), (libc::SYS_openat, vec![])]
-}
-
 fn get_seccomp_rules(thread_type: Thread) -> Vec<(i64, Vec<SeccompRule>)> {
     let mut rules = match thread_type {
         Thread::VirtioBalloon => virtio_balloon_thread_rules(),
@@ -311,7 +306,6 @@ fn get_seccomp_rules(thread_type: Thread) -> Vec<(i64, Vec<SeccompRule>)> {
         Thread::VirtioWatchdog => virtio_watchdog_thread_rules(),
     };
     rules.append(&mut virtio_thread_common());
-    rules.append(&mut logging_rules());
     rules
 }
 
