@@ -126,7 +126,9 @@ pub enum Command {
     MemoryFd = 7,
     /// Finalizes the migration without resuming the VM on the destination.
     /// Sent when the source VM was paused at migration time.
-    CompletePaused = 8,
+    CompletePaused = 9,
+    // TODO(keepalive): remove this command when gardenlinux-release-26-09-18 compatibility ends.
+    KeepAlive = 8,
 }
 
 #[repr(C)]
@@ -199,12 +201,21 @@ impl Request {
         let mut buffer = RequestBuffer([0; size_of::<Self>()]);
         let RequestBuffer(request) = &mut buffer;
 
-        fd.read_exact(request)
-            .map_err(MigratableError::MigrateSocket)?;
+        loop {
+            fd.read_exact(request)
+                .map_err(MigratableError::MigrateSocket)?;
 
-        let request = Self::try_mut_from_bytes(request)
-            .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
-        Ok(*request)
+            let request = Self::try_mut_from_bytes(request)
+                .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
+
+            // If we read a keep alive message, we throw it away and keep reading.
+            // TODO(keepalive): remove this branch when gardenlinux-release-26-09-18 compatibility ends.
+            if request.command() == Command::KeepAlive {
+                *request = Request::default();
+                continue;
+            }
+            return Ok(*request);
+        }
     }
 
     pub fn write_to(&self, fd: &mut dyn Write) -> Result<(), MigratableError> {
@@ -220,6 +231,8 @@ pub enum Status {
     Invalid,
     Ok,
     Error,
+    // TODO(keepalive): remove this status when gardenlinux-release-26-09-18 compatibility ends.
+    KeepAlive,
 }
 
 #[repr(C)]
@@ -266,12 +279,21 @@ impl Response {
         let mut buffer = ResponseBuffer([0; size_of::<Self>()]);
         let ResponseBuffer(response) = &mut buffer;
 
-        fd.read_exact(response)
-            .map_err(MigratableError::MigrateSocket)?;
+        loop {
+            fd.read_exact(response)
+                .map_err(MigratableError::MigrateSocket)?;
 
-        let response = Self::try_mut_from_bytes(response)
-            .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
-        Ok(*response)
+            let response = Self::try_mut_from_bytes(response)
+                .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
+
+            // If we read a keep alive message, we throw it away and keep reading.
+            // TODO(keepalive): remove this branch when gardenlinux-release-26-09-18 compatibility ends.
+            if response.status() == Status::KeepAlive {
+                *response = Response::default();
+                continue;
+            }
+            return Ok(*response);
+        }
     }
 
     /// Return the response if its status is `Ok`; return the caller-provided error for any other status.
