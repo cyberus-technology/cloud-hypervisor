@@ -229,7 +229,6 @@ pub enum Status {
     Invalid,
     Ok,
     Error,
-    KeepAlive,
 }
 
 #[repr(C)]
@@ -260,10 +259,6 @@ impl Response {
         Self::new(Status::Error, 0)
     }
 
-    pub fn keep_alive() -> Self {
-        Self::new(Status::KeepAlive, 0)
-    }
-
     pub fn status(&self) -> Status {
         self.status
     }
@@ -274,19 +269,8 @@ impl Response {
 
     pub fn read_from(fd: &mut dyn Read) -> Result<Response, MigratableError> {
         let mut response = Response::default();
-
-        loop {
-            fd.read_exact(Self::as_mut_slice(&mut response))
-                .map_err(MigratableError::MigrateSocket)?;
-
-            // If we read a keep alive message, we throw it away and keep reading.
-            if response.status() == Status::KeepAlive {
-                response = Response::default();
-                continue;
-            }
-
-            break;
-        }
+        fd.read_exact(Self::as_mut_slice(&mut response))
+            .map_err(MigratableError::MigrateSocket)?;
 
         Ok(response)
     }
