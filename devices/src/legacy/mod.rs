@@ -15,8 +15,6 @@ mod fwdebug;
 #[cfg(target_arch = "aarch64")]
 mod gpio_pl061;
 mod i8042;
-#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
-pub mod open_fw;
 #[cfg(target_arch = "aarch64")]
 mod rtc_pl031;
 mod serial;

@@ -662,7 +662,6 @@ dependencies = [
  "vm-device",
  "vm-memory",
  "vm-migration",
- "vm-virtio",
  "vmm-sys-util",
  "zerocopy",
 ]
