@@ -20,7 +20,6 @@ pub mod fixed_vhd;
 pub mod fixed_vhd_async;
 pub mod fixed_vhd_disk;
 pub mod fixed_vhd_sync;
-pub mod mirror;
 pub mod qcow;
 #[cfg(feature = "io_uring")]
 pub(crate) mod qcow_async;
