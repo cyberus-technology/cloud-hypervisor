@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-use std::fs::File;
 use std::io::Write;
 use std::ops::RangeInclusive;
 
@@ -10,7 +9,7 @@ use anyhow::{Context, anyhow};
 use hypervisor::arch::x86::CpuIdEntry;
 use hypervisor::{CpuVendor, Hypervisor, HypervisorError, HypervisorType};
 
-use crate::x86_64::cpu_profile::CpuIdProfileData;
+use crate::x86_64::cpu_profile::CpuProfileData;
 #[cfg(feature = "kvm")]
 use crate::x86_64::cpuid_definitions::CpuidDefinitions;
 use crate::x86_64::cpuid_definitions::intel::INTEL_CPUID_DEFINITIONS;
@@ -24,6 +23,7 @@ use crate::x86_64::{CpuidOutputRegisterAdjustments, CpuidReg};
 // NOTE: The MVP only works with KVM as the hypervisor and Intel CPUs.
 #[cfg(feature = "kvm")]
 pub fn generate_profile_data(
+    mut writer: impl Write,
     hypervisor: &dyn Hypervisor,
     profile_name: &str,
 ) -> anyhow::Result<()> {
@@ -45,75 +45,14 @@ pub fn generate_profile_data(
     let cpuid = overwrite_brand_string(cpuid, brand_string_bytes);
     let supported_cpuid_sorted = sort_entries(cpuid);
 
-    let Files {
-        cpuid_data_file,
-        cpuid_data_license_file,
-    } = create_files(profile_name)?;
-
     generate_cpu_profile_data_with(
         hypervisor_type,
         cpu_vendor,
         &supported_cpuid_sorted,
         &INTEL_CPUID_DEFINITIONS,
         &KVM_CPUID_DEFINITIONS,
-        cpuid_data_file,
-        cpuid_data_license_file,
+        &mut writer,
     )
-}
-
-struct Files {
-    cpuid_data_file: File,
-    cpuid_data_license_file: File,
-}
-/// Create empty files with names derived from the name given to the CPU profile.
-/// The name will be lowercase and spaces are replaced with "-".
-fn create_files(profile_name: &str) -> anyhow::Result<Files> {
-    let profile_file_name = {
-        let mut name = String::new();
-        for part in profile_name.split_whitespace().map(|s| s.to_lowercase()) {
-            if !name.is_empty() {
-                name.push('-');
-            }
-            name.push_str(&part);
-        }
-        name
-    };
-
-    let cpuid_profile_file_name = {
-        let mut path = std::env::current_dir().context(
-            "CPU profile generation failed: Unable to get the current working directory",
-        )?;
-        path.push(format!(
-            "arch/src/x86_64/cpu_profiles/{profile_file_name}.cpuid.json"
-        ));
-        path
-    };
-
-    let cpuid_data_file = File::create(cpuid_profile_file_name.clone()).with_context(|| {
-        format!(
-            "CPU profile generation failed: Could not create file:={}",
-            cpuid_profile_file_name.to_string_lossy()
-        )
-    })?;
-
-    let cpuid_data_license_file_path = {
-        let mut path = cpuid_profile_file_name.clone();
-        path.as_mut_os_string().push(".license");
-        path
-    };
-
-    let cpuid_data_license_file =
-        File::create(cpuid_data_license_file_path.clone()).with_context(|| {
-            format!(
-                "CPU profile generation failed: Could not create file:={}",
-                cpuid_data_license_file_path.to_string_lossy()
-            )
-        })?;
-
-    Ok(Files {
-        cpuid_data_file,
-        cpuid_data_license_file,
-    })
 }
 
 /// Prepare the bytes which the brand string should consist of
@@ -151,8 +90,7 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
     supported_cpuid_sorted: &[CpuIdEntry],
     processor_cpuid_definitions: &CpuidDefinitions<N>,
     hypervisor_cpuid_definitions: &CpuidDefinitions<M>,
-    mut cpuid_data_file: impl Write,
-    mut cpuid_license_file: impl Write,
+    mut writer: &mut impl Write,
 ) -> anyhow::Result<()> {
     let mut adjustments: Vec<(Parameters, CpuidOutputRegisterAdjustments)> = Vec::new();
 
@@ -208,31 +146,17 @@ fn generate_cpu_profile_data_with<const N: usize, const M: usize>(
         }
     }
 
-    let cpuid_profile_data = CpuIdProfileData {
+    let profile_data = CpuProfileData {
         hypervisor: hypervisor_type,
         cpu_vendor,
         adjustments,
     };
 
-    serde_json::to_writer_pretty(&mut cpuid_data_file, &cpuid_profile_data)
-        .context("Cpu profile generation failed: Could not serialize the generated cpuid profile data to the given writer")?;
-    cpuid_data_file
+    serde_json::to_writer_pretty(&mut writer, &profile_data)
+        .context("failed to serialize the generated profile data to the given writer")?;
+    writer
         .flush()
-        .context("CPU profile generation failed: Unable to flush cpuid profile data")?;
-    let license_text = {
-        r#"SPDX-FileCopyrightText: 2025 Cyberus Technology GmbH
-
-SPDX-License-Identifier: Apache-2.0 
-"#
-    };
-    cpuid_license_file
-        .write_all(license_text.as_bytes())
-        .context(
-            "CPU profile generation failed: Unable to write to cpuid profile data license file",
-        )?;
-    cpuid_license_file
-        .flush()
-        .context("CPU profile generation failed: Unable to flush cpuid profile data license file")
+        .context("CPU profile generation failed: Unable to flush cpu profile data")
 }
 
 /// Get as many of the supported CPUID entries from the hypervisor as possible.
