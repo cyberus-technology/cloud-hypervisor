@@ -117,7 +117,6 @@ trait DBusApi1 {
     fn vm_resize(&self, vm_resize: &str) -> zbus::Result<()>;
     fn vm_resize_zone(&self, vm_resize_zone: &str) -> zbus::Result<()>;
     fn vm_restore(&self, restore_config: &str) -> zbus::Result<()>;
-    fn vm_cancel_migration(&self) -> zbus::Result<()>;
     fn vm_receive_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_send_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_resume(&self) -> zbus::Result<()>;
@@ -257,10 +256,6 @@ impl<'a> DBusApi1ProxyBlocking<'a> {
     fn api_vm_restore(&self, restore_config: &str) -> ApiResult {
         self.vm_restore(restore_config)
             .map_err(Error::DBusApiClient)
-    }
-
-    fn api_vm_cancel_migration(&self) -> ApiResult {
-        self.vm_cancel_migration().map_err(Error::DBusApiClient)
     }
 
     fn api_vm_receive_migration(&self, receive_migration_data: &str) -> ApiResult {
@@ -641,8 +636,6 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
             )?;
             simple_api_command(socket, "PUT", "create", Some(&data)).map_err(Error::HttpApiClient)
         }
-        Some("cancel-migration") => simple_api_command(socket, "PUT", "cancel-migration", None)
-            .map_err(Error::HttpApiClient),
         _ => unreachable!(),
     }
 }
@@ -827,7 +820,6 @@ fn dbus_api_do_command(matches: &ArgMatches, proxy: &DBusApi1ProxyBlocking<'_>) 
             );
             proxy.api_vm_coredump(&coredump_config)
         }
-        Some("cancel-migration") => proxy.api_vm_cancel_migration(),
         Some("send-migration") => {
             let send_migration_data = send_migration_data(
                 matches
@@ -1140,7 +1132,6 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
             .about("Add vsock device")
             .arg(Arg::new("vsock_config").index(1).help(VsockConfig::SYNTAX)),
         Command::new("boot").about("Boot a created VM"),
-        Command::new("cancel-migration").about("Cancel any ongoing migration"),
         Command::new("coredump")
             .about("Create a coredump from VM")
             .arg(Arg::new("coredump_config").index(1).help("<file_path>")),
