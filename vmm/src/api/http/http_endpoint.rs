@@ -505,7 +505,6 @@ vm_action_put_handler_body!(VmDiskMirrorStart, |error| {
             }
             DeviceManagerError::DiskImageTypeMismatch { .. }
             | DeviceManagerError::BlockMirrorAlreadyActive(_)
-            | DeviceManagerError::BlockMirrorDestinationInUse(_)
             | DeviceManagerError::BlockMirrorStart(
                 MirrorError::DeviceNotActive
                 | MirrorError::DevicePaused
