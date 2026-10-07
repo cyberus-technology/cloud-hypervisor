@@ -13,8 +13,9 @@
 //! [`MigrationWorkerSpawnError`].
 
 use std::fmt::{Debug, Formatter};
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -25,7 +26,7 @@ use vmm_sys_util::eventfd::EventFd;
 
 use crate::Vmm;
 use crate::api::VmSendMigrationData;
-use crate::vm::{PostMigrationLifecycleEvent, Vm, VmState};
+use crate::vm::{Vm, VmState};
 
 #[derive(thiserror::Error)]
 #[error("Migration worker could not be spawned: {spawn_error}")]
@@ -71,8 +72,6 @@ pub struct MigrationWorker {
     vm_receiver: Receiver<Vm>,
     check_migration_evt: EventFd,
     config: VmSendMigrationData,
-    /// Shared with the main VMM thread.
-    postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     initial_vm_state: VmState,
@@ -91,7 +90,6 @@ impl MigrationWorker {
             self.hypervisor.as_ref(),
             &self.config,
             self.initial_vm_state,
-            self.postponed_lifecycle_event.as_ref(),
         )
         .inspect(|_| event!("vm", "migration-finished"))
         .inspect_err(|_| event!("vm", "migration-failed"));
@@ -115,7 +113,6 @@ impl MigrationWorker {
         vm: Vm,
         check_migration_evt: EventFd,
         config: VmSendMigrationData,
-        postponed_lifecycle_event: Arc<Mutex<Option<PostMigrationLifecycleEvent>>>,
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] hypervisor: Arc<
             dyn hypervisor::Hypervisor,
         >,
@@ -126,7 +123,6 @@ impl MigrationWorker {
             vm_receiver,
             check_migration_evt,
             config,
-            postponed_lifecycle_event,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             hypervisor,
             initial_vm_state,
