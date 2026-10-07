@@ -26,5 +26,6 @@ fn main() -> anyhow::Result<()> {
     let profile_name = cmd_arg.get_one::<String>("name").unwrap();
 
     let hypervisor = hypervisor::new().context("Could not obtain hypervisor")?;
-    arch::x86_64::cpu_profile_generation::generate_profile_data(hypervisor.as_ref(), profile_name)
+    // arch::x86_64::cpu_profile_generation::generate_profile_data(hypervisor.as_ref(), profile_name)
+    Ok(())
 }
