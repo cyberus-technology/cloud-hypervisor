@@ -127,10 +127,7 @@ pub enum Command {
     /// Finalizes the migration without resuming the VM on the destination.
     /// Sent when the source VM was paused at migration time.
     CompletePaused = 9,
-    // We introduced this with discriminant eight but in the meantime,
-    // upstream introduced a new command with discriminant 8. For
-    // migration-compatibility we stick to this temporarily, until we have
-    // a solution for the discriminant collision.
+    // TODO(keepalive): remove this command when gardenlinux-release-26-09-18 compatibility ends.
     KeepAlive = 8,
 }
 
@@ -185,10 +182,6 @@ impl Request {
         Self::new(Command::Abandon, 0)
     }
 
-    pub fn keep_alive() -> Self {
-        Self::new(Command::KeepAlive, 0)
-    }
-
     pub fn command(&self) -> Command {
         self.command
     }
@@ -216,6 +209,7 @@ impl Request {
                 .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
 
             // If we read a keep alive message, we throw it away and keep reading.
+            // TODO(keepalive): remove this branch when gardenlinux-release-26-09-18 compatibility ends.
             if request.command() == Command::KeepAlive {
                 *request = Request::default();
                 continue;
@@ -237,6 +231,7 @@ pub enum Status {
     Invalid,
     Ok,
     Error,
+    // TODO(keepalive): remove this status when gardenlinux-release-26-09-18 compatibility ends.
     KeepAlive,
 }
 
@@ -265,6 +260,7 @@ impl Response {
         Self::new(Status::Error, 0)
     }
 
+    // TODO(keepalive): remove this constructor when gardenlinux-release-26-09-18 compatibility ends.
     pub fn keep_alive() -> Self {
         Self::new(Status::KeepAlive, 0)
     }
@@ -296,6 +292,7 @@ impl Response {
                 .map_err(|error| MigratableError::DeserializeError(anyhow!("{error:?}")))?;
 
             // If we read a keep alive message, we throw it away and keep reading.
+            // TODO(keepalive): remove this branch when gardenlinux-release-26-09-18 compatibility ends.
             if response.status() == Status::KeepAlive {
                 *response = Response::default();
                 continue;

@@ -1734,17 +1734,10 @@ impl Vmm {
         let mut ctx = OngoingMigrationContext::new();
 
         // Set up the socket connection
-        let mut socket = if send_data_migration.local {
-            transport::send_migration_socket(
-                &send_data_migration.destination_url,
-                send_data_migration.tls_dir.as_deref(),
-            )?
-        } else {
-            transport::send_migration_socket_with_keep_alive(
-                &send_data_migration.destination_url,
-                send_data_migration.tls_dir.as_deref(),
-            )?
-        };
+        let mut socket = transport::send_migration_socket(
+            &send_data_migration.destination_url,
+            send_data_migration.tls_dir.as_deref(),
+        )?;
 
         // Start the migration
         transport::send_request_expect_ok(
