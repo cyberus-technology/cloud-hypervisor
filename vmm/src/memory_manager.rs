@@ -3296,6 +3296,8 @@ impl Migratable for MemoryManager {
     // Generate a table for the pages that are dirty. The dirty pages are collapsed
     // together in the table if they are contiguous.
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        // KVM and vm-memory's AtomicBitmap both track dirty bits per host page.
+        let page_size = vm_allocator::page_size::get_page_size();
         let mut table = MemoryRangeTable::default();
         for r in &self.guest_ram_mappings {
             let vm_dirty_bitmap = self
@@ -3323,7 +3325,7 @@ impl Migratable for MemoryManager {
                 .zip(vmm_dirty_bitmap.iter())
                 .map(|(x, y)| x | y);
 
-            let sub_table = MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, r.gpa, 4096);
+            let sub_table = MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, r.gpa, page_size);
 
             if sub_table.regions().is_empty() {
                 debug!("Dirty Memory Range Table is empty");
