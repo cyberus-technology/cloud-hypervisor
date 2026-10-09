@@ -2000,38 +2000,34 @@ impl MemoryManager {
                 let mut handles = Vec::new();
                 for i in 0..num_threads {
                     let barrier = Arc::clone(&barrier);
-                    let h: thread::ScopedJoinHandle<'_, Result<(), io::Error>> =
-                        s.spawn(move || {
-                            // Wait until all threads have been spawned to avoid contention
-                            // over mmap_sem between thread stack allocation and page faulting.
-                            barrier.wait();
-                            let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
-                            let offset =
-                                page_size * ((i * pages_per_thread) + std::cmp::min(i, remainder));
-                            // SAFETY: FFI call with correct arguments
-                            let ret = unsafe {
-                                let addr = r.as_ptr().add(offset);
-                                libc::madvise(
-                                    addr.cast(),
-                                    pages * page_size,
-                                    libc::MADV_POPULATE_WRITE,
-                                )
-                            };
-                            if ret != 0 {
-                                let e = io::Error::last_os_error();
-                                warn!("Failed to prefault pages: {e}");
-                                return Err(e);
-                            }
-                            Ok(())
-                        });
-                    handles.push(h);
+                    let handle = s.spawn(move || {
+                        // Wait until all threads have been spawned to avoid contention
+                        // over mmap_sem between thread stack allocation and page faulting.
+                        barrier.wait();
+                        let pages = pages_per_thread + if i < remainder { 1 } else { 0 };
+                        let offset =
+                            page_size * ((i * pages_per_thread) + std::cmp::min(i, remainder));
+                        // SAFETY: FFI call with correct arguments
+                        let ret = unsafe {
+                            let addr = r.as_ptr().add(offset);
+                            libc::madvise(addr.cast(), pages * page_size, libc::MADV_POPULATE_WRITE)
+                        };
+                        if ret != 0 {
+                            let e = io::Error::last_os_error();
+                            return Err(e);
+                        }
+                        Ok(())
+                    });
+                    handles.push(handle);
                 }
 
                 for handle in handles {
                     handle
                         .join()
-                        .map_err(|_| {
-                            Error::PrefaultMemory(io::Error::other("Prefault thread died"))
+                        .map_err(|e| {
+                            Error::PrefaultMemory(io::Error::other(format!(
+                                "Prefault thread panicked: {e:?}"
+                            )))
                         })?
                         .map_err(Error::PrefaultMemory)?;
                 }
