@@ -110,7 +110,7 @@ itertools = "0.14.0"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2.186"
 log = "0.4.29"
-rustls = { version = "0.23.38", default-features = false, features = [
+rustls = { version = "0.23.46", default-features = false, features = [
   "aws-lc-rs",
   "std",
   "tls12",
