@@ -36,7 +36,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use vm_migration::Pausable;
 
 use crate::cpu::CpuManager;
@@ -441,13 +441,29 @@ impl ThrottleThreadHandle {
     /// - `cpu_manager`: CPU manager to pause and resume vCPUs
     pub fn new_from_cpu_manager(cpu_manager: &Arc<Mutex<CpuManager>>) -> Self {
         let callback_pause_vcpus = {
-            let cpu_manager = cpu_manager.clone();
-            Box::new(move || cpu_manager.lock().unwrap().pause().unwrap())
+            let cpu_manager = Arc::downgrade(cpu_manager);
+            Box::new(move || {
+                cpu_manager
+                    .upgrade()
+                    .expect("CPU manager should be alive while vCPUs are throttle")
+                    .lock()
+                    .unwrap()
+                    .pause()
+                    .unwrap();
+            })
         };
 
         let callback_resume_vcpus = {
-            let cpu_manager = cpu_manager.clone();
-            Box::new(move || cpu_manager.lock().unwrap().resume().unwrap())
+            let cpu_manager = Arc::downgrade(cpu_manager);
+            Box::new(move || {
+                cpu_manager
+                    .upgrade()
+                    .expect("CPU manager should be alive while vCPUs are throttle")
+                    .lock()
+                    .unwrap()
+                    .resume()
+                    .unwrap();
+            })
         };
 
         Self::new(callback_pause_vcpus, callback_resume_vcpus)
@@ -528,30 +544,16 @@ impl ThrottleThreadHandle {
 
     /// Stops and terminates the thread gracefully.
     ///
-    /// Waits for the thread to finish. This function **must** be called before
-    /// the migration thread(s) do anything with the CPU manager to prevent
-    /// odd states.
+    /// Waits for the thread to finish.
     pub fn shutdown(&mut self) {
-        let begin = Instant::now();
+        // drop thread; ensure that the channel is still alive when it is dropped
+        if let Some(worker) = self.throttle_thread.take() {
+            self.state_sender
+                .send(ThrottleCommand::Exit)
+                .expect("channel should not be closed");
 
-        {
-            // drop thread; ensure that the channel is still alive when it is dropped
-            if let Some(worker) = self.throttle_thread.take() {
-                self.state_sender
-                    .send(ThrottleCommand::Exit)
-                    .expect("channel should not be closed");
-
-                // Ensure the sender is still living when this is dropped.
-                drop(worker);
-            }
-        }
-
-        let elapsed = begin.elapsed();
-        if elapsed > Duration::from_millis(20) {
-            warn!(
-                "shutting down thread takes too long ({} ms): this increases the downtime!",
-                elapsed.as_millis()
-            );
+            // Ensure the sender is still living when this is dropped.
+            drop(worker);
         }
     }
 
