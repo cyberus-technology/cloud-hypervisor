@@ -144,6 +144,15 @@ wait-timeout = "0.2.1"
 zbus = { version = "5.15.0", default-features = false }
 zerocopy = { version = "0.8.50", default-features = false }
 
+# List of patched crates
+# Temporary pin to the rust-vmm TDX branch: rust-vmm/rust-vmm#198
+[patch.crates-io]
+kvm-bindings = { git = "https://github.com/Coffeeri/rust-vmm", rev = "88bd82e7354c85b3bd7fc9c2316a716299a957f6" }
+kvm-ioctls = { git = "https://github.com/Coffeeri/rust-vmm", rev = "88bd82e7354c85b3bd7fc9c2316a716299a957f6" }
+# The branch's vmm-sys-util breaks released vfio-ioctls and duplicates the fam types.
+[patch."https://github.com/Coffeeri/rust-vmm"]
+vmm-sys-util = { version = "0.15.0" }
+
 [workspace.lints.clippy]
 # Any clippy lint (group) in alphabetical order:
 # https://rust-lang.github.io/rust-clippy/master/index.html
