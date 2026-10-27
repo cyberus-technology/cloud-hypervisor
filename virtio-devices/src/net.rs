@@ -11,10 +11,10 @@ use std::net::IpAddr;
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
+use std::{result, thread};
 
 use anyhow::{Context, anyhow};
 use event_monitor::event;
@@ -828,6 +828,7 @@ impl Net {
 
 impl Drop for Net {
     fn drop(&mut self) {
+        self.announce.invalidate();
         // Get a comma-separated list of the interface names of the tap devices
         // associated with this network device.
         let ifnames_str = self
@@ -870,11 +871,33 @@ impl VirtioDevice for Net {
         let has_ctrl_worker = self.common.workers.is_some()
             && self.common.feature_acked(VIRTIO_NET_F_CTRL_VQ.into())
             && !self.common.queue_evts.len().is_multiple_of(2);
+        self.announce.invalidate();
         if has_ctrl_worker {
             self.announce.pending.store(true, Ordering::Release);
-            self.announce.generation.fetch_add(1, Ordering::Release);
             self.announce.evt.write(1)?;
+            return Ok(());
         }
+        if host_announce.rarp_announce.is_none() {
+            return Ok(());
+        }
+
+        let mut announcer = Announcer::new(
+            &self.announce,
+            vec![Box::new(host_announce) as Box<dyn AnnounceOps>].into_boxed_slice(),
+        );
+        announcer.initialize();
+        announcer.announcements_done = 1;
+        let _ = thread::Builder::new()
+            .name(format!("{}_announce", self.id))
+            .spawn(move || {
+                // Match our v52 implementation: cumulative delays of 50, 200, 450 and 800 ms.
+                for delay_ms in [50, 150, 250, 350] {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    if matches!(announcer.send_announce(), AnnounceOutcome::Done) {
+                        break;
+                    }
+                }
+            })?;
         Ok(())
     }
 
