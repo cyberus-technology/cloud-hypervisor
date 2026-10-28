@@ -63,12 +63,12 @@ pub use kvm::aarch64;
 pub use kvm::{AiaState, riscv64};
 #[cfg(target_arch = "x86_64")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "tdx")]
-pub use vm::TdxCapabilities;
 pub use vm::{
     DataMatch, HypervisorVmError, InterruptSourceConfig, LegacyIrqSourceConfig,
     MemoryConversionHandler, MemoryVisibility, MsiIrqSourceConfig, Vm, VmOps,
 };
+#[cfg(feature = "tdx")]
+pub use vm::{TdxCapabilities, TdxInitVmParams};
 
 pub use crate::hypervisor::{Hypervisor, HypervisorError};
 
