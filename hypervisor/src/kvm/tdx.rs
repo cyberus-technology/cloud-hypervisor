@@ -9,10 +9,11 @@
 
 use std::{array, io};
 
+use igvm_defs::PAGE_SIZE_4K;
 use kvm_bindings::{
-    KVM_MAX_CPUID_ENTRIES, TdxCapabilities, TdxInitVm, kvm_tdx_cmd,
-    kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES, kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU,
-    kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
+    KVM_MAX_CPUID_ENTRIES, KVM_TDX_MEASURE_MEMORY_REGION, TdxCapabilities, TdxInitVm, kvm_tdx_cmd,
+    kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES, kvm_tdx_cmd_id_KVM_TDX_INIT_MEM_REGION,
+    kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU, kvm_tdx_cmd_id_KVM_TDX_INIT_VM, kvm_tdx_init_mem_region,
 };
 use kvm_ioctls::{VcpuFd, VmFd};
 use log::error;
@@ -183,5 +184,50 @@ impl KvmVcpu {
 
         // SAFETY: `data` is an immediate value, not a pointer.
         unsafe { tdx_cmd(&self.fd, &mut cmd) }.map_err(cpu::HypervisorCpuError::InitializeTdx)
+    }
+
+    /// [`cpu::Vcpu::tdx_init_memory_region()`] via `KVM_TDX_INIT_MEM_REGION`.
+    pub fn tdx_init_memory_region(
+        &self,
+        source: u64,
+        gpa: u64,
+        nr_pages: u64,
+        measure: bool,
+    ) -> cpu::Result<()> {
+        // The kernel only reports EINVAL for these, which does not say which
+        // value is wrong.
+        if !source.is_multiple_of(PAGE_SIZE_4K)
+            || !gpa.is_multiple_of(PAGE_SIZE_4K)
+            || nr_pages == 0
+        {
+            return Err(cpu::HypervisorCpuError::InitMemRegionTdx(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Source 0x{source:x} and GPA 0x{gpa:x} must be page \
+                     aligned, nr_pages {nr_pages} must be non-zero"
+                ),
+            )));
+        }
+
+        // The kernel advances the source address, GPA and page count and
+        // copies the remaining request back through this pointer.
+        let mut region = kvm_tdx_init_mem_region {
+            source_addr: source,
+            gpa,
+            nr_pages,
+        };
+        let mut cmd = kvm_tdx_cmd {
+            id: kvm_tdx_cmd_id_KVM_TDX_INIT_MEM_REGION,
+            flags: if measure {
+                KVM_TDX_MEASURE_MEMORY_REGION
+            } else {
+                0
+            },
+            data: (&raw mut region) as u64,
+            ..Default::default()
+        };
+
+        // SAFETY: `data` points to `region`, valid and unaliased for the call.
+        unsafe { tdx_cmd(&self.fd, &mut cmd) }.map_err(cpu::HypervisorCpuError::InitMemRegionTdx)
     }
 }
