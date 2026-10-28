@@ -210,6 +210,22 @@ impl TlsStream {
     /// from growing without bound.
     const BUF_SIZE: usize = 64 /* KiB */ << 10;
 
+    /// Whether a read can complete from already decrypted TLS data.
+    ///
+    /// `rustls` may read, decrypt and internally buffer data during the TLS handshake.
+    /// Backwards compatibility with gardenlinux-release-26-10-14.
+    pub fn has_buffered_read(&mut self) -> io::Result<bool> {
+        let result = match &mut self.stream {
+            TlsStreamParticipant::Client(stream) => stream.conn.reader().into_first_chunk(),
+            TlsStreamParticipant::Server(stream) => stream.conn.reader().into_first_chunk(),
+        };
+        match result {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Returns a reference to the underlying [`TcpStream`].
     pub fn tcp_stream(&self) -> &TcpStream {
         match &self.stream {

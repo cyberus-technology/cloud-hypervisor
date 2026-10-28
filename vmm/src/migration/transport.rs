@@ -246,7 +246,45 @@ impl Write for SocketStream {
     }
 }
 
+/// Processes the first v52 memory request, returning whether `prefix` is a
+/// v52 request.
+///
+/// Backwards compatibility with gardenlinux-release-26-10-14.
+pub(super) fn receive_initial_memory_v52(
+    prefix_le: u16,
+    socket: &mut SocketStream,
+    guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+) -> Result<bool, MigratableError> {
+    if prefix_le != Command::Memory as u16 {
+        return Ok(false);
+    }
+
+    // Keep the prefix so the request can be read.
+    let request =
+        Request::read_from(&mut io::Cursor::new(prefix_le.to_le_bytes()).chain(&mut *socket))?;
+    socket
+        .set_read_timeout(None)
+        .map_err(MigratableError::MigrateSocket)?;
+    receive_memory_ranges(guest_memory, &request, socket)?;
+    Response::ok().write_to(socket)?;
+    Ok(true)
+}
+
 impl SocketStream {
+    /// Waits for the socket to become readable or the abort event fd to signal.
+    ///
+    /// A TLS read can leave decrypted data buffered in `rustls` even when the TCP fd is not readable.
+    /// To avoid missing data, we check that buffer before waiting on the underlying fd.
+    /// Backwards compatibility with gardenlinux-release-26-10-14.
+    fn wait_for_readable(&mut self, abort_event: &EventFd) -> io::Result<bool> {
+        if let SocketStream::Tls(stream) = self
+            && stream.has_buffered_read()?
+        {
+            return Ok(true);
+        }
+        wait_for_readable(self, abort_event)
+    }
+
     pub(crate) fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         match self {
             SocketStream::Unix(s) => s.set_read_timeout(dur),
@@ -494,18 +532,14 @@ impl ReceiveAdditionalConnections {
                 )));
             }
 
-            let Some(socket) = Self::handle_accepted_connection(socket, fault_tx)? else {
-                continue;
-            };
-
-            let thread = Self::spawn_memory_worker(
+            threads.push(Self::spawn_memory_worker(
                 socket,
                 threads.len(),
                 kill_evt,
                 guest_memory.clone(),
+                fault_tx.clone(),
                 seccomp_filter,
-            )?;
-            threads.push(thread);
+            )?);
         }
     }
 
@@ -516,15 +550,35 @@ impl ReceiveAdditionalConnections {
     /// migration thread.
     fn handle_accepted_connection(
         mut socket: SocketStream,
+        kill_evt: &EventFd,
         fault_tx: &Sender<SocketStream>,
+        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<Option<SocketStream>, MigratableError> {
-        // Timeout the role header so one stalled peer cannot block the accept
-        // thread from handling other connections.
+        // v52 memory workers may remain idle until work is assigned. Wait
+        // for their first data or shutdown.
+        if !socket
+            .wait_for_readable(kill_evt)
+            .context("Failed to wait for connection header")
+            .map_err(MigratableError::MigrateReceive)?
+        {
+            return Ok(None);
+        }
+
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(MigratableError::MigrateSocket)?;
+        let mut prefix = [0u8; 2];
+        if let Err(e) = socket.read_exact(&mut prefix) {
+            warn!("Dropping connection: failed to read connection header: {e}");
+            return Ok(None);
+        }
 
-        let role = match ConnectionRole::read_from(&mut socket) {
+        let prefix_le = u16::from_le_bytes(prefix);
+        if receive_initial_memory_v52(prefix_le, &mut socket, guest_memory)? {
+            return Ok(Some(socket));
+        }
+
+        let role = match ConnectionRole::try_from(prefix_le) {
             Ok(role) => role,
             Err(e) => {
                 warn!(
@@ -557,10 +611,11 @@ impl ReceiveAdditionalConnections {
     }
 
     fn spawn_memory_worker(
-        mut socket: SocketStream,
+        socket: SocketStream,
         index: usize,
         kill_evt: &EventFd,
         guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
+        fault_tx: Sender<SocketStream>,
         seccomp_filter: &BpfProgram,
     ) -> Result<JoinHandle<Result<(), MigratableError>>, MigratableError> {
         let kill_evt = kill_evt
@@ -577,7 +632,13 @@ impl ReceiveAdditionalConnections {
                         .context("Error applying migration receive-memory seccomp filter")
                         .map_err(MigratableError::MigrateReceive)?;
                 }
-                Self::worker_receive_memory(&mut socket, &kill_evt, &guest_memory)
+                if let Some(mut socket) =
+                    Self::handle_accepted_connection(socket, &kill_evt, &fault_tx, &guest_memory)?
+                {
+                    Self::worker_receive_memory(&mut socket, &kill_evt, &guest_memory)
+                } else {
+                    Ok(())
+                }
             })
             .map_err(|e| {
                 error!("Error spawning receive-memory worker: {e}");
