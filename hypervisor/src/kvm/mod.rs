@@ -3284,6 +3284,11 @@ impl cpu::Vcpu for KvmVcpu {
         self.fd.set_kvm_immediate_exit(exit.into());
     }
 
+    #[cfg(feature = "tdx")]
+    fn tdx_init(&self, initial_rcx: u64) -> cpu::Result<()> {
+        KvmVcpu::tdx_init(self, initial_rcx)
+    }
+
     #[cfg(target_arch = "x86_64")]
     /// Return the list of initial MSR entries for a VCPU
     fn boot_msr_entries(&self) -> Vec<MsrEntry> {

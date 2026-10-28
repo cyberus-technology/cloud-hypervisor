@@ -10,6 +10,8 @@
 //
 //
 
+#[cfg(feature = "tdx")]
+use std::io;
 use std::result;
 
 #[cfg(feature = "sev_snp")]
@@ -198,6 +200,18 @@ pub enum HypervisorCpuError {
     /// Error setting TSC offset
     #[error("Failed to set TSC offset")]
     SetTscOffset(#[source] anyhow::Error),
+    #[cfg(feature = "tdx")]
+    ///
+    /// Error initializing the vCPU for TDX
+    ///
+    #[error("Failed to initialize TDX vCPU")]
+    InitializeTdx(#[source] io::Error),
+    #[cfg(feature = "tdx")]
+    ///
+    /// TDX is only supported by the KVM backend
+    ///
+    #[error("TDX is only supported by the KVM backend")]
+    TdxNotSupported,
     /// Error writing value at given GPA
     #[error("Failed to write to GPA")]
     GpaWrite(#[source] anyhow::Error),
@@ -294,7 +308,6 @@ pub trait Vcpu: Send + Sync {
     /// Sets the type of CPU to be exposed to the guest and optional features.
     #[cfg(target_arch = "aarch64")]
     fn vcpu_init(&self, kvi: &VcpuInit) -> Result<()>;
-
     #[cfg(target_arch = "aarch64")]
     fn vcpu_finalize(&self, feature: i32) -> Result<()>;
     /// Sets pre-finalize registers (e.g. SVE VLS).
@@ -368,7 +381,6 @@ pub trait Vcpu: Send + Sync {
     #[cfg(target_arch = "x86_64")]
     /// Return the list of initial MSR entries for a VCPU
     fn boot_msr_entries(&self) -> Vec<MsrEntry>;
-
     #[cfg(target_arch = "x86_64")]
     /// Get the frequency of the TSC if available
     fn tsc_khz(&self) -> Result<Option<u32>> {
@@ -409,7 +421,6 @@ pub trait Vcpu: Send + Sync {
     fn setup_sev_snp_regs(&self, _vmsa: SevVmsa, _nested: bool) -> Result<()> {
         unimplemented!()
     }
-
     /// Sets the value of GIC redistributor address
     #[cfg(target_arch = "aarch64")]
     fn set_gic_redistributor_addr(&self, _gicr_base_addr: u64) -> Result<()> {
@@ -418,7 +429,15 @@ pub trait Vcpu: Send + Sync {
     #[cfg(target_arch = "x86_64")]
     /// Trigger NMI interrupt
     fn nmi(&self) -> Result<()>;
-
     /// The type of the hypervisor backing this vCPU
     fn hypervisor_type(&self) -> HypervisorType;
+    #[cfg(feature = "tdx")]
+    ///
+    /// Initialize this vCPU for TDX
+    ///
+    /// `initial_rcx` becomes the guest's RCX when the vCPU starts.
+    ///
+    fn tdx_init(&self, _initial_rcx: u64) -> Result<()> {
+        Err(HypervisorCpuError::TdxNotSupported)
+    }
 }
