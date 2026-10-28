@@ -208,6 +208,10 @@ pub enum HypervisorCpuError {
     /// TDX is only supported by the KVM backend
     #[error("TDX is only supported by the KVM backend")]
     TdxNotSupported,
+    #[cfg(feature = "tdx")]
+    /// Error loading guest memory into the TD
+    #[error("Failed to initialize TDX memory region")]
+    InitMemRegionTdx(#[source] io::Error),
     /// Error writing value at given GPA
     #[error("Failed to write to GPA")]
     GpaWrite(#[source] anyhow::Error),
@@ -435,6 +439,22 @@ pub trait Vcpu: Send + Sync {
     /// Initialize this vCPU for TDX
     /// `initial_rcx` becomes the guest's RCX when the vCPU starts.
     fn tdx_init(&self, _initial_rcx: u64) -> Result<()> {
+        Err(HypervisorCpuError::TdxNotSupported)
+    }
+    #[cfg(feature = "tdx")]
+    /// Load `nr_pages` pages from the host address `source` into the TD at the
+    /// guest physical address `gpa`
+    /// If `measure` is set the pages join the launch measurement, the value a
+    /// remote verifier attests.
+    /// Both addresses must be page aligned, `nr_pages` must be non-zero and the
+    /// range must already be private (`KVM_MEMORY_ATTRIBUTE_PRIVATE`).
+    fn tdx_init_memory_region(
+        &self,
+        _source: u64,
+        _gpa: u64,
+        _nr_pages: u64,
+        _measure: bool,
+    ) -> Result<()> {
         Err(HypervisorCpuError::TdxNotSupported)
     }
 }
