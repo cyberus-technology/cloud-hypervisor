@@ -218,6 +218,12 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to initialize TDX memory region")]
     InitMemRegionTdx(#[source] io::Error),
+    #[cfg(feature = "tdx")]
+    ///
+    /// Error retrieving the TDX CPUID
+    ///
+    #[error("Failed to get the TD CPUID")]
+    GetTdxCpuid(#[source] io::Error),
     /// Error writing value at given GPA
     #[error("Failed to write to GPA")]
     GpaWrite(#[source] anyhow::Error),
@@ -464,6 +470,13 @@ pub trait Vcpu: Send + Sync {
         _nr_pages: u64,
         _measure: bool,
     ) -> Result<()> {
+        Err(HypervisorCpuError::TdxNotSupported)
+    }
+    #[cfg(feature = "tdx")]
+    ///
+    /// Retrieve the CPUID values the TDX module virtualizes for the guest
+    ///
+    fn tdx_get_cpuid(&self) -> Result<Vec<CpuIdEntry>> {
         Err(HypervisorCpuError::TdxNotSupported)
     }
 }
