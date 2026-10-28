@@ -151,6 +151,11 @@ pub enum HypervisorVmError {
     #[error("TDX is only supported by the KVM backend")]
     TdxNotSupported,
 
+    #[cfg(feature = "tdx")]
+    /// Error initializing the VM as a TD
+    #[error("Failed to initialize TDX")]
+    InitializeTdx(#[source] io::Error),
+
     /// Create Vgic error
     #[error("Failed to create Vgic")]
     CreateVgic(#[source] anyhow::Error),
@@ -245,6 +250,28 @@ pub struct TdxCapabilities {
     /// XFAM (extended features available mask) the TD may request.
     pub supported_xfam: u64,
     /// CPUID leaves the TD may configure, the rest is virtualized by the module.
+    pub cpuid: Vec<CpuIdEntry>,
+}
+
+#[cfg(feature = "tdx")]
+/// Parameters for initializing a VM as a TD.
+/// The three SHA-384 values travel verbatim into the TD report. All zeros is
+/// accepted and means the deployment does not check them.
+pub struct TdxInitVmParams {
+    /// Requested TD attributes (ATTRIBUTES), a subset of
+    /// `TdxCapabilities::supported_attrs`.
+    pub attributes: u64,
+    /// Requested XFAM (extended features available mask), a subset of
+    /// `TdxCapabilities::supported_xfam`.
+    pub xfam: u64,
+    /// `MRCONFIGID`, a SHA-384 of the TD configuration.
+    pub mrconfigid: [u8; 48],
+    /// `MROWNER`, a SHA-384 identifying the TD owner.
+    pub mrowner: [u8; 48],
+    /// `MROWNERCONFIG`, a SHA-384 of the owner's configuration.
+    pub mrownerconfig: [u8; 48],
+    /// CPUID leaves to configure the TD with, a subset of
+    /// `TdxCapabilities::cpuid`.
     pub cpuid: Vec<CpuIdEntry>,
 }
 
@@ -366,6 +393,11 @@ pub trait Vm: Send + Sync + Any {
     #[cfg(feature = "tdx")]
     /// Retrieve the capabilities of the TDX module
     fn tdx_capabilities(&self) -> Result<TdxCapabilities> {
+        Err(HypervisorVmError::TdxNotSupported)
+    }
+    #[cfg(feature = "tdx")]
+    /// Initialize this VM as a TD (Trust Domain)
+    fn tdx_init(&self, _params: &TdxInitVmParams) -> Result<()> {
         Err(HypervisorVmError::TdxNotSupported)
     }
     /// Downcast to the underlying hypervisor VM type

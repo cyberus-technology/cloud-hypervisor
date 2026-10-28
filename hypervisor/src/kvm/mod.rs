@@ -157,7 +157,7 @@ use crate::TimerState;
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::{get_cntfrq, regs};
 #[cfg(feature = "tdx")]
-use crate::vm::TdxCapabilities;
+use crate::vm::{TdxCapabilities, TdxInitVmParams};
 
 // `KVM_REG_ARM_TIMER_CNT`, the timer-counter firmware register the kernel defines
 // as `ARM64_SYS_REG(3, 3, 14, 3, 2)`. kvm-bindings exposes no constant for it, so
@@ -674,6 +674,11 @@ impl vm::Vm for KvmVm {
     #[cfg(feature = "tdx")]
     fn tdx_capabilities(&self) -> vm::Result<TdxCapabilities> {
         KvmVm::tdx_capabilities(self)
+    }
+
+    #[cfg(feature = "tdx")]
+    fn tdx_init(&self, params: &TdxInitVmParams) -> vm::Result<()> {
+        KvmVm::tdx_init(self, params)
     }
 
     #[cfg(feature = "sev_snp")]
