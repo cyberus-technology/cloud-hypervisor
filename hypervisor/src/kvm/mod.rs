@@ -3289,6 +3289,17 @@ impl cpu::Vcpu for KvmVcpu {
         KvmVcpu::tdx_init(self, initial_rcx)
     }
 
+    #[cfg(feature = "tdx")]
+    fn tdx_init_memory_region(
+        &self,
+        source: u64,
+        gpa: u64,
+        nr_pages: u64,
+        measure: bool,
+    ) -> cpu::Result<()> {
+        KvmVcpu::tdx_init_memory_region(self, source, gpa, nr_pages, measure)
+    }
+
     #[cfg(target_arch = "x86_64")]
     /// Return the list of initial MSR entries for a VCPU
     fn boot_msr_entries(&self) -> Vec<MsrEntry> {
