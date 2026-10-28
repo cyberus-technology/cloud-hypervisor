@@ -11,13 +11,15 @@ use std::{array, io};
 
 use kvm_bindings::{
     KVM_MAX_CPUID_ENTRIES, TdxCapabilities, TdxInitVm, kvm_tdx_cmd,
-    kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES, kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
+    kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES, kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU,
+    kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
 };
 use kvm_ioctls::{VcpuFd, VmFd};
 use log::error;
 
-use super::KvmVm;
+use super::{KvmVcpu, KvmVm};
 use crate::arch::x86::CpuIdEntry;
+use crate::cpu;
 use crate::vm::{self, TdxInitVmParams};
 
 /// Issues one TDX sub-ioctl, retrying the errnos below and logging the TDX
@@ -167,5 +169,19 @@ impl KvmVm {
 
         // SAFETY: `data` points to `init`, valid and unaliased for the call.
         unsafe { tdx_cmd(self.fd.as_ref(), &mut cmd) }.map_err(vm::HypervisorVmError::InitializeTdx)
+    }
+}
+
+impl KvmVcpu {
+    /// [`cpu::Vcpu::tdx_init()`] via `KVM_TDX_INIT_VCPU`.
+    pub fn tdx_init(&self, initial_rcx: u64) -> cpu::Result<()> {
+        let mut cmd = kvm_tdx_cmd {
+            id: kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU,
+            data: initial_rcx,
+            ..Default::default()
+        };
+
+        // SAFETY: `data` is an immediate value, not a pointer.
+        unsafe { tdx_cmd(&self.fd, &mut cmd) }.map_err(cpu::HypervisorCpuError::InitializeTdx)
     }
 }
