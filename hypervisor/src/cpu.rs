@@ -10,6 +10,8 @@
 //
 //
 
+#[cfg(feature = "tdx")]
+use std::io;
 use std::result;
 
 #[cfg(feature = "sev_snp")]
@@ -198,6 +200,14 @@ pub enum HypervisorCpuError {
     /// Error setting TSC offset
     #[error("Failed to set TSC offset")]
     SetTscOffset(#[source] anyhow::Error),
+    #[cfg(feature = "tdx")]
+    /// Error initializing the vCPU for TDX
+    #[error("Failed to initialize TDX vCPU")]
+    InitializeTdx(#[source] io::Error),
+    #[cfg(feature = "tdx")]
+    /// TDX is only supported by the KVM backend
+    #[error("TDX is only supported by the KVM backend")]
+    TdxNotSupported,
     /// Error writing value at given GPA
     #[error("Failed to write to GPA")]
     GpaWrite(#[source] anyhow::Error),
@@ -421,4 +431,10 @@ pub trait Vcpu: Send + Sync {
 
     /// The type of the hypervisor backing this vCPU
     fn hypervisor_type(&self) -> HypervisorType;
+    #[cfg(feature = "tdx")]
+    /// Initialize this vCPU for TDX
+    /// `initial_rcx` becomes the guest's RCX when the vCPU starts.
+    fn tdx_init(&self, _initial_rcx: u64) -> Result<()> {
+        Err(HypervisorCpuError::TdxNotSupported)
+    }
 }
