@@ -681,6 +681,11 @@ impl vm::Vm for KvmVm {
         KvmVm::tdx_init(self, params)
     }
 
+    #[cfg(feature = "tdx")]
+    fn tdx_finalize(&self) -> vm::Result<()> {
+        KvmVm::tdx_finalize(self)
+    }
+
     #[cfg(feature = "sev_snp")]
     fn import_isolated_pages(
         &self,

@@ -155,6 +155,10 @@ pub enum HypervisorVmError {
     /// Error initializing the VM as a TD
     #[error("Failed to initialize TDX")]
     InitializeTdx(#[source] io::Error),
+    #[cfg(feature = "tdx")]
+    /// Error finalizing the TD measurement
+    #[error("Failed to finalize TDX")]
+    FinalizeTdx(#[source] io::Error),
 
     /// Create Vgic error
     #[error("Failed to create Vgic")]
@@ -398,6 +402,11 @@ pub trait Vm: Send + Sync + Any {
     #[cfg(feature = "tdx")]
     /// Initialize this VM as a TD (Trust Domain)
     fn tdx_init(&self, _params: &TdxInitVmParams) -> Result<()> {
+        Err(HypervisorVmError::TdxNotSupported)
+    }
+    #[cfg(feature = "tdx")]
+    /// Finalize the TD measurement, after which the TD can be run
+    fn tdx_finalize(&self) -> Result<()> {
         Err(HypervisorVmError::TdxNotSupported)
     }
     /// Downcast to the underlying hypervisor VM type
