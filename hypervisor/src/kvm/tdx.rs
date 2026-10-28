@@ -11,10 +11,10 @@ use std::{array, io};
 
 use igvm_defs::PAGE_SIZE_4K;
 use kvm_bindings::{
-    KVM_MAX_CPUID_ENTRIES, KVM_TDX_MEASURE_MEMORY_REGION, TdxCapabilities, TdxInitVm, kvm_tdx_cmd,
-    kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES, kvm_tdx_cmd_id_KVM_TDX_FINALIZE_VM,
-    kvm_tdx_cmd_id_KVM_TDX_INIT_MEM_REGION, kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU,
-    kvm_tdx_cmd_id_KVM_TDX_INIT_VM, kvm_tdx_init_mem_region,
+    CpuId, KVM_MAX_CPUID_ENTRIES, KVM_TDX_MEASURE_MEMORY_REGION, TdxCapabilities, TdxInitVm,
+    kvm_tdx_cmd, kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES, kvm_tdx_cmd_id_KVM_TDX_FINALIZE_VM,
+    kvm_tdx_cmd_id_KVM_TDX_GET_CPUID, kvm_tdx_cmd_id_KVM_TDX_INIT_MEM_REGION,
+    kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU, kvm_tdx_cmd_id_KVM_TDX_INIT_VM, kvm_tdx_init_mem_region,
 };
 use kvm_ioctls::{VcpuFd, VmFd};
 use log::error;
@@ -241,5 +241,31 @@ impl KvmVcpu {
 
         // SAFETY: `data` points to `region`, valid and unaliased for the call.
         unsafe { tdx_cmd(&self.fd, &mut cmd) }.map_err(cpu::HypervisorCpuError::InitMemRegionTdx)
+    }
+
+    /// [`cpu::Vcpu::tdx_get_cpuid()`] via `KVM_TDX_GET_CPUID`.
+    ///
+    /// The buffer holds `KVM_MAX_CPUID_ENTRIES` entries, the most the command
+    /// can return. `E2BIG` cannot happen.
+    pub fn tdx_get_cpuid(&self) -> cpu::Result<Vec<CpuIdEntry>> {
+        let mut cpuid = CpuId::new(KVM_MAX_CPUID_ENTRIES).map_err(|e| {
+            cpu::HypervisorCpuError::GetTdxCpuid(io::Error::other(format!(
+                "Failed to allocate TDX CPUID buffer: {e}"
+            )))
+        })?;
+        let mut cmd = kvm_tdx_cmd {
+            id: kvm_tdx_cmd_id_KVM_TDX_GET_CPUID,
+            data: cpuid.as_mut_fam_struct_ptr() as u64,
+            ..Default::default()
+        };
+
+        // SAFETY: `data` points to `cpuid`, valid and unaliased for the call.
+        unsafe { tdx_cmd(&self.fd, &mut cmd) }.map_err(cpu::HypervisorCpuError::GetTdxCpuid)?;
+
+        Ok(cpuid
+            .as_slice()
+            .iter()
+            .map(|e| CpuIdEntry::from(*e))
+            .collect())
     }
 }
