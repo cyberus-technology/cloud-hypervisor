@@ -7,18 +7,18 @@
 //! per `KVM_MEMORY_ENCRYPT_OP` sub-ioctl, as documented in
 //! <https://docs.kernel.org/virt/kvm/x86/intel-tdx.html>.
 
-use std::io;
+use std::{array, io};
 
 use kvm_bindings::{
-    KVM_MAX_CPUID_ENTRIES, TdxCapabilities, kvm_tdx_cmd, kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES,
-    kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
+    KVM_MAX_CPUID_ENTRIES, TdxCapabilities, TdxInitVm, kvm_tdx_cmd,
+    kvm_tdx_cmd_id_KVM_TDX_CAPABILITIES, kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
 };
 use kvm_ioctls::{VcpuFd, VmFd};
 use log::error;
 
 use super::KvmVm;
 use crate::arch::x86::CpuIdEntry;
-use crate::vm;
+use crate::vm::{self, TdxInitVmParams};
 
 /// Issues one TDX sub-ioctl, retrying the errnos below and logging the TDX
 /// module status from `hw_error`.
@@ -98,6 +98,17 @@ impl TdxEncryptOp for VcpuFd {
     }
 }
 
+/// Splits a SHA-384 digest into the six `u64`s the uapi takes. Only their byte
+/// representation matters, because the kernel copies it verbatim.
+fn digest(bytes: &[u8; 48]) -> [u64; 6] {
+    array::from_fn(|word_index| {
+        let start = word_index * 8;
+        let mut word = [0; 8];
+        word.copy_from_slice(&bytes[start..start + 8]);
+        u64::from_le_bytes(word)
+    })
+}
+
 impl KvmVm {
     /// [`vm::Vm::tdx_capabilities()`] via `KVM_TDX_CAPABILITIES`.
     pub fn tdx_capabilities(&self) -> vm::Result<vm::TdxCapabilities> {
@@ -128,5 +139,33 @@ impl KvmVm {
             supported_xfam: caps.supported_xfam,
             cpuid,
         })
+    }
+    /// [`vm::Vm::tdx_init()`] via `KVM_TDX_INIT_VM`.
+    pub fn tdx_init(&self, params: &TdxInitVmParams) -> vm::Result<()> {
+        let cpuid: Vec<_> = params.cpuid.iter().map(|e| (*e).into()).collect();
+        let mut init = TdxInitVm::from_entries(&cpuid).map_err(|e| {
+            vm::HypervisorVmError::InitializeTdx(io::Error::other(format!(
+                "Failed to allocate TDX init parameters: {e}"
+            )))
+        })?;
+
+        // SAFETY: only the scalar fields before `cpuid` are written. The FAM
+        // length is `cpuid.nent`, set by `from_entries()` to the allocated
+        // entry count, and it stays untouched here.
+        let tdx = unsafe { init.as_mut_fam_struct() };
+        tdx.attributes = params.attributes;
+        tdx.xfam = params.xfam;
+        tdx.mrconfigid = digest(&params.mrconfigid);
+        tdx.mrowner = digest(&params.mrowner);
+        tdx.mrownerconfig = digest(&params.mrownerconfig);
+
+        let mut cmd = kvm_tdx_cmd {
+            id: kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
+            data: init.as_mut_fam_struct_ptr() as u64,
+            ..Default::default()
+        };
+
+        // SAFETY: `data` points to `init`, valid and unaliased for the call.
+        unsafe { tdx_cmd(self.fd.as_ref(), &mut cmd) }.map_err(vm::HypervisorVmError::InitializeTdx)
     }
 }
