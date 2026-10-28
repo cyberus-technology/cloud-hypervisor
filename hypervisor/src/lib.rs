@@ -61,12 +61,12 @@ pub use device::HypervisorDeviceError;
 pub use kvm::aarch64;
 #[cfg(all(feature = "kvm", target_arch = "riscv64"))]
 pub use kvm::{AiaState, riscv64};
-#[cfg(feature = "tdx")]
-pub use vm::TdxCapabilities;
 pub use vm::{
     DataMatch, HypervisorVmError, InterruptSourceConfig, LegacyIrqSourceConfig,
     MemoryConversionHandler, MemoryVisibility, MsiIrqSourceConfig, Vm, VmOps,
 };
+#[cfg(feature = "tdx")]
+pub use vm::{TdxCapabilities, TdxInitVmParams};
 
 pub use crate::hypervisor::{Hypervisor, HypervisorError};
 
