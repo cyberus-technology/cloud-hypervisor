@@ -11,7 +11,7 @@
 //
 
 use std::any::Any;
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
 use std::io;
 use std::result;
 use std::sync::Arc;
@@ -31,6 +31,8 @@ use crate::ClockData;
 use crate::arch::aarch64::gic::{Vgic, VgicConfig};
 #[cfg(target_arch = "riscv64")]
 use crate::arch::riscv64::aia::{Vaia, VaiaConfig};
+#[cfg(feature = "tdx")]
+use crate::arch::x86::CpuIdEntry;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::VcpuMsrConfigUpdate;
 use crate::cpu::Vcpu;
@@ -140,6 +142,14 @@ pub enum HypervisorVmError {
     /// Error initializing SEV-SNP on the VM
     #[error("Failed to initialize SEV-SNP")]
     InitializeSevSnp(#[source] io::Error),
+    #[cfg(feature = "tdx")]
+    /// Error retrieving the TDX capabilities
+    #[error("Failed to retrieve TDX capabilities")]
+    TdxCapabilities(#[source] io::Error),
+    #[cfg(feature = "tdx")]
+    /// TDX is only supported by the KVM backend
+    #[error("TDX is only supported by the KVM backend")]
+    TdxNotSupported,
 
     /// Create Vgic error
     #[error("Failed to create Vgic")]
@@ -225,6 +235,17 @@ pub enum MemoryVisibility {
     Shared,
     /// Confidential guest RAM (guest_memfd).
     Private,
+}
+
+#[cfg(feature = "tdx")]
+/// Capabilities of the TDX module, as reported by the hypervisor.
+pub struct TdxCapabilities {
+    /// TD attributes (ATTRIBUTES) the TD may request.
+    pub supported_attrs: u64,
+    /// XFAM (extended features available mask) the TD may request.
+    pub supported_xfam: u64,
+    /// CPUID leaves the TD may configure, the rest is virtualized by the module.
+    pub cpuid: Vec<CpuIdEntry>,
 }
 
 /// Trait to represent a Vm
@@ -342,6 +363,11 @@ pub trait Vm: Send + Sync + Any {
     #[cfg(feature = "sev_snp")]
     /// Initialize SEV-SNP on this VM
     fn sev_snp_init(&self, guest_policy: SnpPolicy) -> Result<()>;
+    #[cfg(feature = "tdx")]
+    /// Retrieve the capabilities of the TDX module
+    fn tdx_capabilities(&self) -> Result<TdxCapabilities> {
+        Err(HypervisorVmError::TdxNotSupported)
+    }
     /// Downcast to the underlying hypervisor VM type
     fn as_any(&self) -> &dyn Any;
     /// Import the isolated pages
