@@ -511,6 +511,14 @@ jobs:
           toolchain: ${{ matrix.rust }}
           target: ${{ matrix.target }}
           args: --locked --all --all-targets --tests --examples --features "sev_snp,igvm,fw_cfg" -- -D warnings
+      - name: Clippy (kvm + igvm + tdx)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        uses: houseabsolute/actions-rust-cross@85826e468eac832e251ac58f6191ba784db237c8 # v1
+        with:
+          command: clippy
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+          args: --locked --all --all-targets --no-default-features --tests --examples --features "kvm,igvm,tdx" -- -D warnings
       - name: Check build did not modify any files
         run: test -z "$(git status --porcelain)"
   build:
