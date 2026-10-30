@@ -628,49 +628,8 @@ jobs:
           test -e /dev/kvm || { echo "::error::/dev/kvm missing on runner"; exit 1; }
       - name: Run unit tests
         run: scripts/dev_cli.sh tests --unit --libc ${{ matrix.libc }}
-  # PR-only: delay integration testing until the build and quality gates pass.
-  integration-x86-64-pr:
-    name: integration-x86-64-pr
-    needs: [preflight, dco, quality, build]
-    if: >-
-      github.event_name == 'pull_request' && needs.preflight.outputs.full == 'true' && needs.dco.result == 'success' && needs.quality.result == 'success' && needs.build.result == 'success'
-    timeout-minutes: 80
-    env:
-      # Our runner has 16 cores (nproc).
-      # We limit parallelism only to avoid exhausting disk space and memory
-      # resources, not to save CPU resources.
-      PARALLEL_INTEGRATION_TESTS_NUM: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: garm-noble, libc: gnu}
-    # format() because `${{ matrix.runner }}-16` is not valid in runs-on.
-    runs-on: ${{ format('{0}-16', matrix.runner) }}
-    steps: &integration-x86-64-steps
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Install Docker
-        run: |
-          set -eufo pipefail
-          sudo apt-get update
-          sudo apt-get -y install ca-certificates curl gnupg
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          sudo chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update
-          sudo apt install -y docker-ce docker-ce-cli
-      - name: Prepare for VDPA
-        run: scripts/prepare_vdpa.sh
-      - name: Load openvswitch module
-        run: sudo modprobe openvswitch
-      - name: Run integration tests
-        timeout-minutes: 60
-        run: scripts/dev_cli.sh tests --integration --libc ${{ matrix.libc }}
   # MQ and dev branch pushes start all four matrix entries after preflight, in
-  # parallel with the build and quality jobs. The PR job keeps existing gates.
+  # parallel with the build and quality jobs.
   integration-x86-64-mq:
     name: integration-x86-64-mq
     needs: [preflight]
@@ -692,7 +651,28 @@ jobs:
           - {runner: garm-noble-amd, libc: musl}
     # format() because `${{ matrix.runner }}-16` is not valid in runs-on.
     runs-on: ${{ format('{0}-16', matrix.runner) }}
-    steps: *integration-x86-64-steps
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install Docker
+        run: |
+          set -eufo pipefail
+          sudo apt-get update
+          sudo apt-get -y install ca-certificates curl gnupg
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          sudo chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt install -y docker-ce docker-ce-cli
+      - name: Prepare for VDPA
+        run: scripts/prepare_vdpa.sh
+      - name: Load openvswitch module
+        run: sudo modprobe openvswitch
+      - name: Run integration tests
+        timeout-minutes: 60
+        run: scripts/dev_cli.sh tests --integration --libc ${{ matrix.libc }}
 # Disabled for maintenance  
 #  integration-arm64:
 #    name: integration-arm64
@@ -998,7 +978,6 @@ jobs:
       - integration-mshv-x86-64
       - integration-windows
       - integration-x86-64-mq
-      - integration-x86-64-pr
       - openapi
       - package-consistency
       - preflight
