@@ -103,6 +103,10 @@ pub mod aarch64;
 // riscv64 dependencies
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
+#[cfg(all(feature = "tdx", not(target_arch = "x86_64")))]
+compile_error!("The `tdx` feature is only supported on x86_64");
+#[cfg(feature = "tdx")]
+mod tdx;
 
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::KVM_X86_DEFAULT_VM;
@@ -152,6 +156,8 @@ use crate::RegList;
 use crate::TimerState;
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::{get_cntfrq, regs};
+#[cfg(feature = "tdx")]
+use crate::vm::TdxCapabilities;
 
 // `KVM_REG_ARM_TIMER_CNT`, the timer-counter firmware register the kernel defines
 // as `ARM64_SYS_REG(3, 3, 14, 3, 2)`. kvm-bindings exposes no constant for it, so
@@ -663,6 +669,11 @@ impl vm::Vm for KvmVm {
             .set(guest_policy.into_bits())
             .expect("sev_snp_init called more than once");
         Ok(())
+    }
+
+    #[cfg(feature = "tdx")]
+    fn tdx_capabilities(&self) -> vm::Result<TdxCapabilities> {
+        KvmVm::tdx_capabilities(self)
     }
 
     #[cfg(feature = "sev_snp")]
