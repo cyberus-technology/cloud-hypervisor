@@ -105,8 +105,6 @@ pub mod aarch64;
 pub mod riscv64;
 #[cfg(all(feature = "tdx", not(target_arch = "x86_64")))]
 compile_error!("The `tdx` feature is only supported on x86_64");
-#[cfg(feature = "tdx")]
-mod tdx;
 
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::KVM_X86_DEFAULT_VM;
@@ -212,6 +210,9 @@ use kvm_bindings::{
 use vm_memory::GuestAddress;
 #[cfg(feature = "sev_snp")]
 use x86_64::sev;
+#[cfg(feature = "tdx")]
+#[expect(unused)]
+use x86_64::tdx;
 
 // Hardcoded GPA of a bootloader and VMSA page for KVM
 // TODO: Derive these from the IGVM file's PageData/SnpVpContext directives
