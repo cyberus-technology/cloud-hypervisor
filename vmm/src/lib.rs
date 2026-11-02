@@ -254,7 +254,7 @@ impl From<&VmConfig> for hypervisor::HypervisorVmConfig {
     fn from(_value: &VmConfig) -> Self {
         hypervisor::HypervisorVmConfig {
             #[cfg(feature = "sev_snp")]
-            sev_snp_enabled: _value.is_sev_snp_enabled(),
+            is_cvm: _value.is_cvm(),
             #[cfg(feature = "sev_snp")]
             mem_size: _value.memory.total_size(),
             #[cfg(feature = "sev_snp")]
@@ -1390,7 +1390,7 @@ impl Vmm {
             None,
             phys_bits,
             #[cfg(feature = "sev_snp")]
-            vm_config.is_sev_snp_enabled(),
+            vm_config.is_cvm(),
             Some(&vm_migration_config.memory_manager_data),
             existing_memory_files,
         )

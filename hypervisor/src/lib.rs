@@ -272,7 +272,7 @@ pub enum ClockRestoreMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HypervisorVmConfig {
     #[cfg(feature = "sev_snp")]
-    pub sev_snp_enabled: bool,
+    pub is_cvm: bool,
     #[cfg(feature = "sev_snp")]
     pub mem_size: u64,
     #[cfg(feature = "sev_snp")]

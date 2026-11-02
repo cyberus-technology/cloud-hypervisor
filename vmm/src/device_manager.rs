@@ -5078,7 +5078,7 @@ impl DeviceManager {
 
         // If SEV-SNP is enabled create the AccessPlatform from SevSnpPageAccessProxy
         #[cfg(feature = "sev_snp")]
-        if self.config.lock().unwrap().is_sev_snp_enabled() {
+        if self.config.lock().unwrap().is_cvm() {
             access_platform = Some(Arc::new(SevSnpPageAccessProxy::new(Arc::clone(
                 &self.address_manager.vm,
             ))));

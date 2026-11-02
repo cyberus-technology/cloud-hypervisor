@@ -298,7 +298,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         let mut mshv_vm_type = VmType::Normal; // Create with default platform type
         #[cfg(feature = "sev_snp")]
         {
-            mshv_vm_type = if _config.sev_snp_enabled {
+            mshv_vm_type = if _config.is_cvm {
                 VmType::Snp
             } else {
                 VmType::Normal
