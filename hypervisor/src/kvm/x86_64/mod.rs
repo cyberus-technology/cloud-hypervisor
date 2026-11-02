@@ -8,10 +8,10 @@
 //
 //
 
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "tdx", feature = "sev_snp"))]
 use kvm_bindings::KVM_MEMORY_ATTRIBUTE_PRIVATE;
 use kvm_bindings::nested::KvmNestedStateBuffer;
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "tdx", feature = "sev_snp"))]
 use kvm_ioctls::VmFd;
 use serde::{Deserialize, Serialize};
 use vmm_sys_util::fam;
@@ -70,9 +70,9 @@ pub fn check_required_kvm_extensions(kvm: &Kvm) -> KvmResult<()> {
     Ok(())
 }
 
-#[cfg(feature = "sev_snp")]
-/// Check KVM extensions required for SEV-SNP.
-pub fn check_required_sev_snp_extensions(vm: &VmFd) -> KvmResult<()> {
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
+/// Check KVM extensions required for x86 CVMs.
+pub fn check_required_cvm_extensions(vm: &VmFd) -> KvmResult<()> {
     check_extension!(vm, Cap::GuestMemfd);
     // MEMORY_ATTRIBUTES is a bit mask and requires special handling.
     let check_result = vm.check_extension_int(Cap::MemoryAttributes);

@@ -18,7 +18,7 @@ use std::mem::offset_of;
 use std::num;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::io::AsRawFd;
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
 use std::process;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use std::sync::Mutex;
@@ -76,10 +76,10 @@ use kvm_bindings::{
     KVM_REG_GUEST_SSP, KVM_X2APIC_API_DISABLE_BROADCAST_QUIRK, KVM_X2APIC_API_USE_32BIT_IDS,
     MsrList, kvm_enable_cap, kvm_msr_entry, kvm_x86_reg_kvm,
 };
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
+use x86_64::check_required_cvm_extensions;
 #[cfg(target_arch = "x86_64")]
 use x86_64::check_required_kvm_extensions;
-#[cfg(all(target_arch = "x86_64", feature = "sev_snp"))]
-use x86_64::check_required_sev_snp_extensions;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{CpuId, ExtendedControlRegisters, MsrEntries, VcpuKvmState};
 
@@ -201,10 +201,10 @@ const SHSTK_ECX_BIT: u8 = 7; // CET shadow stack, CPUID leaf 7 subleaf 0 ECX
 
 #[cfg(feature = "sev_snp")]
 use igvm_defs::PAGE_SIZE_4K;
+#[cfg(any(feature = "tdx", feature = "sev_snp"))]
+use kvm_bindings::{KVM_MEMORY_ATTRIBUTE_PRIVATE, kvm_memory_attributes};
 #[cfg(feature = "sev_snp")]
-use kvm_bindings::{
-    KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_X86_SNP_VM, kvm_memory_attributes, kvm_segment as Segment,
-};
+use kvm_bindings::{KVM_X86_SNP_VM, kvm_segment as Segment};
 use vm_memory::GuestAddress;
 #[cfg(feature = "sev_snp")]
 use x86_64::sev;
@@ -1003,7 +1003,7 @@ impl vm::Vm for KvmVm {
                 .map_err(|e| vm::HypervisorVmError::CreateUserMemory(e.into()))?;
         }
 
-        #[cfg(feature = "sev_snp")]
+        #[cfg(any(feature = "sev_snp", feature = "tdx"))]
         if visibility == vm::MemoryVisibility::Private
             && self.memory_slots.is_some()
             && let Err(e) = self.fd.set_memory_attributes(kvm_memory_attributes {
@@ -1050,7 +1050,6 @@ impl vm::Vm for KvmVm {
                 },
             );
         }
-
         Ok(())
     }
 
@@ -1411,7 +1410,7 @@ impl KvmHypervisor {
 pub enum KvmError {
     #[error("Capability missing: {0:?}")]
     CapabilityMissing(Cap),
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "tdx", feature = "sev_snp"))]
     #[error(
         "Memory attributes {0:#b} do not include required private attribute ({KVM_MEMORY_ATTRIBUTE_PRIVATE:#b})"
     )]
@@ -1538,9 +1537,9 @@ impl hypervisor::Hypervisor for KvmHypervisor {
 
             #[allow(unused_mut)]
             let mut memory_slots = None;
-            #[cfg(feature = "sev_snp")]
+            #[cfg(any(feature = "sev_snp", feature = "tdx"))]
             if _config.is_cvm {
-                check_required_sev_snp_extensions(&fd)
+                check_required_cvm_extensions(&fd)
                     .map_err(|e| hypervisor::HypervisorError::CheckExtensions(e.into()))?;
                 memory_slots = Some(Arc::new(RwLock::new(HashMap::new())));
             }
