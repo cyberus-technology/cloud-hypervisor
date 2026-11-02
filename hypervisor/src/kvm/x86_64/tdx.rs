@@ -19,7 +19,7 @@ use kvm_bindings::{
 use kvm_ioctls::{VcpuFd, VmFd};
 use log::error;
 
-use super::{KvmVcpu, KvmVm};
+use super::super::{KvmVcpu, KvmVm};
 use crate::arch::x86::CpuIdEntry;
 use crate::cpu;
 use crate::vm::{self, TdxInitVmParams};
