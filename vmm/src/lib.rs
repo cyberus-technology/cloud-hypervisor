@@ -253,7 +253,7 @@ pub enum MemoryZoneUpdateError {
 impl From<&VmConfig> for hypervisor::HypervisorVmConfig {
     fn from(_value: &VmConfig) -> Self {
         hypervisor::HypervisorVmConfig {
-            #[cfg(feature = "sev_snp")]
+            #[cfg(any(feature = "tdx", feature = "sev_snp"))]
             is_cvm: _value.is_cvm(),
             #[cfg(feature = "sev_snp")]
             mem_size: _value.memory.total_size(),

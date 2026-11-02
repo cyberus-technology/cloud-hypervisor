@@ -1008,9 +1008,9 @@ macro_rules! platform_syntax {
 }
 
 impl PlatformConfig {
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "tdx", feature = "sev_snp"))]
     pub const SYNTAX: &'static str = platform_syntax!(",is_cvm=on|off");
-    #[cfg(not(feature = "sev_snp"))]
+    #[cfg(not(any(feature = "sev_snp", feature = "tdx")))]
     pub const SYNTAX: &'static str = platform_syntax!();
 
     /// # Safety
@@ -1070,7 +1070,7 @@ impl PlatformConfig {
         for field in SMBIOS_STRING_FIELDS {
             parser.add(field.key);
         }
-        #[cfg(feature = "sev_snp")]
+        #[cfg(any(feature = "tdx", feature = "sev_snp"))]
         parser.add("is_cvm");
         parser.parse(platform).map_err(Error::ParsePlatform)?;
 
@@ -1107,7 +1107,7 @@ impl PlatformConfig {
             .map_err(Error::ParsePlatform)?
             .unwrap_or(Toggle(true))
             .0;
-        #[cfg(feature = "sev_snp")]
+        #[cfg(any(feature = "tdx", feature = "sev_snp"))]
         let is_cvm = parser
             .convert::<Toggle>("is_cvm")
             .map_err(Error::ParsePlatform)?
@@ -1129,7 +1129,7 @@ impl PlatformConfig {
             chassis_asset_tag: None,
             iommufd,
             iommufd_fd,
-            #[cfg(feature = "sev_snp")]
+            #[cfg(any(feature = "tdx", feature = "sev_snp"))]
             is_cvm,
             vfio_p2p_dma,
         };
@@ -4341,7 +4341,7 @@ impl VmConfig {
         removed
     }
 
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "tdx", feature = "sev_snp"))]
     pub fn is_cvm(&self) -> bool {
         self.platform.as_ref().is_some_and(|p| p.is_cvm)
     }
@@ -7597,7 +7597,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             system_family: None,
             system_sku_number: None,
             chassis_asset_tag: None,
-            #[cfg(feature = "sev_snp")]
+            #[cfg(any(feature = "tdx", feature = "sev_snp"))]
             is_cvm: false,
         }
     }

@@ -174,7 +174,7 @@ pub struct PlatformConfig {
     pub system_sku_number: Option<String>,
     #[serde(default)]
     pub chassis_asset_tag: Option<String>,
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "tdx", feature = "sev_snp"))]
     #[serde(default, alias = "sev_snp")]
     pub is_cvm: bool,
     #[serde(default)]
