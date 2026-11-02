@@ -568,6 +568,8 @@ jobs:
         run: cargo build --locked --bin cloud-hypervisor --no-default-features --features "kvm,sev_snp" --target=${{ matrix.target }}
       - name: Build (kvm + igvm + sev_snp + fw_cfg)
         run: cargo build --locked --bin cloud-hypervisor --no-default-features --features "kvm,igvm,sev_snp,fw_cfg" --target=${{ matrix.target }}
+      - name: Build (kvm + tdx)
+        run: cargo build --locked --bin cloud-hypervisor --no-default-features --features "kvm,tdx" --target=${{ matrix.target }}
       - name: Build (kvm + igvm)
         run: cargo build --locked --bin cloud-hypervisor --no-default-features --features "kvm,igvm" --target=${{ matrix.target }}
       - name: Build (mshv + kvm)
