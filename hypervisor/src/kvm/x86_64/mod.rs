@@ -35,6 +35,9 @@ use crate::kvm::{Cap, Kvm, KvmError, KvmResult};
 #[cfg(feature = "sev_snp")]
 pub(crate) mod sev;
 
+#[cfg(feature = "tdx")]
+pub(crate) mod tdx;
+
 macro_rules! check_extension {
     ($kvm:expr, $cap:expr) => {
         if !$kvm.check_extension($cap) {
