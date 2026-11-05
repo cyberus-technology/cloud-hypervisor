@@ -441,7 +441,20 @@ pub struct PciDeviceCommonConfig {
     pub iommu: IommuType,
     #[serde(default)]
     pub pci_segment: u16,
-    #[serde(default, alias = "pci_device_id", rename = "bdf_device")]
+    // On Dec 5th 2025, when the patchset was based on CH v48, we decided for
+    // `bdf_device`. During upstreaming this landed as `pci_device_id` on April
+    // 4th 2026 [0].
+    //
+    // We kept the old name until v54 (early November 2026) for compatibility.
+    // Now, we transition to the new name. The libvirt/ch driver will also
+    // transition to the new name, but works with both names for the time being.
+    //
+    // Once this is fully rolled out at SAP, we can drop the commit (at least
+    // regarding migrations). However, there might be old snapshots that would
+    // not restore without this. Remove with caution!
+    //
+    // [0] https://github.com/cloud-hypervisor/cloud-hypervisor/pull/7965/changes/980678ee0bff74157d6643a042b2cd3c30de3460
+    #[serde(default, alias = "bdf_device")]
     pub pci_device_id: Option<u8>,
 }
 
