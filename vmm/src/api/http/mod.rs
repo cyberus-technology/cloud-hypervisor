@@ -13,6 +13,7 @@ use std::sync::LazyLock;
 use std::sync::mpsc::Sender;
 use std::{panic, result, thread};
 
+use block::error::BlockErrorKind;
 use log::{error, info};
 use micro_http::{
     Body, HttpServer, MediaType, Method, Request, Response, ServerError, StatusCode, Version,
@@ -20,20 +21,22 @@ use micro_http::{
 use seccompiler::{SeccompAction, apply_filter};
 use serde_json::Error as SerdeError;
 use thiserror::Error;
+use virtio_devices::block::MirrorError;
 use vm_migration::MigratableError;
 use vmm_sys_util::eventfd::EventFd;
 
 use self::http_endpoint::{
-    VmActionHandler, VmBalloonStats, VmCreate, VmInfo, VmmPing, VmmShutdown,
+    VmActionHandler, VmBalloonStats, VmCreate, VmInfo, VmMigrationProgress, VmmPing, VmmShutdown,
 };
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
     VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCancelMigration, VmCounters,
-    VmDelete, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice,
-    VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown,
-    VmSnapshot,
+    VmDelete, VmDiskMirrorCancel, VmDiskMirrorComplete, VmDiskMirrorStart, VmDiskMirrorStatus,
+    VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton, VmReboot, VmReceiveMigration,
+    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
+    VmShutdown, VmSnapshot,
 };
 use crate::config::ValidationError;
 use crate::device_manager::DeviceManagerError;
@@ -97,6 +100,26 @@ impl HttpError {
 
 /// Maps an [`ApiError`] to an HTTP [`StatusCode`].
 fn api_error_status_code(error: &ApiError) -> StatusCode {
+    if let ApiError::VmDiskMirrorStart(VmError::DeviceManager(device_error)) = error {
+        match device_error {
+            DeviceManagerError::Disk(error)
+                if matches!(error.kind(), BlockErrorKind::ImageTypeMismatch { .. }) =>
+            {
+                return StatusCode::BadRequest;
+            }
+            DeviceManagerError::BlockMirrorAlreadyActive(_)
+            | DeviceManagerError::BlockMirrorDestinationInUse(_)
+            | DeviceManagerError::BlockMirrorStart(
+                MirrorError::DeviceNotActive
+                | MirrorError::DevicePaused
+                | MirrorError::DestinationSizeMismatch { .. }
+                | MirrorError::DestinationLock { .. }
+                | MirrorError::Unsupported(_),
+            ) => return StatusCode::BadRequest,
+            _ => {}
+        }
+    }
+
     let source = error.source();
 
     // The migration endpoints report state conflicts with a `MigratableError`,
@@ -112,13 +135,27 @@ fn api_error_status_code(error: &ApiError) -> StatusCode {
             VmError::VmNotCreated
             | VmError::VmMissingConfig
             | VmError::NoDeviceToRemove(_)
-            | VmError::DeviceManager(DeviceManagerError::UnknownDeviceId(_)),
+            | VmError::DeviceManager(
+                DeviceManagerError::UnknownDeviceId(_)
+                | DeviceManagerError::BlockMirrorNotActive(_)
+                | DeviceManagerError::BlockMirrorComplete(MirrorError::NotActive)
+                | DeviceManagerError::BlockMirrorCancel(MirrorError::NotActive),
+            ),
         ) => StatusCode::NotFound,
         Some(
             VmError::VmMigrating
             | VmError::VmRestoring
             | VmError::DeviceManager(DeviceManagerError::IdentifierNotUnique(_)),
         ) => StatusCode::Conflict,
+        Some(VmError::DeviceManager(DeviceManagerError::BlockMirrorComplete(
+            MirrorError::DestinationChanged { .. }
+            | MirrorError::DestinationLock { .. }
+            | MirrorError::DevicePaused
+            | MirrorError::NotReady,
+        ))) => StatusCode::BadRequest,
+        Some(VmError::DeviceManager(DeviceManagerError::BlockMirrorCancel(
+            MirrorError::CompletionInProgress | MirrorError::DevicePaused,
+        ))) => StatusCode::BadRequest,
         Some(VmError::ConfigValidation(e)) => match e {
             ValidationError::IdentifierNotUnique(_) | ValidationError::DuplicateDevicePath(_) => {
                 StatusCode::Conflict
@@ -282,6 +319,22 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
         endpoint!("/vm.delete"),
         Box::new(VmActionHandler::new(&VmDelete)),
     );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-start"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorStart)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-status"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorStatus)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-complete"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorComplete)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.disk-mirror-cancel"),
+        Box::new(VmActionHandler::new(&VmDiskMirrorCancel)),
+    );
     r.routes.insert(endpoint!("/vm.info"), Box::new(VmInfo {}));
     r.routes.insert(
         endpoint!("/vm.pause"),
@@ -332,8 +385,16 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
         Box::new(VmActionHandler::new(&VmCancelMigration)),
     );
     r.routes.insert(
+        endpoint!("/vm.post-migration-announce"),
+        Box::new(VmActionHandler::new(&VmPostMigrationAnnounce)),
+    );
+    r.routes.insert(
         endpoint!("/vm.shutdown"),
         Box::new(VmActionHandler::new(&VmShutdown)),
+    );
+    r.routes.insert(
+        endpoint!("/vm.migration-progress"),
+        Box::new(VmMigrationProgress {}),
     );
     r.routes.insert(
         endpoint!("/vm.snapshot"),
@@ -556,6 +617,23 @@ mod tests {
     }
 
     #[test]
+    fn test_disk_mirror_status_error_codes() {
+        for error in [
+            DeviceManagerError::UnknownDeviceId("disk0".into()),
+            DeviceManagerError::BlockMirrorNotActive("disk0".into()),
+        ] {
+            assert_eq!(
+                api_error_status_code(&ApiError::VmDiskMirrorStatus(VmError::DeviceManager(error))),
+                StatusCode::NotFound
+            );
+        }
+        assert_eq!(
+            api_error_status_code(&ApiError::VmDiskMirrorStatus(VmError::VmMigrating)),
+            StatusCode::Conflict
+        );
+    }
+
+    #[test]
     fn test_duplicate_identifier_or_path_maps_to_conflict() {
         assert_eq!(
             api_error_status_code(&ApiError::VmAddDisk(VmError::ConfigValidation(
@@ -630,6 +708,99 @@ mod tests {
             api_error_status_code(&ApiError::VmReceiveMigration(MigratableError::Conflict(
                 anyhow!("A VM already exists on this VMM")
             ))),
+            StatusCode::Conflict
+        );
+    }
+
+    #[test]
+    fn test_disk_mirror_error_status_codes() {
+        use block::error::BlockError;
+
+        for (error, expected) in [
+            (
+                DeviceManagerError::Disk(BlockError::from_kind(
+                    BlockErrorKind::ImageTypeMismatch {
+                        specified: block::ImageType::Qcow2,
+                    },
+                )),
+                StatusCode::BadRequest,
+            ),
+            (
+                DeviceManagerError::BlockMirrorAlreadyActive("disk0".into()),
+                StatusCode::BadRequest,
+            ),
+            (
+                DeviceManagerError::BlockMirrorStart(MirrorError::DevicePaused),
+                StatusCode::BadRequest,
+            ),
+            (
+                DeviceManagerError::UnknownDeviceId("disk0".into()),
+                StatusCode::NotFound,
+            ),
+            (
+                DeviceManagerError::Disk(BlockError::from_kind(BlockErrorKind::Io)),
+                StatusCode::InternalServerError,
+            ),
+        ] {
+            let error = ApiError::VmDiskMirrorStart(VmError::DeviceManager(error));
+            assert_eq!(api_error_status_code(&error), expected, "{error:?}");
+        }
+        assert_eq!(
+            api_error_status_code(&ApiError::VmDiskMirrorStart(VmError::VmMigrating)),
+            StatusCode::Conflict
+        );
+    }
+
+    #[test]
+    fn test_disk_mirror_complete_error_codes() {
+        use block::error::BlockError;
+
+        for (error, expected) in [
+            (MirrorError::NotActive, StatusCode::NotFound),
+            (MirrorError::NotReady, StatusCode::BadRequest),
+            (MirrorError::DevicePaused, StatusCode::BadRequest),
+            (
+                MirrorError::DestinationChanged {
+                    path: "/mirror.raw".into(),
+                },
+                StatusCode::BadRequest,
+            ),
+            (
+                MirrorError::Backend(BlockError::from_kind(BlockErrorKind::Io)),
+                StatusCode::InternalServerError,
+            ),
+        ] {
+            let error = ApiError::VmDiskMirrorComplete(VmError::DeviceManager(
+                DeviceManagerError::BlockMirrorComplete(error),
+            ));
+            assert_eq!(api_error_status_code(&error), expected, "{error:?}");
+        }
+        assert_eq!(
+            api_error_status_code(&ApiError::VmDiskMirrorComplete(VmError::VmMigrating)),
+            StatusCode::Conflict
+        );
+    }
+
+    #[test]
+    fn test_disk_mirror_cancel_error_codes() {
+        use block::error::BlockError;
+
+        for (error, expected) in [
+            (MirrorError::NotActive, StatusCode::NotFound),
+            (MirrorError::CompletionInProgress, StatusCode::BadRequest),
+            (MirrorError::DevicePaused, StatusCode::BadRequest),
+            (
+                MirrorError::Backend(BlockError::from_kind(BlockErrorKind::Io)),
+                StatusCode::InternalServerError,
+            ),
+        ] {
+            let error = ApiError::VmDiskMirrorCancel(VmError::DeviceManager(
+                DeviceManagerError::BlockMirrorCancel(error),
+            ));
+            assert_eq!(api_error_status_code(&error), expected, "{error:?}");
+        }
+        assert_eq!(
+            api_error_status_code(&ApiError::VmDiskMirrorCancel(VmError::VmMigrating)),
             StatusCode::Conflict
         );
     }

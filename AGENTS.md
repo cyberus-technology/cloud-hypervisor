@@ -4,6 +4,10 @@ This is a compact [AGENTS.md](https://agents.md/) file for Cloud Hypervisor.
 It is meant to help automated coding agents make useful changes that stay safe,
 reviewable, and compatible with the project's normal engineering constraints.
 
+This checkout is a Cyberus Technology fork of Cloud Hypervisor. It is maintained
+independently from upstream, while still following upstream contribution and
+code-quality guidance unless fork-specific requirements say otherwise.
+
 ## For LLMs
 
 ### Project Context
@@ -13,6 +17,9 @@ reviewable, and compatible with the project's normal engineering constraints.
   disclosure policy. Following `CONTRIBUTING.md` is crucial!
 - Respect `.editorconfig` when editing files, in addition to any
   language-specific formatter required by `CONTRIBUTING.md`.
+- Treat live migration and the vCPU lifecycle as first-class production areas.
+  Preserve deterministic state transfer, robust failure handling, correct device
+  and memory state, and explicit race-free vCPU state transitions.
 
 ### Change Guidelines
 
@@ -29,6 +36,11 @@ reviewable, and compatible with the project's normal engineering constraints.
 - Preserve existing behavior unless the requested change explicitly needs a
   behavior change; refactors must preserve behavior. Call out compatibility or
   migration implications.
+- Prefer simple solutions over unnecessary traits, excessive indirection, or
+  premature abstraction.
+- Prefer `Result` over panics for recoverable production-path errors. Handle
+  syscall and KVM ioctl return values explicitly and include useful context in
+  error messages.
 - Do not invent APIs, behavior, or requirements. If something is uncertain,
   state the uncertainty and proceed only with minimal, explicit assumptions.
 - For `thiserror`-style errors, start messages with a capital letter and keep
@@ -43,6 +55,8 @@ reviewable, and compatible with the project's normal engineering constraints.
   comment with the invariants, and make sure the surrounding code upholds them.
 - Assume concurrency matters. Avoid races, unsynchronized shared state, and
   implicit ordering assumptions; prefer clear ownership and synchronization.
+- Keep KVM code aligned with the kernel API. Do not rely on undocumented
+  behavior or ignore backend-specific failure modes.
 
 ### Build and Test Notes
 
@@ -61,6 +75,11 @@ reviewable, and compatible with the project's normal engineering constraints.
   code directly without the infrastructure from `./scripts`, set the Rust cfg
   `devcli_testenv` or simply build through `clippy` which automatically includes
   these code paths; otherwise the integration-test code is not included.
+- For broader VM behavior, this fork also uses an external `libvirt-tests` suite
+  outside this repository. If a change likely needs that coverage, say so and
+  ask whether it should be run, skipped, or handled manually by the developer.
+  Only run it yourself if the developer provides the necessary instructions and
+  access details.
 
 ### Commit and Patch Formatting
 
@@ -76,3 +95,15 @@ reviewable, and compatible with the project's normal engineering constraints.
 - Temporary allowances such as `#[allow(unused)]` or ignored tests are only
   acceptable if resolved within the same commit series or paired with a clear
   TODO referencing a ticket. Ask the developer if in doubt.
+- Commits need a `On-behalf-of: SAP $firstname.$lastname@sap.com` trailer: e.g.:
+  ```
+  $component: $summary
+
+  $body
+
+  On-behalf-of: SAP philipp.schuster@sap.com
+  Signed-off-by: Philipp Schuster <philipp.schuster@cyberus-technology.de>
+  ```
+  as our work is sponsored by SAP, which gets its money from the EU (Apeiro
+  project). The enforcing CI rule is in
+  `./scripts/gitlint/rules/on-behalf-of-marker.py`

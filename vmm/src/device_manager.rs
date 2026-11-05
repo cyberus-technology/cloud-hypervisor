@@ -16,20 +16,16 @@ use std::cmp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(feature = "sev_snp")]
 use std::fmt;
-#[cfg(feature = "kvm")]
-use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Seek, SeekFrom, stdout};
 use std::num::Wrapping;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
-#[cfg(not(target_arch = "riscv64"))]
-use std::path::Path;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
-use std::{iter, path, result, sync};
+use std::{fs, iter, path, result, sync};
 
 use acpi_tables::sdt::GenericAddress;
 use acpi_tables::{Aml, aml};
@@ -41,8 +37,10 @@ use arch::layout::{APIC_START, IOAPIC_SIZE, IOAPIC_START};
 use arch::{DeviceType, MmioDeviceInfo};
 use arch::{NumaNodes, layout};
 use block::ImageType;
+use block::disk_file::AsyncFullDiskFile;
 use block::error::BlockError;
 use block::factory::{DiskOpenOptions, open_disk};
+use block::mirror::MirrorStatus;
 #[cfg(target_arch = "aarch64")]
 use devices::acpi_tad;
 #[cfg(target_arch = "riscv64")]
@@ -112,7 +110,7 @@ use tracer::trace_scoped;
 #[cfg(feature = "kvm")]
 use vfio_ioctls::VfioIommufd;
 use vfio_ioctls::{VfioContainer, VfioDevice, VfioDeviceFd, VfioOps};
-use virtio_devices::block::Error as VirtioBlockError;
+use virtio_devices::block::{Error as VirtioBlockError, MirrorError};
 use virtio_devices::transport::{
     VIRTIO_CONFIG_BAR_INDEX, VIRTIO_SHM_BAR_INDEX, VirtioPciDevice, VirtioPciDeviceActivator,
     VirtioTransport,
@@ -157,6 +155,8 @@ use crate::serial_manager::{Error as SerialManagerError, SerialManager};
 #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
 use crate::sev::SevSnpSharedPageTracker;
 use crate::util::flatten_error_chain_to_string;
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+use crate::vm_config::FwCfgConfig;
 #[cfg(feature = "ivshmem")]
 use crate::vm_config::IvshmemConfig;
 use crate::vm_config::{
@@ -237,6 +237,14 @@ pub enum DeviceManagerError {
     /// Cannot create virtio-console device
     #[error("Cannot create virtio-console device")]
     CreateVirtioConsole(#[source] io::Error),
+
+    /// TCP transport is unavailable for the virtio console.
+    #[error("TCP mode is not supported for the virtio console")]
+    UnsupportedTcpConsole,
+
+    /// Failed to trigger a device's post-migration announcements.
+    #[error("Failed to trigger post-migration announcements")]
+    PostMigrationAnnounce(#[source] io::Error),
 
     /// Cannot create virtio-rng device
     #[error("Cannot create virtio-rng device")]
@@ -671,6 +679,49 @@ pub enum DeviceManagerError {
     /// Disk resizing failed.
     #[error("Disk resize error")]
     DiskResize(#[source] VirtioBlockError),
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// Tried to create a boot entry for non-bootable device.
+    #[error("Cannot create boot entry for device. It is therefore non-bootable")]
+    DeviceNotBootable,
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// The device used as a boot entry has no valid PCI address. A valid BDF is
+    /// required to generate a device path for OVMF.
+    #[error("No BDF assigned to boot entry")]
+    BdfForBootDeviceMissing,
+
+    /// Reports a failure to start block mirroring.
+    #[error("Failed to start block mirroring")]
+    BlockMirrorStart(#[source] MirrorError),
+
+    /// Block mirroring is not active for the current device.
+    #[error("Block mirroring is not active for the current disk with identifier: {0}")]
+    BlockMirrorNotActive(String),
+
+    /// Mirroring is already active for the current device.
+    #[error(
+        "Failed to start block mirroring for the disk with identifier: {0} as mirroring is already active"
+    )]
+    BlockMirrorAlreadyActive(String),
+
+    /// The mirror destination path is already backing one of the VM's disks.
+    #[error("Cannot mirror to '{0}': it is already in use as a disk image by this VM")]
+    BlockMirrorDestinationInUse(String),
+
+    /// Cannot perform given action, as the device is currently performing a block mirroring operation.
+    #[error(
+        "Failed to perform the requested action for the disk with identifier: {0} as it is currently performing a block mirroring operation"
+    )]
+    BlockMirrorActive(String),
+
+    /// Reports a failure to complete block mirroring.
+    #[error("Failed to complete block mirroring")]
+    BlockMirrorComplete(#[source] MirrorError),
+
+    /// Cancelling the block mirror failed.
+    #[error("Failed to cancel block mirroring")]
+    BlockMirrorCancel(#[source] MirrorError),
 }
 
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
@@ -913,6 +964,54 @@ pub struct AcpiPlatformAddresses {
     pub sleep_status_reg_address: Option<GenericAddress>,
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+#[derive(Clone, Debug)]
+/// Helper for collecting the information necessary to add a boot order hint for firmware.
+pub struct BootOrderEntry {
+    /// Boot index to use for this device as per configuration.
+    pub boot_index: u32,
+    /// The device type.
+    pub device_type: Option<VirtioDeviceType>,
+    /// Address of the device to generate the boot order hint from.
+    pub device_address: Option<PciBdf>,
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+impl BootOrderEntry {
+    /// Creates a new boot order entry with `device_type` and `device_address` set to `None`.
+    pub fn new(boot_index: u32) -> Self {
+        Self {
+            boot_index,
+            device_type: None,
+            device_address: None,
+        }
+    }
+
+    /// Update this [`BootOrderEntry`]'s `device_type` and `device_address` field from the given
+    /// data.
+    pub fn update_from_device_node(&mut self, node: &DeviceNode) -> DeviceManagerResult<()> {
+        let device_type =
+            if let Some(PciDeviceHandle::Virtio(virtio_device)) = node.pci_device_handle.as_ref() {
+                virtio_device
+                    .lock()
+                    .unwrap()
+                    .virtio_device()
+                    .lock()
+                    .unwrap()
+                    .device_type()
+                    .into()
+            } else {
+                return Err(DeviceManagerError::DeviceNotBootable);
+            };
+        let device_address = node
+            .pci_bdf
+            .ok_or(DeviceManagerError::BdfForBootDeviceMissing)?;
+        self.device_address = Some(device_address);
+        self.device_type = Some(device_type);
+        Ok(())
+    }
+}
+
 #[cfg(feature = "sev_snp")]
 struct SevSnpPageAccessProxy {
     vm: Arc<dyn hypervisor::Vm>,
@@ -1128,6 +1227,9 @@ pub struct DeviceManager {
     #[cfg(feature = "ivshmem")]
     // ivshmem device
     ivshmem_device: Option<Arc<Mutex<devices::IvshmemDevice>>>,
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    boot_order: HashMap<String, BootOrderEntry>,
 }
 
 // Claims the part of [base, end) that falls inside the allocator.
@@ -1457,6 +1559,8 @@ impl DeviceManager {
             #[cfg(feature = "ivshmem")]
             ivshmem_device: None,
             _acpi_cpu_hotplug_controller: acpi_cpu_hotplug_controller,
+            #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+            boot_order: HashMap::new(),
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
@@ -1583,6 +1687,21 @@ impl DeviceManager {
             let mut ivshmem = self.config.lock().unwrap().ivshmem.clone();
             if let Some(ivshmem) = &mut ivshmem {
                 self.ivshmem_device = self.add_ivshmem_device(ivshmem, snapshot)?;
+            }
+        }
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        {
+            // If we have a boot order but no fw_cfg device, we must create the latter.
+            let mut vm_config = self.config.lock().unwrap();
+            if !self.boot_order.is_empty()
+                && let Some(payload_config) = vm_config.payload.as_mut()
+                && payload_config.fw_cfg_config.is_none()
+            {
+                info!(
+                    "fw_cfg device added implicitly as a requirement to configure the boot order of disks."
+                );
+                vm_config.payload.as_mut().unwrap().fw_cfg_config = Some(FwCfgConfig::default());
             }
         }
 
@@ -2043,10 +2162,13 @@ impl DeviceManager {
     ) -> DeviceManagerResult<Option<Arc<Mutex<devices::AcpiGedDevice>>>> {
         let vcpus_kill_signalled =
             Arc::clone(self.cpu_manager.lock().unwrap().vcpus_kill_signalled());
+        let vcpus_pause_signalled =
+            Arc::clone(self.cpu_manager.lock().unwrap().vcpus_pause_signalled());
         let shutdown_device = Arc::new(Mutex::new(devices::AcpiShutdownDevice::new(
             guest_exit_evt,
             reset_evt,
             vcpus_kill_signalled,
+            vcpus_pause_signalled,
         )));
 
         self.bus_devices
@@ -2147,10 +2269,13 @@ impl DeviceManager {
     fn add_legacy_devices(&mut self, reset_evt: EventFd) -> DeviceManagerResult<()> {
         let vcpus_kill_signalled =
             Arc::clone(self.cpu_manager.lock().unwrap().vcpus_kill_signalled());
+        let vcpus_pause_signalled =
+            Arc::clone(self.cpu_manager.lock().unwrap().vcpus_pause_signalled());
         // Add a shutdown device (i8042)
         let i8042 = Arc::new(Mutex::new(legacy::I8042Device::new(
             reset_evt.try_clone().unwrap(),
             Arc::clone(&vcpus_kill_signalled),
+            Arc::clone(&vcpus_pause_signalled),
         )));
 
         self.bus_devices
@@ -2180,6 +2305,7 @@ impl DeviceManager {
                 mem_above_4g,
                 reset_evt,
                 vcpus_kill_signalled,
+                Arc::clone(&vcpus_pause_signalled),
             )));
 
             self.bus_devices
@@ -2603,6 +2729,9 @@ impl DeviceManager {
                 self.console.socket = Some(listener);
                 Endpoint::Socket(Arc::new(inner))
             }
+            ConsoleTransport::Tcp(_, _) => {
+                return Err(DeviceManagerError::UnsupportedTcpConsole);
+            }
             ConsoleTransport::Null => Endpoint::Null,
             ConsoleTransport::Off => return Ok(None),
         };
@@ -2681,6 +2810,7 @@ impl DeviceManager {
             | ConsoleTransport::Null
             | ConsoleTransport::Pty(_)
             | ConsoleTransport::Socket(_) => None,
+            ConsoleTransport::Tcp(_, _) => None,
         };
 
         if !matches!(console_info.serial, ConsoleTransport::Off) {
@@ -2688,7 +2818,8 @@ impl DeviceManager {
             self.serial_manager = match console_info.serial {
                 ConsoleTransport::Pty(_)
                 | ConsoleTransport::Tty(_)
-                | ConsoleTransport::Socket(_) => {
+                | ConsoleTransport::Socket(_)
+                | ConsoleTransport::Tcp(_, _) => {
                     let serial_manager = SerialManager::new(serial, console_info.serial)
                         .map_err(DeviceManagerError::CreateSerialManager)?;
                     if let Some(mut serial_manager) = serial_manager {
@@ -2716,7 +2847,8 @@ impl DeviceManager {
                 ConsoleTransport::Off
                 | ConsoleTransport::Null
                 | ConsoleTransport::Pty(_)
-                | ConsoleTransport::Socket(_) => None,
+                | ConsoleTransport::Socket(_)
+                | ConsoleTransport::Tcp(_, _) => None,
             };
             if let Some(writer) = debug_console_writer {
                 let _ = self.add_debug_console_device(writer)?;
@@ -3004,6 +3136,25 @@ impl DeviceManager {
             .unwrap()
             .insert(id.clone(), device_node!(id, migratable_device));
 
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        if let Some(boot_index) = disk_cfg.bootindex {
+            // Validation already has excluded duplicate device IDs and boot indices. So if we
+            // encounter the same index or device ID twice, this is a programming bug.
+            assert!(
+                self.boot_order
+                    .values()
+                    .find(|entry| entry.boot_index == boot_index)
+                    .is_none(),
+                "Bootindex {boot_index} is not unique!"
+            );
+            assert!(
+                self.boot_order
+                    .insert(id.clone(), BootOrderEntry::new(boot_index))
+                    .is_none(),
+                "The device id {id} is not unique!"
+            );
+        }
+
         Ok(MetaVirtioDevice {
             virtio_device,
             pci_common: disk_cfg.pci_common.clone(),
@@ -3044,6 +3195,7 @@ impl DeviceManager {
 
         let (virtio_device, migratable_device) = if net_cfg.vhost_user {
             let socket = net_cfg.vhost_socket.as_ref().unwrap().clone();
+            debug!("Creating virtio-net device with vhost-user backend: {socket}");
             let vu_cfg = VhostUserConfig {
                 socket,
                 num_queues: net_cfg.num_queues,
@@ -3088,6 +3240,7 @@ impl DeviceManager {
             let guest_mac = *net_cfg.mac.get_or_insert_with(MacAddr::local_random);
 
             let virtio_net = if let Some(ref tap_if_name) = net_cfg.tap {
+                debug!("Creating virtio-net device from Tap device: {tap_if_name}");
                 Arc::new(Mutex::new(
                     virtio_devices::Net::new(
                         id.clone(),
@@ -3113,6 +3266,7 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
             } else if let Some(fds) = &net_cfg.fds {
+                debug!("Creating virtio-net device from network FDs: {fds:?}");
                 let net = virtio_devices::Net::from_tap_fds(
                     id.clone(),
                     fds,
@@ -3139,6 +3293,9 @@ impl DeviceManager {
 
                 Arc::new(Mutex::new(net))
             } else {
+                debug!(
+                    "Creating virtio-net device: no ifname or FDs given, creating new Tap device"
+                );
                 Arc::new(Mutex::new(
                     virtio_devices::Net::new(
                         id.clone(),
@@ -5040,13 +5197,18 @@ impl DeviceManager {
                 .map_err(|e| DeviceManagerError::RegisterIoevent(e.into()))?;
         }
 
-        // Update the device tree with correct resource information.
+        // Update the device tree and boot order with correct resource information.
         node.resources = new_resources;
         node.migratable = Some(Arc::clone(&virtio_pci_device) as Arc<Mutex<dyn Migratable>>);
         node.pci_bdf = Some(pci_device_bdf);
         node.pci_device_handle = Some(PciDeviceHandle::Virtio(Arc::clone(&virtio_pci_device)));
-        self.device_tree.lock().unwrap().insert(id, node);
 
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        if let Some(boot_item) = self.boot_order.get_mut(virtio_device_id) {
+            boot_item.update_from_device_node(&node)?;
+        }
+
+        self.device_tree.lock().unwrap().insert(id.clone(), node);
         self.commit_pci_device(
             Arc::clone(&virtio_pci_device) as Arc<dyn BusDeviceSync>,
             virtio_pci_device,
@@ -5357,6 +5519,10 @@ impl DeviceManager {
         Ok(())
     }
 
+    /// Notifies the VM for a hotplug.
+    ///
+    /// This call doesn't wait for the vCPU receiving the
+    /// interrupt to acknowledge.
     pub fn notify_hotplug(
         &self,
         _notification_type: AcpiNotificationFlags,
@@ -5442,16 +5608,20 @@ impl DeviceManager {
         // Release advisory locks by dropping all references.
         // Linux automatically releases all locks of that file if the last open FD is closed.
         {
-            let maybe_block_device_index = self
+            if let Some(index) = self
                 .block_devices
                 .iter()
-                .enumerate()
-                .find(|(_, dev)| {
-                    let dev = dev.lock().unwrap();
-                    dev.id() == id
-                })
-                .map(|(i, _)| i);
-            if let Some(index) = maybe_block_device_index {
+                .position(|dev| dev.lock().unwrap().id() == id)
+            {
+                // Deny removal of active mirroring block device.
+                if self.block_devices[index]
+                    .lock()
+                    .unwrap()
+                    .mirror_status()
+                    .is_some()
+                {
+                    return Err(DeviceManagerError::BlockMirrorActive(id.to_string()));
+                }
                 let _ = self.block_devices.swap_remove(index);
             }
         }
@@ -6012,6 +6182,18 @@ impl DeviceManager {
         0
     }
 
+    /// Locks and returns the block device with the given id.
+    ///
+    /// Returns [`DeviceManagerError::UnknownDeviceId`] when no attached
+    /// block device matches.
+    fn find_block_device(&self, device_id: &str) -> DeviceManagerResult<MutexGuard<'_, Block>> {
+        self.block_devices
+            .iter()
+            .map(|dev| dev.lock().unwrap())
+            .find(|disk| disk.id() == device_id)
+            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))
+    }
+
     pub fn balloon_stats(&self) -> DeviceManagerResult<virtio_devices::BalloonStatsSnapshot> {
         let balloon = self
             .balloon
@@ -6025,15 +6207,9 @@ impl DeviceManager {
     }
 
     pub fn resize_disk(&mut self, device_id: &str, new_size: u64) -> DeviceManagerResult<()> {
-        for dev in &self.block_devices {
-            let mut disk = dev.lock().unwrap();
-            if disk.id() == device_id {
-                return disk
-                    .resize(new_size)
-                    .map_err(DeviceManagerError::DiskResize);
-            }
-        }
-        Err(DeviceManagerError::UnknownDeviceId(device_id.to_string()))
+        self.find_block_device(device_id)?
+            .resize(new_size)
+            .map_err(DeviceManagerError::DiskResize)
     }
 
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
@@ -6150,6 +6326,171 @@ impl DeviceManager {
         }
     }
 
+    /// Returns a copy of the config of the disk with the given device id.
+    fn find_disk_config(&self, device_id: &str) -> DeviceManagerResult<DiskConfig> {
+        self.config
+            .lock()
+            .unwrap()
+            .disks
+            .iter()
+            .flatten()
+            .find(|disk_config| disk_config.pci_common.id.as_deref() == Some(device_id))
+            .cloned()
+            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(device_id.to_string()))
+    }
+
+    /// Opens a disk image with `config`'s options and validates its type.
+    fn open_disk_with_config(
+        config: &DiskConfig,
+        path: &Path,
+        readonly: bool,
+    ) -> DeviceManagerResult<Box<dyn AsyncFullDiskFile>> {
+        let options = DiskOpenOptions {
+            path,
+            readonly,
+            direct: config.direct,
+            sparse: config.sparse,
+            backing_files: config.backing_files,
+            disable_io_uring: config.disable_io_uring,
+            disable_aio: config.disable_aio,
+        };
+
+        open_disk(&options, config.image_type).map_err(DeviceManagerError::Disk)
+    }
+
+    /// Starts mirroring the disk identified by `device_id` to `dest_path`.
+    ///
+    /// The destination file must already exist and use the same image
+    /// format as the source disk. It is handed to the virtio block device,
+    /// which mirrors later guest writes out to both backends while a
+    /// background worker copies the existing source contents.
+    ///
+    /// Returns an error if no disk with the given identifier is attached
+    /// to the VM, or the destination cannot be opened.
+    pub fn mirror_disk(&self, device_id: &str, dest_path: &Path) -> DeviceManagerResult<()> {
+        let mut disk = self.find_block_device(device_id)?;
+
+        if disk.mirror_status().is_some() {
+            return Err(DeviceManagerError::BlockMirrorAlreadyActive(
+                device_id.to_string(),
+            ));
+        }
+
+        disk.supports_mirroring()
+            .map_err(DeviceManagerError::BlockMirrorStart)?;
+
+        // Refuse a destination that already backs one of this VM's disks, comparing canonicalized paths.
+        let canon = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let dest_canon = canon(dest_path);
+        let dest_in_use = self
+            .config
+            .lock()
+            .unwrap()
+            .disks
+            .iter()
+            .flatten()
+            .filter_map(|disk_config| disk_config.path.as_deref())
+            .any(|source_path| canon(source_path) == dest_canon);
+        if dest_in_use {
+            return Err(DeviceManagerError::BlockMirrorDestinationInUse(
+                dest_path.display().to_string(),
+            ));
+        }
+
+        let src = self.find_disk_config(device_id)?;
+
+        let destination = Self::open_disk_with_config(&src, dest_path, false)?;
+
+        disk.start_mirror(destination, dest_path.to_path_buf())
+            .map_err(DeviceManagerError::BlockMirrorStart)?;
+
+        Ok(())
+    }
+
+    /// Returns the current state of the active mirror for the disk
+    /// identified by `device_id`.
+    ///
+    /// Returns an error if no disk with the given identifier is
+    /// attached to the VM, or if the disk has no active mirror.
+    pub fn mirror_disk_status(&self, device_id: &str) -> DeviceManagerResult<MirrorStatus> {
+        self.find_block_device(device_id)?
+            .mirror_status()
+            .ok_or_else(|| DeviceManagerError::BlockMirrorNotActive(device_id.to_string()))
+    }
+
+    /// Completes the active block mirror for `device_id` and switches to its
+    /// destination disk.
+    ///
+    /// Returns an error if the disk is not attached, no mirror is active, or the
+    /// mirror is not ready.
+    pub fn mirror_disk_complete(&self, device_id: &str) -> DeviceManagerResult<()> {
+        let mut disk = self.find_block_device(device_id)?;
+
+        let src = self.find_disk_config(device_id)?;
+
+        // The mirror destination is opened writable. Reopen it read-only so a
+        // read-only disk does not keep write access to it.
+        let readonly_destination = match disk.mirror_destination_path() {
+            Some(destination_path) if src.readonly => {
+                Some(Self::open_disk_with_config(&src, &destination_path, true)?)
+            }
+            _ => None,
+        };
+
+        let new_path = disk
+            .complete_mirror(readonly_destination)
+            .map_err(DeviceManagerError::BlockMirrorComplete)?;
+
+        // Repoint the config entry so a rebuild reopens the destination.
+        if let Some(cfg) = self
+            .config
+            .lock()
+            .unwrap()
+            .disks
+            .as_mut()
+            .and_then(|disks| {
+                disks
+                    .iter_mut()
+                    .find(|disk_config| disk_config.pci_common.id.as_deref() == Some(device_id))
+            })
+        {
+            cfg.path = Some(new_path);
+        }
+
+        Ok(())
+    }
+
+    /// Cancels the active block mirror for the disk identified by
+    /// `device_id`, reverting all virtqueue workers to the source disk
+    /// and releasing the destination.
+    ///
+    /// Returns an error if the disk is not attached, no mirror is active,
+    /// mirror completion has started, or reverting a virtqueue worker fails.
+    pub fn mirror_disk_cancel(&self, device_id: &str) -> DeviceManagerResult<()> {
+        self.find_block_device(device_id)?
+            .cancel_mirror()
+            .map_err(DeviceManagerError::BlockMirrorCancel)
+    }
+
+    /// Triggers announcements through each device's existing backend.
+    pub fn post_migration_announce(&self) -> DeviceManagerResult<()> {
+        for device in &self.virtio_devices {
+            device
+                .virtio_device
+                .lock()
+                .unwrap()
+                .post_migration_announce()
+                .map_err(DeviceManagerError::PostMigrationAnnounce)?;
+        }
+        Ok(())
+    }
+
+    /// Returns a list of devices for which a boot index was configured.
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    pub fn boot_order_entries(&self) -> Vec<BootOrderEntry> {
+        self.boot_order.clone().into_values().collect()
+    }
+
     #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
     fn create_sev_snp_shared_page_tracker(
         address_manager: &Arc<AddressManager>,
@@ -6189,6 +6530,24 @@ impl DeviceManager {
         );
 
         Some(tracker)
+    }
+    /// Returns true if there is an active mirror in any of the block devices, false otherwise.
+    pub fn any_active_block_mirrors(&self) -> bool {
+        self.block_devices
+            .iter()
+            .any(|dev| dev.lock().unwrap().mirror_status().is_some())
+    }
+
+    /// Cancels every active block mirror. Failures are logged and ignored.
+    pub fn cancel_block_mirrors(&self) {
+        self.block_devices
+            .iter()
+            .map(|dev| dev.lock().unwrap())
+            .filter(|disk| disk.mirror_status().is_some())
+            .filter_map(|mut disk| disk.cancel_mirror().err().map(|error| (disk.id(), error)))
+            .for_each(|(id, error)| {
+                warn!("Failed to cancel block mirror for {id}: {error}");
+            });
     }
 }
 

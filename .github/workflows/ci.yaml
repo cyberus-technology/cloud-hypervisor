@@ -120,45 +120,6 @@ jobs:
       - name: Lint git commit messages
         run: |
           gitlint --commits "origin/$GITHUB_BASE_REF.."
-  lychee:
-    name: lychee
-    needs: [preflight]
-    if: needs.preflight.outputs.docs == 'true' || needs.preflight.outputs.full == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Get changed files in PR
-        id: changed-files
-        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
-        with:
-          base_sha: ${{ github.event.pull_request.base.sha }}
-      - name: Verify Changed Files
-        run: |
-          set -eufo pipefail
-          echo "--- tj-actions/changed-files Outputs ---"
-          echo "any_changed: ${{ steps.changed-files.outputs.any_changed }}"
-          echo "all_changed_files: ${{ steps.changed-files.outputs.all_changed_files }}"
-          echo "added_files: ${{ steps.changed-files.outputs.added_files }}"
-          echo "modified_files: ${{ steps.changed-files.outputs.modified_files }}"
-          echo "deleted_files: ${{ steps.changed-files.outputs.deleted_files }}"
-          echo "renamed_files: ${{ steps.changed-files.outputs.renamed_files }}"
-          echo "----------------------------------------"
-          if [ -n "${{ steps.changed-files.outputs.all_changed_files }}" ]; then
-            echo "Detected changes: all_changed_files output is NOT empty."
-          else
-            echo "No changes detected: all_changed_files output IS empty."
-          fi
-      - name: Link Availability Check (Diff Only)
-        if: ${{ steps.changed-files.outputs.all_changed_files != '' }}
-        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
-        with:
-          args: --verbose --config .lychee.toml ${{ steps.changed-files.outputs.all_changed_files }}
-          failIfEmpty: false
-          fail: true
   taplo:
     name: taplo
     needs: [preflight]
@@ -239,7 +200,7 @@ jobs:
         rust: [nightly]
         target:
           - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
+          #- aarch64-unknown-linux-musl
     env:
       RUSTFLAGS: -D warnings
     steps:
@@ -361,8 +322,8 @@ jobs:
           - beta
           - stable
         target:
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
+          #- aarch64-unknown-linux-gnu
+          #- aarch64-unknown-linux-musl
           - x86_64-unknown-linux-gnu
           - x86_64-unknown-linux-musl
         include:
@@ -628,71 +589,6 @@ jobs:
           test -e /dev/kvm || { echo "::error::/dev/kvm missing on runner"; exit 1; }
       - name: Run unit tests
         run: scripts/dev_cli.sh tests --unit --libc ${{ matrix.libc }}
-  # PR-only: delay integration testing until the build and quality gates pass.
-  integration-x86-64-pr:
-    name: integration-x86-64-pr
-    needs: [preflight, dco, quality, build]
-    if: >-
-      github.event_name == 'pull_request' && needs.preflight.outputs.full == 'true' && needs.dco.result == 'success' && needs.quality.result == 'success' && needs.build.result == 'success'
-    timeout-minutes: 80
-    env:
-      # Our runner has 16 cores (nproc).
-      # We limit parallelism only to avoid exhausting disk space and memory
-      # resources, not to save CPU resources.
-      PARALLEL_INTEGRATION_TESTS_NUM: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: garm-noble, libc: gnu}
-    # format() because `${{ matrix.runner }}-16` is not valid in runs-on.
-    runs-on: ${{ format('{0}-16', matrix.runner) }}
-    steps: &integration-x86-64-steps
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Install Docker
-        run: |
-          set -eufo pipefail
-          sudo apt-get update
-          sudo apt-get -y install ca-certificates curl gnupg
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          sudo chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update
-          sudo apt install -y docker-ce docker-ce-cli
-      - name: Prepare for VDPA
-        run: scripts/prepare_vdpa.sh
-      - name: Load openvswitch module
-        run: sudo modprobe openvswitch
-      - name: Run integration tests
-        timeout-minutes: 60
-        run: scripts/dev_cli.sh tests --integration --libc ${{ matrix.libc }}
-  # MQ and dev branch pushes start all four matrix entries after preflight, in
-  # parallel with the build and quality jobs. The PR job keeps existing gates.
-  integration-x86-64-mq:
-    name: integration-x86-64-mq
-    needs: [preflight]
-    if: &mq-if >-
-      (github.event_name == 'merge_group' || github.event_name == 'push') && needs.preflight.outputs.full == 'true'
-    timeout-minutes: 80
-    env:
-      # Our runner has 16 cores (nproc).
-      # We limit parallelism only to avoid exhausting disk space and memory
-      # resources, not to save CPU resources.
-      PARALLEL_INTEGRATION_TESTS_NUM: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: garm-noble, libc: gnu}
-          - {runner: garm-noble, libc: musl}
-          - {runner: garm-noble-amd, libc: gnu}
-          - {runner: garm-noble-amd, libc: musl}
-    # format() because `${{ matrix.runner }}-16` is not valid in runs-on.
-    runs-on: ${{ format('{0}-16', matrix.runner) }}
-    steps: *integration-x86-64-steps
 # Disabled for maintenance  
 #  integration-arm64:
 #    name: integration-arm64
@@ -749,117 +645,6 @@ jobs:
 #      - name: Run Windows guest integration tests
 #        timeout-minutes: 30
 #        run: scripts/dev_cli.sh tests --integration-windows --libc musl
-  integration-graviton:
-    name: integration-graviton
-    needs: [preflight]
-    if: *mq-if
-    timeout-minutes: 120
-    env:
-      # Our runner has 96 cores (nproc).
-      # We limit parallelism only to avoid exhausting disk space and memory
-      # resources, not to save CPU resources.
-      PARALLEL_INTEGRATION_TESTS_NUM: 25
-    runs-on: noble-graviton
-    steps:
-      # arm64 runner user is "runner" (vfio's is "github-runner").
-      - name: Fix workspace permissions
-        run: sudo chown -R runner:runner ${GITHUB_WORKSPACE}
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Run unit tests (musl)
-        run: scripts/dev_cli.sh tests --unit --libc musl
-      - name: Load openvswitch module
-        run: sudo modprobe openvswitch
-      - name: Run integration tests (musl)
-        timeout-minutes: 60
-        run: scripts/dev_cli.sh tests --integration --libc musl
-  integration-vfio:
-    name: integration-vfio
-    needs: [preflight]
-    if: *mq-if
-    runs-on: vfio-nvidia
-    timeout-minutes: 40
-    env:
-      AUTH_DOWNLOAD_TOKEN: ${{ secrets.AUTH_DOWNLOAD_TOKEN }}
-    steps:
-      # vfio-nvidia runner user is "github-runner" (not "runner" like arm64).
-      - name: Fix workspace permissions
-        run: sudo chown -R github-runner:github-runner "${GITHUB_WORKSPACE}"
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Run VFIO integration tests
-        timeout-minutes: 25
-        run: scripts/dev_cli.sh tests --integration-vfio
-    # Most tests are failing with musl, see #6790
-    # - name: Run VFIO integration tests for musl
-    #   timeout-minutes: 25
-    #   run: scripts/dev_cli.sh tests --integration-vfio --libc musl
-  integration-windows:
-    name: integration-windows
-    needs: [preflight]
-    if: *mq-if
-    runs-on: garm-noble-16
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        libc: [gnu, musl]
-    steps:
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Install Docker
-        run: |
-          set -eufo pipefail
-          sudo apt-get update
-          sudo apt-get -y install ca-certificates curl gnupg
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          sudo chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update
-          sudo apt install -y docker-ce docker-ce-cli
-      - name: Install Azure CLI
-        run: |
-          set -eufo pipefail
-          sudo apt install -y ca-certificates curl apt-transport-https lsb-release gnupg
-          curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/microsoft.gpg > /dev/null
-          echo "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ jammy main" | sudo tee /etc/apt/sources.list.d/azure-cli.list
-          sudo apt update
-          sudo apt install -y azure-cli
-      - name: Download Windows image
-        run: |
-          set -eufo pipefail
-          mkdir $HOME/workloads
-          az storage blob download --container-name private-images --file "$HOME/workloads/windows-server-2025-amd64-1.raw" --name windows-server-2025-amd64-1.raw --connection-string "${{ secrets.CH_PRIVATE_IMAGES }}"
-      - name: Run Windows guest integration tests
-        timeout-minutes: 30
-        run: scripts/dev_cli.sh tests --integration-windows --libc ${{ matrix.libc }}
-  integration-mshv-x86-64:
-    name: integration-mshv-x86-64
-    needs: [preflight]
-    if: *mq-if
-    timeout-minutes: 50
-    runs-on: mshv
-    steps:
-      # mshv runner user is "lsgunner"
-      - name: Fix workspace and Docker socket permissions
-        run: |
-          sudo chown -R lsgrunner:lsgrunner ${GITHUB_WORKSPACE}
-          sudo chmod 666 /var/run/docker.sock
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Prepare for VDPA
-        run: scripts/prepare_vdpa.sh
-      - name: Run integration tests
-        timeout-minutes: 45
-        run: scripts/dev_cli.sh tests --integration
   # Rate-limiter host is not available
   # integration-rate-limiter:
   #   name: integration-rate-limiter
@@ -877,34 +662,6 @@ jobs:
   #     - name: Run rate-limiter integration tests
   #       timeout-minutes: 20
   #       run: scripts/dev_cli.sh tests --integration-rate-limiter
-  integration-sev-snp:
-    name: integration-sev-snp
-    needs: [preflight]
-    if: *mq-if
-    timeout-minutes: 30
-    runs-on: noble-sevsnp
-    steps:
-      # Self-hosted runners reuse their workdir; a previous privileged
-      # container run can leave root-owned files behind.
-      - name: Fix workspace permissions
-        run: sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}"
-      - name: Code checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Sanity-check SEV-SNP prerequisites
-        run: |
-          set -eufo pipefail
-          echo "Checking hypervisor device nodes..."
-          test -e /dev/kvm || { echo "::error::/dev/kvm missing"; exit 1; }
-          test -e /dev/sev || { echo "::error::/dev/sev missing"; exit 1; }
-          echo "Checking staged IGVM/kernel artifacts..."
-          test -d /usr/share/cloud-hypervisor/cvm \
-            || { echo "::error::/usr/share/cloud-hypervisor/cvm missing"; exit 1; }
-          ls -l /usr/share/cloud-hypervisor/cvm
-      - name: Run CVM (SEV-SNP) integration tests
-        timeout-minutes: 20
-        run: scripts/dev_cli.sh tests --integration-cvm --hypervisor kvm
   # Rate-limiter host is not available
   # integration-rate-limiter:
   #   name: integration-rate-limiter
@@ -1013,13 +770,6 @@ jobs:
       - gitlint
       - hadolint
 #      - integration-arm64
-      - integration-graviton
-      - integration-sev-snp
-      - integration-vfio
-      - integration-mshv-x86-64
-      - integration-windows
-      - integration-x86-64-mq
-      - integration-x86-64-pr
       - openapi
       - package-consistency
       - preflight

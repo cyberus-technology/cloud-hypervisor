@@ -41,12 +41,14 @@ use std::str::FromStr;
 use std::sync::mpsc::{RecvError, SendError, Sender, channel};
 use std::time::Duration;
 
-use log::{debug, info, warn};
+use block::mirror::{MirrorPhase, MirrorStatus};
+use log::{debug, info, trace, warn};
 use micro_http::Body;
 use option_parser::{OptionParser, OptionParserError, Toggle, Tuple, TupleList};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vm_migration::MigratableError;
+use vm_migration::progress::MigrationProgress;
 use vm_migration::tls::{TlsConfigError, TlsEndpoint, validate_tls_dir};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -55,7 +57,8 @@ pub use self::dbus::start_dbus_thread;
 pub use self::http::{start_http_fd_thread, start_http_path_thread};
 use crate::Error as VmmError;
 use crate::config::{
-    RestoreConfig, RestoredVfioConfig, VmMemoryZoneUpdateData, deserialize_restored_fd,
+    RestoreConfig, RestoredNetConfig, RestoredVfioConfig, VmMemoryZoneUpdateData,
+    deserialize_restored_fd,
 };
 use crate::device_tree::DeviceTree;
 use crate::migration::transport::{
@@ -114,6 +117,10 @@ pub enum ApiError {
     #[error("The VM could not resume")]
     VmResume(#[source] VmError),
 
+    /// The VM post-migration announcement could not be sent.
+    #[error("The VM post-migration announcement failed")]
+    VmPostMigrationAnnounce(#[source] VmError),
+
     /// The VM could not shutdown.
     #[error("The VM could not shutdown")]
     VmShutdown(#[source] VmError),
@@ -145,6 +152,20 @@ pub enum ApiError {
     /// The disk could not be resized.
     #[error("The disk could not be resized")]
     VmResizeDisk(#[source] VmError),
+
+    /// Error starting disk mirror
+    #[error("Error starting disk mirror")]
+    VmDiskMirrorStart(#[source] VmError),
+
+    #[error("Error reading disk mirror state")]
+    VmDiskMirrorStatus(#[source] VmError),
+
+    #[error("Error completing disk mirror")]
+    VmDiskMirrorComplete(#[source] VmError),
+
+    /// Error cancelling disk mirror
+    #[error("Error cancelling disk mirror")]
+    VmDiskMirrorCancel(#[source] VmError),
 
     /// The memory zone could not be resized.
     #[error("The memory zone could not be resized")]
@@ -210,6 +231,10 @@ pub enum ApiError {
     /// Error triggering NMI
     #[error("Error triggering NMI")]
     VmNmi(#[source] VmError),
+
+    /// Error fetching the migration progress
+    #[error("Error fetching the migration progress")]
+    VmMigrationProgress(#[source] VmError),
 }
 pub type ApiResult<T> = Result<T, ApiError>;
 
@@ -220,6 +245,68 @@ pub struct VmInfoResponse {
     pub state: VmState,
     pub memory_actual_size: u64,
     pub device_tree: Option<DeviceTree>,
+}
+
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmDiskMirrorStartData {
+    pub id: String,
+    pub destination_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VmDiskMirrorStatusData {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VmDiskMirrorCompleteData {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VmDiskMirrorCancelData {
+    pub id: String,
+}
+
+/// Wire form of [`MirrorPhase`], without the failure reason payload,
+/// which the response carries separately in `failure`.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VmDiskMirrorPhase {
+    Running,
+    Ready,
+    Completing,
+    Completed,
+    Cancelling,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct VmDiskMirrorStatusResponse {
+    pub phase: VmDiskMirrorPhase,
+    pub copied_bytes: u64,
+    pub total_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+impl From<MirrorStatus> for VmDiskMirrorStatusResponse {
+    fn from(status: MirrorStatus) -> Self {
+        let (phase, failure) = match status.phase {
+            MirrorPhase::Running => (VmDiskMirrorPhase::Running, None),
+            MirrorPhase::Ready => (VmDiskMirrorPhase::Ready, None),
+            MirrorPhase::Cancelling => (VmDiskMirrorPhase::Cancelling, None),
+            MirrorPhase::Failed(reason) => (VmDiskMirrorPhase::Failed, Some(reason.to_string())),
+            MirrorPhase::Completing => (VmDiskMirrorPhase::Completing, None),
+            MirrorPhase::Completed => (VmDiskMirrorPhase::Completed, None),
+        };
+        Self {
+            phase,
+            copied_bytes: status.copied_bytes,
+            total_bytes: status.total_bytes,
+            failure,
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -314,13 +401,15 @@ impl FromStr for MigrationMode {
 pub struct VmReceiveMigrationData {
     /// URL for the reception of migration state
     pub receiver_url: String,
-    /// Directory containing the TLS server certificate (`server-cert.pem`),
-    /// the TLS server key (`server-key.pem`), and the server's TLS root CA
-    /// certificate (`ca-cert.pem`).
+    /// Directory containing the TLS server certificate (`server-cert.pem`)
+    /// and the TLS server key (`server-key.pem`).
     ///
-    /// If this is `Some`, the migration is instructed to use mTLS.
+    /// If this is `Some`, the migration uses TLS without client authentication.
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
+    /// Map with new network FDs on the new host.
+    #[serde(default)]
+    pub net_fds: Vec<RestoredNetConfig>,
     /// Optional VFIO device id to cdev FD pairs, used to substitute each
     /// device's saved path or stale FD in the received VmConfig.
     #[serde(default)]
@@ -328,6 +417,10 @@ pub struct VmReceiveMigrationData {
     // FDs are not serialized and any deserialized value is invalid; see NetConfig::fds.
     #[serde(default, deserialize_with = "deserialize_restored_fd")]
     pub iommufd_fd: Option<i32>,
+    /// Optional URL if the TCP serial configuration must be changed during
+    /// migration. Example: "192.168.1.1:2222".
+    #[serde(default)]
+    pub tcp_serial_url: Option<String>,
     /// Optional memory zone update data
     #[serde(default)]
     pub zone_updates: Vec<VmMemoryZoneUpdateData>,
@@ -387,7 +480,7 @@ pub enum VmReceiveMigrationConfigError {
 
 impl VmReceiveMigrationData {
     pub const SYNTAX: &'static str = "VM receive migration parameters \
-        \"<receiver_url>\" or \"receiver_url=<url>[,tls_dir=<path>]\
+        \"<receiver_url>\" or \"receiver_url=<url>[,tls_dir=<path>,tcp_serial_url=<host:port>]\
         [,vfio_fds=<list_of_vfio_ids_with_their_associated_fd>][,iommufd_fd=<fd>]\
         [,zone_updates=[<id@host_numa_node>]][,background_fetch_pages=on|off]\"";
 
@@ -399,7 +492,8 @@ impl VmReceiveMigrationData {
             .add("vfio_fds")
             .add("iommufd_fd")
             .add("zone_updates")
-            .add("background_fetch_pages");
+            .add("background_fetch_pages")
+            .add("tcp_serial_url");
         parser
             .parse(migration)
             .map_err(VmReceiveMigrationConfigError::ParseError)?;
@@ -445,12 +539,17 @@ impl VmReceiveMigrationData {
             .map_err(VmReceiveMigrationConfigError::ParseError)?
             .unwrap_or(Toggle(true))
             .0;
+        let tcp_serial_url = parser
+            .convert::<String>("tcp_serial_url")
+            .map_err(VmReceiveMigrationConfigError::ParseError)?;
 
         let data = Self {
             receiver_url,
             tls_dir,
+            net_fds: vec![],
             vfio_fds,
             iommufd_fd,
+            tcp_serial_url,
             zone_updates,
             background_fetch_pages,
         };
@@ -630,16 +729,18 @@ pub struct VmSendMigrationData {
     /// Must be between 1 and `MAX_MIGRATION_CONNECTIONS` inclusive.
     #[serde(default = "VmSendMigrationData::default_connections")]
     pub connections: NonZeroU32,
-    /// Directory containing the TLS client certificate (`client-cert.pem`),
-    /// the TLS client key (`client-key.pem`), and the client's TLS root CA
-    /// certificate (`ca-cert.pem`).
+    /// Directory containing the TLS root CA certificate (`ca-cert.pem`) used
+    /// to verify the destination's certificate.
     ///
-    /// If this is `Some`, the migration is instructed to use mTLS.
+    /// If this is `Some`, the migration uses TLS with server authentication.
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
     /// Requested memory transfer mode.
     #[serde(default)]
     pub memory_mode: MigrationMode,
+    /// Keep the VMM alive.
+    #[serde(default)]
+    pub keep_alive: bool,
 }
 
 impl VmSendMigrationData {
@@ -679,7 +780,8 @@ impl VmSendMigrationData {
             .add("timeout_strategy")
             .add("connections")
             .add("tls_dir")
-            .add("memory_mode");
+            .add("memory_mode")
+            .add("keep_alive");
         parser
             .parse(migration)
             .map_err(VmSendMigrationConfigError::ParseError)?;
@@ -746,6 +848,11 @@ impl VmSendMigrationData {
             .convert::<MigrationMode>("memory_mode")
             .map_err(VmSendMigrationConfigError::ParseError)?
             .unwrap_or_default();
+        let keep_alive = parser
+            .convert::<Toggle>("keep_alive")
+            .map_err(VmSendMigrationConfigError::ParseError)?
+            .unwrap_or(Toggle(false))
+            .0;
 
         #[expect(deprecated)]
         let data = Self {
@@ -758,6 +865,7 @@ impl VmSendMigrationData {
             connections,
             tls_dir,
             memory_mode,
+            keep_alive,
         };
 
         data.validate()?;
@@ -873,6 +981,9 @@ pub enum ApiResponsePayload {
     /// Virtio-balloon statistics
     VmBalloonStats(Box<BalloonStatsResponse>),
 
+    /// The progress of a possibly ongoing live migration.
+    VmMigrationProgress(Box<Option<MigrationProgress>>),
+
     /// Vmm ping response
     VmmPing(VmmPingResponse),
 
@@ -891,6 +1002,8 @@ pub trait RequestHandler {
     fn vm_pause(&mut self) -> Result<(), VmError>;
 
     fn vm_resume(&mut self) -> Result<(), VmError>;
+
+    fn vm_post_migration_announce(&mut self) -> Result<(), VmError>;
 
     fn vm_snapshot(&mut self, destination_url: &str) -> Result<(), VmError>;
 
@@ -923,6 +1036,18 @@ pub trait RequestHandler {
     fn vm_resize_zone(&mut self, id: String, desired_ram: u64) -> Result<(), VmError>;
 
     fn vm_resize_disk(&mut self, id: String, desired_size: u64) -> Result<(), VmError>;
+
+    fn vm_disk_mirror_start(
+        &mut self,
+        id: String,
+        destination_path: PathBuf,
+    ) -> Result<(), VmError>;
+
+    fn vm_disk_mirror_status(&mut self, id: String) -> Result<Option<Vec<u8>>, VmError>;
+
+    fn vm_disk_mirror_complete(&mut self, id: String) -> Result<(), VmError>;
+
+    fn vm_disk_mirror_cancel(&mut self, id: String) -> Result<(), VmError>;
 
     fn vm_add_device(&mut self, device_cfg: DeviceConfig) -> Result<Option<Vec<u8>>, VmError>;
 
@@ -967,6 +1092,10 @@ pub trait RequestHandler {
     fn vm_cancel_migration(&mut self) -> Result<(), MigratableError>;
 
     fn vm_nmi(&mut self) -> Result<(), VmError>;
+
+    /// Returns the progress of the currently active migration or any previous
+    /// failed or canceled migration.
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress>;
 }
 
 /// It would be nice if we could pass around an object like this:
@@ -1579,6 +1708,126 @@ impl ApiAction for VmDelete {
     }
 }
 
+pub struct VmDiskMirrorStart;
+
+impl ApiAction for VmDiskMirrorStart {
+    type RequestBody = VmDiskMirrorStartData;
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            let response = vmm
+                .vm_disk_mirror_start(data.id, data.destination_path)
+                .map_err(ApiError::VmDiskMirrorStart)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmDiskMirrorStatus;
+impl ApiAction for VmDiskMirrorStatus {
+    type RequestBody = VmDiskMirrorStatusData;
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            let response = vmm
+                .vm_disk_mirror_status(data.id)
+                .map_err(ApiError::VmDiskMirrorStatus)
+                .map(ApiResponsePayload::VmAction);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmDiskMirrorComplete;
+
+impl ApiAction for VmDiskMirrorComplete {
+    type RequestBody = VmDiskMirrorCompleteData;
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            let response = vmm
+                .vm_disk_mirror_complete(data.id)
+                .map_err(ApiError::VmDiskMirrorComplete)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmDiskMirrorCancel;
+
+impl ApiAction for VmDiskMirrorCancel {
+    type RequestBody = VmDiskMirrorCancelData;
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, data: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            let response = vmm
+                .vm_disk_mirror_cancel(data.id)
+                .map_err(ApiError::VmDiskMirrorCancel)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
 pub struct VmInfo;
 
 impl ApiAction for VmInfo {
@@ -2002,6 +2251,39 @@ impl ApiAction for VmResume {
     }
 }
 
+pub struct VmPostMigrationAnnounce;
+
+impl ApiAction for VmPostMigrationAnnounce {
+    type RequestBody = ();
+    type ResponseBody = Option<Body>;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmPostMigrationAnnounce");
+
+            let response = vmm
+                .vm_post_migration_announce()
+                .map_err(ApiError::VmPostMigrationAnnounce)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
 pub struct VmSendMigration;
 
 impl ApiAction for VmSendMigration {
@@ -2209,6 +2491,45 @@ impl ApiAction for VmNmi {
     }
 }
 
+pub struct VmMigrationProgress;
+
+impl ApiAction for VmMigrationProgress {
+    type RequestBody = ();
+    type ResponseBody = Box<Option<MigrationProgress>>;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            trace!("API request event: VmMigrationProgress");
+
+            let snapshot = Ok(vmm.vm_migration_progress());
+            let response = snapshot
+                .map(Box::new)
+                .map(ApiResponsePayload::VmMigrationProgress)
+                .map_err(ApiError::VmMigrationProgress);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        let info = get_response(self, api_evt, api_sender, data)?;
+
+        match info {
+            ApiResponsePayload::VmMigrationProgress(info) => Ok(info),
+            _ => Err(ApiError::ResponsePayloadType),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2240,15 +2561,12 @@ mod tests {
         }
 
         fn add_receive_tls_files(&self) {
-            self.add_file("ca-cert.pem");
             self.add_file("server-cert.pem");
             self.add_file("server-key.pem");
         }
 
         fn add_send_tls_files(&self) {
             self.add_file("ca-cert.pem");
-            self.add_file("client-cert.pem");
-            self.add_file("client-key.pem");
         }
     }
 
@@ -2307,8 +2625,10 @@ mod tests {
             VmReceiveMigrationData {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: None,
+                net_fds: vec![],
                 vfio_fds: None,
                 iommufd_fd: None,
+                tcp_serial_url: None,
                 zone_updates: vec![],
                 background_fetch_pages: true,
             }
@@ -2328,7 +2648,7 @@ mod tests {
         tls_dir.add_receive_tls_files();
         let tls_dir_path = tls_dir.path.clone();
         let data = VmReceiveMigrationData::parse(&format!(
-            "receiver_url=tcp:192.168.1.1:8080,tls_dir={}",
+            "receiver_url=tcp:192.168.1.1:8080,tls_dir={},tcp_serial_url=1.2.3.4:6789",
             tls_dir_path.display()
         ))
         .unwrap();
@@ -2337,8 +2657,10 @@ mod tests {
             VmReceiveMigrationData {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: Some(tls_dir_path),
+                net_fds: vec![],
                 vfio_fds: None,
                 iommufd_fd: None,
+                tcp_serial_url: Some("1.2.3.4:6789".to_string()),
                 zone_updates: vec![],
                 background_fetch_pages: true,
             }
@@ -2561,6 +2883,7 @@ mod tests {
                 connections: VmSendMigrationData::default_connections(),
                 tls_dir: None,
                 memory_mode: MigrationMode::Precopy,
+                keep_alive: false,
             }
         );
 
@@ -2569,7 +2892,7 @@ mod tests {
         tls_dir.add_send_tls_files();
         let tls_dir_path = tls_dir.path.clone();
         let data =
-            VmSendMigrationData::parse(&format!("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4,tls_dir={}", tls_dir_path.display()))
+            VmSendMigrationData::parse(&format!("destination_url=tcp:192.168.1.1:8080,downtime_ms=150,timeout_s=900,timeout_strategy=ignore,connections=4,tls_dir={},keep_alive=true", tls_dir_path.display()))
                 .unwrap();
         assert_eq!(
             data,
@@ -2583,6 +2906,7 @@ mod tests {
                 connections: NonZeroU32::new(4).unwrap(),
                 tls_dir: Some(tls_dir_path),
                 memory_mode: MigrationMode::Precopy,
+                keep_alive: true
             }
         );
 

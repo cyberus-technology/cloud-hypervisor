@@ -31,11 +31,13 @@ fuzz_target!(|bytes: &[u8]| -> Corpus {
     above_4g.copy_from_slice(&bytes[8..16]);
 
     let vcpus_kill_signalled = Arc::new(AtomicBool::new(false));
+    let vcpus_pause_signalled = Arc::new(AtomicBool::new(false));
     let mut cmos = Cmos::new(
         u64::from_le_bytes(below_4g),
         u64::from_le_bytes(above_4g),
         EventFd::new(EFD_NONBLOCK).unwrap(),
         Arc::clone(&vcpus_kill_signalled),
+        Arc::clone(&vcpus_pause_signalled),
     );
 
     // Exercise all RTC special register read paths and read-index path.

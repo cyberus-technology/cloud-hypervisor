@@ -19,6 +19,7 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
@@ -32,11 +33,12 @@ use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
 #[cfg(not(target_arch = "x86_64"))]
 use arch::uefi;
 use arch::{EntryPoint, NumaNode, NumaNodes, get_host_cpu_phys_bits, layout};
+use block::mirror::MirrorStatus;
 use devices::AcpiNotificationFlags;
 #[cfg(feature = "fw_cfg")]
-use devices::legacy::fw_cfg;
-#[cfg(feature = "fw_cfg")]
-use devices::legacy::fw_cfg::FwCfgItem;
+use devices::legacy::fw_cfg::{FwCfgContent, FwCfgInitParams, FwCfgItem};
+#[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+use devices::legacy::open_fw::{OpenFwDevicePath, OpenFwDevicePathError};
 use event_monitor::event;
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 use gdbstub_arch::aarch64::reg::AArch64CoreRegs as CoreRegs;
@@ -74,6 +76,8 @@ use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracer::trace_scoped;
+#[cfg(feature = "fw_cfg")]
+use uuid::{Error as UuidError, Uuid};
 use vm_device::Bus;
 #[cfg(feature = "tdx")]
 use vm_memory::GuestMemoryBackend;
@@ -93,6 +97,8 @@ use crate::console_devices::{ConsoleDeviceError, ConsoleInfo};
 use crate::coredump::{
     CpuElf64Writable, DumpState, Elf64Writable, GuestDebuggable, GuestDebuggableError, NoteDescType,
 };
+#[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+use crate::device_manager::BootOrderEntry;
 use crate::device_manager::{DeviceManager, DeviceManagerError};
 use crate::device_tree::DeviceTree;
 #[cfg(feature = "guest_debug")]
@@ -110,6 +116,7 @@ use crate::migration::url_to_file;
 use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, get_vm_snapshot, url_to_path};
 #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
 use crate::sev::MeasuredBootInfo;
+use crate::vcpu_throttling::ThrottleThreadHandle;
 #[cfg(feature = "fw_cfg")]
 use crate::vm_config::FwCfgConfig;
 use crate::vm_config::{
@@ -252,6 +259,21 @@ pub enum Error {
     #[error("Failed resizing a disk image")]
     ResizeDisk,
 
+    #[error("Failed to start disk mirror")]
+    DiskMirrorStart,
+
+    #[error("Failed to read disk mirror state")]
+    DiskMirrorStatus,
+
+    #[error("Failed to complete disk mirror")]
+    DiskMirrorComplete,
+
+    #[error("Failed to cancel disk mirror")]
+    DiskMirrorCancel,
+
+    #[error("At least one disk mirror is active")]
+    ActiveBlockMirror,
+
     #[error("Cannot activate virtio devices")]
     ActivateVirtioDevices(#[source] DeviceManagerError),
 
@@ -368,6 +390,32 @@ pub enum Error {
     /// Cannot apply NUMA memory zone updates
     #[error("Error applying memory zone updates")]
     ApplyMemoryZoneUpdate(#[source] MemoryZoneUpdateError),
+
+    #[cfg(feature = "fw_cfg")]
+    #[error("Error parsing the VM's UUID")]
+    FwCfgInvalidUuid(#[source] UuidError),
+
+    #[cfg(feature = "fw_cfg")]
+    #[error(
+        "Number of vCPUs cannot be represented with fw_cfg. {0} exceed the maximum count of 65535"
+    )]
+    FwCfgCannotRepresentNumVCpus(u32),
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[error("APIC limit cannot be represented with fw_cfg. {0} exceed the maximum of 65535")]
+    FwCfgCannotRepresentNumMaxVCpus(u32),
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[error("Error creating Open Firmware path")]
+    OpenFwPathCreationFailed(#[source] OpenFwDevicePathError),
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[error("Missing BDF for boot item with boot index {0}")]
+    NoBdfForBootItem(u32),
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[error("Missing device type for boot item")]
+    NoDeviceTypeForBootItem,
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -555,6 +603,14 @@ pub struct Vm {
     numa_nodes: NumaNodes,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    vcpu_throttler: ThrottleThreadHandle,
+    post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PostponedLifecycleEvent {
+    VmReboot,
+    VmShutdown,
 }
 
 impl Vm {
@@ -718,6 +774,19 @@ impl Vm {
         } else {
             VmState::Created
         };
+        let post_migration_lifecycle_event = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                get_vm_snapshot(snapshot)
+                    .map(|vm_snapshot| vm_snapshot.post_migration_lifecycle_event)
+                    .map_err(Error::Restore)
+            })
+            .transpose()?
+            .flatten();
+
+        // TODO we could also spawn the thread when a migration with auto-converge starts.
+        // Probably this is the better design.
+        let vcpu_throttler = ThrottleThreadHandle::new_from_cpu_manager(&cpu_manager);
 
         Ok(Vm {
             #[cfg(feature = "tdx")]
@@ -735,6 +804,8 @@ impl Vm {
             numa_nodes,
             stop_on_boot,
             load_payload_handle,
+            vcpu_throttler,
+            post_migration_lifecycle_event,
         })
     }
 
@@ -1166,20 +1237,19 @@ impl Vm {
 
     #[cfg(feature = "fw_cfg")]
     fn populate_fw_cfg(
+        &self,
         fw_cfg_config: &FwCfgConfig,
-        device_manager: &Arc<Mutex<DeviceManager>>,
-        config: &Arc<Mutex<VmConfig>>,
         #[cfg(target_arch = "x86_64")] kvm_sev_snp_enabled: bool,
     ) -> Result<()> {
+        let config = self.config.lock().unwrap();
+
         let mut e820_option: Option<usize> = None;
         if fw_cfg_config.e820 {
-            e820_option = Some(config.lock().unwrap().memory.size as usize);
+            e820_option = Some(config.memory.size as usize);
         }
         let mut kernel_option: Option<File> = None;
         if fw_cfg_config.kernel {
             let kernel = config
-                .lock()
-                .unwrap()
                 .payload
                 .as_ref()
                 .map(|p| p.kernel.as_ref().map(File::open))
@@ -1191,9 +1261,9 @@ impl Vm {
         let mut cmdline_option: Option<ffi::CString> = None;
         if fw_cfg_config.cmdline {
             let cmdline = Vm::generate_cmdline(
-                config.lock().unwrap().payload.as_ref().unwrap(),
+                config.payload.as_ref().unwrap(),
                 #[cfg(target_arch = "aarch64")]
-                device_manager,
+                self.device_manager,
             )
             .map_err(|_| Error::MissingFwCfgCmdline)?
             .as_cstring()
@@ -1203,8 +1273,6 @@ impl Vm {
         let mut initramfs_option: Option<File> = None;
         if fw_cfg_config.initramfs {
             let initramfs = config
-                .lock()
-                .unwrap()
                 .payload
                 .as_ref()
                 .map(|p| p.initramfs.as_ref().map(File::open))
@@ -1216,14 +1284,12 @@ impl Vm {
             initramfs_option = initramfs;
         }
         let mut fw_cfg_item_list_option: Option<Vec<FwCfgItem>> = None;
+        let mut fw_cfg_item_list = vec![];
         if let Some(fw_cfg_items) = &fw_cfg_config.items {
-            let mut fw_cfg_item_list = vec![];
             for fw_cfg_item in fw_cfg_items.item_list.clone() {
                 let content = match (fw_cfg_item.string, fw_cfg_item.file) {
-                    (Some(string_val), None) => {
-                        fw_cfg::FwCfgContent::Bytes(string_val.into_bytes())
-                    }
-                    (None, Some(file_path)) => fw_cfg::FwCfgContent::File(
+                    (Some(string_val), None) => FwCfgContent::Bytes(string_val.into_bytes()),
+                    (None, Some(file_path)) => FwCfgContent::File(
                         0,
                         File::open(file_path).map_err(Error::AddingFwCfgItem)?,
                     ),
@@ -1236,27 +1302,124 @@ impl Vm {
                     content,
                 });
             }
+        }
+        #[cfg(target_arch = "x86_64")]
+        // Create bootorder entry in fw_cfg.
+        {
+            let mut boot_items = self.device_manager.lock().unwrap().boot_order_entries();
+            boot_items.sort_by_key(|a| a.boot_index);
+
+            Self::add_fw_cfg_boot_order_items(&boot_items, &mut fw_cfg_item_list)?;
+        }
+
+        if !fw_cfg_item_list.is_empty() {
             fw_cfg_item_list_option = Some(fw_cfg_item_list);
         }
 
-        let device_manager_binding = device_manager.lock().unwrap();
+        let device_manager_binding = self.device_manager.lock().unwrap();
         let Some(fw_cfg) = device_manager_binding.fw_cfg() else {
             return Err(Error::FwCfgDisabled);
+        };
+
+        // fw_cfg can only be used with u16::MAX vCPUs.
+        let nb_cpus = config
+            .cpus
+            .boot_vcpus
+            .try_into()
+            .map_err(|_| Error::FwCfgCannotRepresentNumVCpus(config.cpus.boot_vcpus))?;
+
+        #[cfg(target_arch = "x86_64")]
+        // With an explicit topology, `max_apic_id()` is inclusive; otherwise `max_vcpus` is
+        // already exclusive. Add one for an explicit topology to obtain an exclusive limit.
+        let apic_limit = {
+            let max_apic_id = config.max_apic_id();
+            if config.cpus.topology.is_some() {
+                max_apic_id
+                    .checked_add(1)
+                    .ok_or(Error::FwCfgCannotRepresentNumMaxVCpus(max_apic_id))?
+            } else {
+                max_apic_id
+            }
+        };
+
+        let init = FwCfgInitParams {
+            e820_size: e820_option,
+            cmdline: cmdline_option,
+            kernel: kernel_option,
+            initramfs: initramfs_option,
+            item_list: fw_cfg_item_list_option,
+            uuid: config
+                .platform
+                .as_ref()
+                .and_then(|pc| pc.system_uuid.as_ref())
+                .map(|s| Uuid::parse_str(s))
+                .transpose()
+                .map_err(Error::FwCfgInvalidUuid)?
+                .unwrap_or_else(Uuid::nil),
+            ram_size: config.memory.size,
+            no_graphics: true,
+            nb_cpus,
+            #[cfg(target_arch = "x86_64")]
+            max_cpus: u16::try_from(apic_limit)
+                .map_err(|_| Error::FwCfgCannotRepresentNumMaxVCpus(apic_limit))?,
+            boot_menu: false,
         };
 
         fw_cfg
             .lock()
             .unwrap()
             .populate_fw_cfg(
-                e820_option,
-                kernel_option,
-                initramfs_option,
-                cmdline_option,
-                fw_cfg_item_list_option,
+                init,
                 #[cfg(target_arch = "x86_64")]
                 kvm_sev_snp_enabled,
             )
             .map_err(Error::ErrorPopulatingFwCfg)?;
+        Ok(())
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    // Creates a FwCfgItem from a list of BootOrderEntries and appends it to the fw_cfg_item_list.
+    fn add_fw_cfg_boot_order_items(
+        bootitems: &[BootOrderEntry],
+        fw_cfg_item_list: &mut Vec<FwCfgItem>,
+    ) -> Result<()> {
+        let bootorder_path = "bootorder";
+        let mut content: Vec<u8> = Vec::new();
+        for (index, boot_item) in bootitems.iter().enumerate() {
+            // Generating an Open Firmware path requires a valid BDF.
+            let bdf = boot_item
+                .device_address
+                .ok_or(Error::NoBdfForBootItem(boot_item.boot_index))?;
+            let device_type = boot_item
+                .device_type
+                .ok_or(Error::NoDeviceTypeForBootItem)?;
+            let open_fw_path = OpenFwDevicePath::from_bdf_and_device(bdf, device_type)
+                .map_err(Error::OpenFwPathCreationFailed)?;
+            let cstring = ffi::CString::new(open_fw_path.to_string().as_str())
+                .expect("Open Firmware paths should not contain any 0 byte");
+            if index == (bootitems.len() - 1) {
+                content.extend_from_slice(cstring.as_bytes_with_nul());
+            } else {
+                content.extend_from_slice(cstring.as_bytes());
+                content.extend_from_slice(
+                    ffi::CString::new("\n")
+                        .expect("Content should no grow bigger than isize::MAX bytes")
+                        .as_bytes(),
+                );
+            }
+        }
+        let bootorder_item = FwCfgItem {
+            name: bootorder_path.to_owned(),
+            content: FwCfgContent::Bytes(content),
+        };
+        if let Some(user_bootorder) = fw_cfg_item_list
+            .iter_mut()
+            .find(|item| item.name.as_str() == bootorder_path)
+        {
+            *user_bootorder = bootorder_item;
+        } else {
+            fw_cfg_item_list.push(bootorder_item);
+        }
         Ok(())
     }
 
@@ -1333,6 +1496,42 @@ impl Vm {
         }
 
         Ok(numa_nodes)
+    }
+
+    /// Set's the throttle percentage to a value in range `0..=99`.
+    ///
+    /// Setting the value back to `0` brings the thread back into a waiting
+    /// state.
+    ///
+    /// # Panic
+    /// Panics, if `percent_new` is not in range `0..=99`.
+    pub fn set_throttle_percent(&self, percent: u8 /* 1..=99 */) {
+        self.vcpu_throttler.set_throttle_percent(percent);
+    }
+
+    /// Get the current throttle percentage in range `0..=99`.
+    ///
+    /// Please note that the value is not synchronized.
+    pub fn throttle_percent(&self) -> u8 {
+        self.vcpu_throttler.throttle_percent()
+    }
+
+    /// Sets the vCPU throttling thread back to its initial waiting state.
+    ///
+    /// Blocks until the throttling thread acknowledges the reset event.
+    pub fn reset_vcpu_throttle_thread(&self) {
+        self.vcpu_throttler.reset();
+    }
+
+    /// Stores a lifecycle event until migration and active disk mirrors permit
+    /// it to be replayed.
+    pub fn set_post_migration_lifecycle_event(&mut self, event: Option<PostponedLifecycleEvent>) {
+        self.post_migration_lifecycle_event = event;
+    }
+
+    /// Returns the lifecycle event currently waiting to be replayed.
+    pub fn post_migration_lifecycle_event(&self) -> Option<PostponedLifecycleEvent> {
+        self.post_migration_lifecycle_event
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -2045,6 +2244,11 @@ impl Vm {
 
     pub fn shutdown(&mut self) -> Result<()> {
         let new_state = VmState::Shutdown;
+
+        // Shutting down an already shut down VM is a no-op
+        if self.state == new_state {
+            return Ok(());
+        }
 
         self.state.valid_transition(new_state)?;
 
@@ -2842,10 +3046,8 @@ impl Vm {
                     }
                 };
 
-                Self::populate_fw_cfg(
+                self.populate_fw_cfg(
                     &fw_cfg_config,
-                    &self.device_manager,
-                    &self.config,
                     #[cfg(target_arch = "x86_64")]
                     kvm_sev_snp_enabled,
                 )?;
@@ -3292,6 +3494,66 @@ impl Vm {
             .map_err(MigratableError::Resume)
     }
 
+    pub fn mirror_disk(&self, id: &str, dest_path: &Path) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk(id, dest_path)
+            .map_err(Error::DeviceManager)?;
+
+        Ok(())
+    }
+
+    /// Returns the current mirror status for `id`.
+    pub fn mirror_disk_status(&self, id: &str) -> Result<MirrorStatus> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_status(id)
+            .map_err(Error::DeviceManager)
+    }
+
+    /// Completes the mirror for `id` and switches to its destination.
+    pub fn mirror_disk_complete(&self, id: &str) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_complete(id)
+            .map_err(Error::DeviceManager)?;
+        Ok(())
+    }
+
+    /// Cancels the mirror for `id` and keeps its source backend.
+    pub fn mirror_disk_cancel(&self, id: &str) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .mirror_disk_cancel(id)
+            .map_err(Error::DeviceManager)
+    }
+
+    /// Returns true if there is an active mirror in any of the block devices, false otherwise.
+    pub fn any_active_block_mirrors(&self) -> bool {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .any_active_block_mirrors()
+    }
+
+    /// Cancels every active block mirror. Failures are logged and ignored.
+    pub fn cancel_block_mirrors(&self) {
+        self.device_manager.lock().unwrap().cancel_block_mirrors();
+    }
+
+    /// Triggers device announcements without changing the VM lifecycle.
+    pub fn post_migration_announce(&self) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .post_migration_announce()
+            .map_err(Error::DeviceManager)
+    }
+
     pub fn device_manager(&self) -> &Arc<Mutex<DeviceManager>> {
         &self.device_manager
     }
@@ -3360,6 +3622,8 @@ impl Pausable for Vm {
 
 #[derive(Serialize, Deserialize)]
 pub struct VmSnapshot {
+    #[serde(default)]
+    pub post_migration_lifecycle_event: Option<PostponedLifecycleEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<hypervisor::ClockState>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -3396,6 +3660,7 @@ impl Snapshottable for Vm {
         let common_cpuid = self.cpu_manager.lock().unwrap().common_cpuid();
 
         let vm_snapshot_state = VmSnapshot {
+            post_migration_lifecycle_event: self.post_migration_lifecycle_event(),
             clock: self.saved_clock.map(|saved| saved.state),
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             common_cpuid,
@@ -3686,6 +3951,9 @@ impl GuestDebuggable for Vm {
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    use {pci::PciBdf, vm_virtio::VirtioDeviceType};
+
     use super::*;
 
     fn test_vm_state_transitions(state: VmState) {
@@ -4026,6 +4294,100 @@ mod tests {
                 r => panic!("unexpected exit reason: {r:?}"),
             }
         }
+    }
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[test]
+    fn test_add_boot_order_item() {
+        let first_entry = BootOrderEntry {
+            boot_index: 1,
+            device_type: Some(VirtioDeviceType::Block),
+            device_address: Some(PciBdf::new(0, 0, 1, 0)),
+        };
+        let first_path = OpenFwDevicePath::from_bdf_and_device(
+            first_entry.device_address.unwrap(),
+            first_entry.device_type.unwrap(),
+        )
+        .unwrap();
+        let second_entry = BootOrderEntry {
+            boot_index: 2,
+            device_type: Some(VirtioDeviceType::Block),
+            device_address: Some(PciBdf::new(0, 0, 2, 0)),
+        };
+        let second_path = OpenFwDevicePath::from_bdf_and_device(
+            second_entry.device_address.unwrap(),
+            second_entry.device_type.unwrap(),
+        )
+        .unwrap();
+        let expected_content = [
+            first_path.to_string().as_bytes(),
+            b"\n",
+            second_path.to_string().as_bytes(),
+            b"\0",
+        ]
+        .concat();
+        let bootitems = vec![first_entry, second_entry];
+        let mut fw_cfg_item_list = vec![];
+        Vm::add_fw_cfg_boot_order_items(&bootitems, &mut fw_cfg_item_list).unwrap();
+
+        assert_eq!(fw_cfg_item_list.len(), 1);
+        assert_eq!(fw_cfg_item_list[0].name, "bootorder");
+        assert!(
+            matches!(
+                &fw_cfg_item_list[0].content,
+                FwCfgContent::Bytes(bytes) if bytes == &expected_content
+            ),
+            "Got {:?}; expected {:?}",
+            fw_cfg_item_list[0].content,
+            expected_content
+        );
+    }
+
+    #[cfg(all(feature = "fw_cfg", target_arch = "x86_64"))]
+    #[test]
+    fn test_add_boot_order_item_replaces_existing() {
+        let first_item_content = Vec::from(b"1234");
+        let item_to_replace = FwCfgItem {
+            content: FwCfgContent::Bytes(first_item_content.clone()),
+            name: String::from("bootorder"),
+        };
+        let mut fw_cfg_item_list = vec![item_to_replace];
+        assert_eq!(fw_cfg_item_list.len(), 1);
+        assert_eq!(fw_cfg_item_list[0].name, "bootorder");
+        assert!(
+            matches!(
+                &fw_cfg_item_list[0].content,
+                FwCfgContent::Bytes(bytes) if bytes == &first_item_content
+            ),
+            "Got {:?}; expected {:?}",
+            fw_cfg_item_list[0].content,
+            first_item_content
+        );
+        // Check that the bootorder item is replaced.
+        let first_entry = BootOrderEntry {
+            boot_index: 1,
+            device_type: Some(VirtioDeviceType::Block),
+            device_address: Some(PciBdf::new(0, 0, 1, 0)),
+        };
+        let first_path = OpenFwDevicePath::from_bdf_and_device(
+            first_entry.device_address.unwrap(),
+            first_entry.device_type.unwrap(),
+        )
+        .unwrap();
+        let boot_items = vec![first_entry];
+        let expected_content = [first_path.to_string().as_bytes(), b"\0"].concat();
+        Vm::add_fw_cfg_boot_order_items(&boot_items, &mut fw_cfg_item_list).unwrap();
+        assert_eq!(fw_cfg_item_list.len(), 1);
+        assert_eq!(fw_cfg_item_list[0].name, "bootorder");
+        assert!(
+            matches!(
+                &fw_cfg_item_list[0].content,
+                FwCfgContent::Bytes(bytes) if bytes == &expected_content
+            ),
+            "Got {:?}; expected {:?}",
+            fw_cfg_item_list[0].content,
+            expected_content
+        );
     }
 }
 

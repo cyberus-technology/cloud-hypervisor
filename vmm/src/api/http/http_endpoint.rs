@@ -6,11 +6,11 @@
 
 //! # HTTP Endpoints of the Cloud Hypervisor API
 //!
-//! ## Special Handling for Devices Backed by Network File Descriptors (FDs) (e.g., virtio-net)
+//! ## Special Handling for Externally Provided File Descriptors (FDs) (e.g., virtio-net)
 //!
 //! Some of the HTTP handlers here implement special logic for devices
-//! **backed by network FDs** to enable live-migration, state save/resume
-//! (restore), and similar VM lifecycle events.
+//! **backed by externally opened FDs** to enable live-migration,
+//! state save/resume (restore), and similar VM lifecycle events.
 //!
 //! The utilized mechanism requires that the control software (e.g., libvirt)
 //! connects to Cloud Hypervisor by using a UNIX domain socket and that it
@@ -46,13 +46,16 @@ use vmm_sys_util::eventfd::EventFd;
 use crate::api;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::api::VmCoredump;
-use crate::api::http::http_endpoint::fds_helper::{attach_fds_to_cfg, attach_fds_to_cfgs};
+use crate::api::http::http_endpoint::fds_helper::{
+    ConfigWithVariableFDs, attach_fds_to_cfg, attach_fds_to_cfgs,
+};
 use crate::api::http::{EndpointHandler, HttpError, error_response};
 use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, DeviceConfig, NetConfig, VmAddDevice, VmAddFs,
     VmAddGenericVhostUser, VmAddNet, VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot,
-    VmCancelMigration, VmConfig, VmCounters, VmDelete, VmNmi, VmPause, VmPowerButton, VmReboot,
-    VmReceiveMigration, VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk,
+    VmCancelMigration, VmConfig, VmCounters, VmDelete, VmDiskMirrorCancel, VmDiskMirrorComplete,
+    VmDiskMirrorStart, VmDiskMirrorStatus, VmNmi, VmPause, VmPostMigrationAnnounce, VmPowerButton,
+    VmReboot, VmReceiveMigration, VmReceiveMigrationData, VmRemoveDevice, VmResize, VmResizeDisk,
     VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::RestoreConfig;
@@ -470,6 +473,7 @@ vm_action_put_handler!(VmShutdown);
 vm_action_put_handler!(VmReboot);
 vm_action_put_handler!(VmPause);
 vm_action_put_handler!(VmResume);
+vm_action_put_handler!(VmPostMigrationAnnounce);
 vm_action_put_handler!(VmPowerButton);
 vm_action_put_handler!(VmNmi);
 vm_action_put_handler!(VmCancelMigration);
@@ -518,7 +522,7 @@ impl PutHandler for VmAddDevice {
 
 impl GetHandler for VmAddDevice {}
 
-// Special handling for virtio-net devices backed by network FDs.
+// Special handling for externally provided FDs.
 // See module description for more info.
 impl PutHandler for VmAddNet {
     fn handle_request(
@@ -541,6 +545,14 @@ impl PutHandler for VmAddNet {
 }
 
 impl GetHandler for VmAddNet {}
+
+vm_action_put_handler_body!(VmDiskMirrorStart);
+
+vm_action_put_handler_body!(VmDiskMirrorStatus);
+
+vm_action_put_handler_body!(VmDiskMirrorComplete);
+
+vm_action_put_handler_body!(VmDiskMirrorCancel);
 
 impl PutHandler for VmResize {
     fn handle_request(
@@ -570,7 +582,7 @@ impl PutHandler for VmResize {
 
 impl GetHandler for VmResize {}
 
-// Special handling for virtio-net devices backed by network FDs.
+// Special handling for externally provided FDs.
 // See module description for more info.
 impl PutHandler for VmRestore {
     fn handle_request(
@@ -634,17 +646,23 @@ impl PutHandler for VmReceiveMigration {
         api_notifier: EventFd,
         api_sender: Sender<ApiRequest>,
         body: &Option<Body>,
-        files: Vec<File>,
+        mut files: Vec<File>,
     ) -> result::Result<Option<Body>, HttpError> {
         if let Some(body) = body {
             let mut data: VmReceiveMigrationData = serde_json::from_slice(body.raw())?;
-
+            // Split in the order net_fds, vfio_fds, then the iommufd FD.
+            let expected_net_fds: usize = data
+                .net_fds
+                .iter()
+                .map(|restored_net_cfg| restored_net_cfg.expected_num_fds())
+                .sum();
             let vfio_total = data.vfio_fds.as_ref().map_or(0, |c| c.len());
             let expected = if data.vfio_fds.is_some() {
-                vfio_total + 1
+                expected_net_fds + vfio_total + 1
             } else {
-                0
+                expected_net_fds
             };
+
             if files.len() != expected {
                 error!(
                     "Expected {expected} FDs in VmReceiveMigration request, received {}",
@@ -653,8 +671,12 @@ impl PutHandler for VmReceiveMigration {
                 return Err(HttpError::BadRequest);
             }
 
-            // Split in the order vfio_fds, then the iommufd FD.
-            let mut files = files;
+            if !data.net_fds.is_empty() {
+                let mut cfgs = data.net_fds.iter_mut().collect::<Vec<&mut _>>();
+                let cfgs = cfgs.as_mut_slice();
+                attach_fds_to_cfgs(files.drain(..expected_net_fds).collect(), cfgs)?;
+            }
+
             if let Some(cfgs) = data.vfio_fds.as_mut() {
                 let vfio_files: Vec<File> = files.drain(..vfio_total).collect();
                 let mut cfgs = cfgs.iter_mut().collect::<Vec<&mut _>>();
@@ -812,6 +834,34 @@ impl EndpointHandler for VmmShutdown {
                     Err(e) => error_response(e),
                 }
             }
+            _ => error_response(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct VmMigrationProgress {}
+
+impl EndpointHandler for VmMigrationProgress {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Get => match api::VmMigrationProgress
+                .send(api_notifier, api_sender, ())
+                .map_err(HttpError::ApiError)
+            {
+                Ok(info) => {
+                    let mut response = Response::new(Version::Http11, StatusCode::OK);
+                    let info_serialized = serde_json::to_string(&info).unwrap();
+
+                    response.set_body(Body::new(info_serialized));
+                    response
+                }
+                Err(e) => error_response(e),
+            },
             _ => error_response(HttpError::BadRequest),
         }
     }

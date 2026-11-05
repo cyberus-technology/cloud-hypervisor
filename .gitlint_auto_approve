@@ -1,0 +1,15 @@
+[general]
+extra-path=ci/gitlint/rules_auto_approve
+regex-style-search=true
+ignore=body-is-missing,body-max-line-length
+
+# default 72
+[title-max-length]
+line-length=72
+
+# Empty bodies are fine
+[body-min-length]
+min-length=0
+
+[UC-flake]
+filepath=flake.lock

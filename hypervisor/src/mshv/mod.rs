@@ -38,9 +38,9 @@ use crate::arch::aarch64::regs::{
 #[cfg(target_arch = "x86_64")]
 use crate::arch::emulator::PlatformEmulator;
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::emulator::Emulator;
+use crate::arch::x86::VcpuMsrConfigUpdate;
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::{LapicState, SpecialRegisters, VcpuMsrConfigUpdate};
+use crate::arch::x86::emulator::Emulator;
 #[cfg(target_arch = "aarch64")]
 use crate::mshv::aarch64::emulator;
 use crate::mshv::emulator::MshvEmulatorContext;
@@ -54,6 +54,8 @@ pub mod x86_64;
 // aarch64 dependencies
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+#[cfg(feature = "kvm")]
+use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 #[cfg(target_arch = "aarch64")]
 use std::sync::Mutex;
@@ -85,7 +87,7 @@ use crate::arch::aarch64::gic::{Vgic, VgicConfig};
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::regs;
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::{CpuIdEntry, FpuState, MsrEntry};
+use crate::arch::x86::{CpuIdEntry, FpuState, LapicState, MsrEntry, SpecialRegisters};
 #[cfg(target_arch = "x86_64")]
 use crate::{ClockData, ClockRestoreMode, ClockState};
 use crate::{CpuState, IoEventAddress, IrqRoutingEntry, MpState};
@@ -513,7 +515,7 @@ impl cpu::Vcpu for MshvVcpu {
     ///
     /// Returns the vCPU special registers.
     ///
-    fn get_sregs(&self) -> cpu::Result<SpecialRegisters> {
+    fn get_sregs(&self) -> Result<SpecialRegisters, cpu::HypervisorCpuError> {
         Ok(self
             .fd
             .get_sregs()
@@ -1623,6 +1625,11 @@ impl cpu::Vcpu for MshvVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
 
         Ok(())
+    }
+
+    #[cfg(feature = "kvm")]
+    unsafe fn get_kvm_vcpu_raw_fd(&self) -> RawFd {
+        unimplemented!()
     }
 
     fn hypervisor_type(&self) -> HypervisorType {

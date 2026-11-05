@@ -140,6 +140,18 @@ paths:
         409:
           description: The operation conflicts with the current state of the VM.
 
+  /vm.post-migration-announce:
+    put:
+      summary: Trigger post-migration announcements for a running VM instance.
+      operationId: postMigrationAnnounceVM
+      responses:
+        204:
+          description: The VM accepted the announcement request.
+        409:
+          description: The operation conflicts with the current state of the VM.
+        500:
+          description: The VM is not running or the announcement failed.
+
   /vm.shutdown:
     put:
       summary: Shut the VM instance down.
@@ -627,6 +639,96 @@ paths:
           description: The cancellation request was successfully submitted.
         500:
           description: The cancellation request could not be submitted because there is no ongoing migration.
+
+  /vm.disk-mirror-start:
+    put:
+      summary: Start mirroring a disk to a destination
+      requestBody:
+        description: The disk to mirror and the destination path
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorStartData"
+        required: true
+      responses:
+        204:
+          description: Disk mirroring was successfully started.
+        400:
+          description: A mirror is already active for the disk, or the destination is not usable.
+        404:
+          description: No disk with the given identifier was found.
+        409:
+          description: The VM is currently migrating.
+        500:
+          description: Disk mirroring could not be started.
+
+  /vm.disk-mirror-status:
+    put:
+      summary: Query the status of a disk mirror
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorStatusData"
+        required: true
+      responses:
+        200:
+          description: The current status of the disk mirror.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VmDiskMirrorStatusResponse"
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        409:
+          description: The VM is currently migrating.
+        500:
+          description: The disk mirror status could not be retrieved.
+
+  /vm.disk-mirror-complete:
+    put:
+      summary: Complete a disk mirror and switch to the destination
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorCompleteData"
+        required: true
+      responses:
+        204:
+          description: The disk mirror was completed and the device now uses the destination.
+        400:
+          description: The mirror is not ready to complete, or the destination is not usable.
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        409:
+          description: The VM is currently migrating.
+        500:
+          description: The disk mirror could not be completed.
+
+  /vm.disk-mirror-cancel:
+    put:
+      summary: Cancel a disk mirror and keep the source disk
+      requestBody:
+        description: The identifier of the mirrored disk
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VmDiskMirrorCancelData"
+        required: true
+      responses:
+        204:
+          description: The disk mirror was cancelled and the device keeps using the source.
+        400:
+          description: The mirror cannot be cancelled because completion is already in progress or the device is paused.
+        404:
+          description: No disk with the given identifier was found, or no mirror is active for it.
+        409:
+          description: The VM is currently migrating.
+        500:
+          description: The disk mirror could not be cancelled.
 
 components:
   schemas:
@@ -1199,8 +1301,8 @@ components:
 
     LockGranularity:
       type: string
-      enum: [ByteRange, Full]
-      default: ByteRange
+      enum: [ByteRange, Full, QemuCompatible]
+      default: QemuCompatible
 
     DiskConfig:
       type: object
@@ -1256,6 +1358,13 @@ components:
           $ref: "#/components/schemas/LockGranularity"
         guest_block_size:
           type: integer
+        bootindex:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: >
+            Boot-order priority for this disk. Available only on x86_64 builds
+            with the fw_cfg feature enabled.
 
     NetConfig:
       type: object
@@ -1727,8 +1836,8 @@ components:
         tls_dir:
           type: string
           description: >
-            Directory containing the TLS server certificate (server-cert.pem), the TLS
-            server key (server-key.pem), and the client TLS root CA certificate (ca-cert.pem).
+            Directory containing the TLS server certificate (server-cert.pem)
+            and TLS server key (server-key.pem). The receiver does not authenticate clients.
             TLS is only supported with tcp:<host>:<port> receiver URLs.
             Recommended for all TCP migrations. Omitting it is only intended for
             development and testing, as TCP migration is then unencrypted and
@@ -1826,8 +1935,8 @@ components:
         tls_dir:
           type: string
           description: >
-            Directory containing the TLS root CA certificate (ca-cert.pem), the TLS client
-            certificate (client-cert.pem), and TLS client key (client-key.pem).
+            Directory containing the TLS root CA certificate (ca-cert.pem)
+            used to verify the destination's certificate. No client certificate is required.
             TLS is only supported with tcp:<host>:<port> destination URLs.
             Recommended for all TCP migrations. Omitting it is only intended for
             development and testing, as TCP migration is then unencrypted and
@@ -1858,4 +1967,64 @@ components:
         path:
           type: string
         access:
+          type: string
+
+    VmDiskMirrorStartData:
+      required:
+        - id
+        - destination_path
+      type: object
+      properties:
+        id:
+          type: string
+        destination_path:
+          type: string
+
+    VmDiskMirrorStatusData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
+          type: string
+
+    VmDiskMirrorStatusResponse:
+      required:
+        - phase
+        - copied_bytes
+        - total_bytes
+      type: object
+      properties:
+        phase:
+          type: string
+          enum:
+            - running
+            - ready
+            - completing
+            - completed
+            - cancelling
+            - failed
+        copied_bytes:
+          type: integer
+          format: int64
+        total_bytes:
+          type: integer
+          format: int64
+        failure:
+          type: string
+
+    VmDiskMirrorCompleteData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
+          type: string
+
+    VmDiskMirrorCancelData:
+      required:
+        - id
+      type: object
+      properties:
+        id:
           type: string

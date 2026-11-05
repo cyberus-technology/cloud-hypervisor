@@ -18,6 +18,9 @@ use crate::protocol::MemoryRangeTable;
 
 mod bitpos_iterator;
 mod context;
+// TODO(keepalive): remove this module when gardenlinux-release-26-09-18 compatibility ends.
+pub mod keep_alive_stream;
+pub mod progress;
 pub mod protocol;
 pub mod tls;
 
@@ -115,6 +118,8 @@ pub enum MigratableError {
 
     #[error("Lifecycle operation skipped for disconnected component {0}")]
     DeviceDisconnected(String),
+    #[error("Failed to deserialize network data")]
+    DeserializeError(#[source] anyhow::Error),
 
     #[error("Error setting up a TLS-encrypted connection")]
     Tls(#[source] tls::TlsError),

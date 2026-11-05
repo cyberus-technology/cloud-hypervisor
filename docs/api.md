@@ -103,6 +103,7 @@ The Cloud Hypervisor API exposes the following actions through its endpoints:
 | Add/remove memory from a zone           | `/vm.resize-zone`            | `/schemas/VmResizeZone`           | N/A                             | The VM is booted                                         |
 | Restore the VM from a snapshot          | `/vm.restore`                | `/schemas/RestoreConfig`          | N/A                             | The VM is created but not booted                         |
 | Resume the VM                           | `/vm.resume`                 | N/A                               | N/A                             | The VM is paused                                         |
+| Trigger post-migration announce         | `/vm.post-migration-announce`| N/A                               | N/A                             | The VM is booted and not paused                          |
 | Start to send migration to target       | `/vm.send-migration`         | `/schemas/SendMigrationData`      | N/A                             | The VM is booted and (shared mem or hugepages enabled)   |
 | Shut the VM down                        | `/vm.shutdown`               | N/A                               | N/A                             | The VM is booted                                         |
 | Take a snapshot of the VM               | `/vm.snapshot`               | `/schemas/VmSnapshotConfig`       | N/A                             | The VM is paused                                         |

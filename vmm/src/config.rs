@@ -201,6 +201,9 @@ pub enum ValidationError {
     /// Missing file value for console
     #[error("Path missing when using file console mode")]
     ConsoleFileMissing,
+    /// Missing TCP address for console
+    #[error("Address missing when using TCP console mode")]
+    ConsoleTcpAddressMissing,
     /// Missing socket path for console
     #[error("Path missing when using socket console mode")]
     ConsoleSocketPathMissing,
@@ -476,6 +479,18 @@ pub enum ValidationError {
     /// More than one update was specified that contains an empty memory zone ID
     #[error("At least one memory zone update with an empty ID was defined")]
     MemoryZoneUpdatesEmptyId,
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// It's invalid to use the same boot index for multiple devices.
+    #[error("The boot index {0} is already in use")]
+    BootIndexAlreadyInUse(u32),
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    /// It is invalid to set a boot index for a device outside PCI segment 0. OVMF currently exposes
+    /// only PCI segment 0 during boot. Devices on other CHV PCI segments cannot be selected through
+    /// fw_cfg boot order.
+    #[error(
+        "Boot index can only be used for devices connected to PCI segment 0. Found segment ID {0} instead"
+    )]
+    BootIndexCombinedWithNonZeroSegment(u16),
 }
 
 type ValidationResult<T> = result::Result<T, ValidationError>;
@@ -765,6 +780,7 @@ impl CpusConfig {
             .add("features")
             .add("nested")
             .add("core_scheduling")
+            .add("nested")
             .add("profile");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
@@ -1490,6 +1506,7 @@ impl PciDeviceCommonConfig {
 }
 
 impl DiskConfig {
+    #[cfg(not(all(target_arch = "x86_64", feature = "fw_cfg")))]
     pub const SYNTAX: &'static str = "Disk parameters \
          \"path=<disk_image_path>,readonly=on|off,direct=on|off,iommu=off|virtio,\
          num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,\
@@ -1500,8 +1517,22 @@ impl DiskConfig {
          rate_limit_group=<group_id>,\
          queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
          serial=<serial_number>,backing_files=on|off,sparse=on|off,\
-         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full,\
+         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full|qemu-compatible,\
          guest_block_size=<size_in_bytes>";
+
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    pub const SYNTAX: &'static str = "Disk parameters \
+          \"path=<disk_image_path>,readonly=on|off,direct=on|off,iommu=off|virtio,\
+         num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,\
+         vhost_user=on|off,socket=<vhost_user_socket_path>,\
+         bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
+         ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,\
+         id=<device_id>,pci_segment=<segment_id>,pci_device_id=<pci_slot>,\
+         rate_limit_group=<group_id>,\
+         queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
+         serial=<serial_number>,backing_files=on|off,sparse=on|off,\
+         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full|qemu-compatible,\
+         guest_block_size=<size_in_bytes>,bootindex=<index>";
 
     pub fn parse(disk: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1530,6 +1561,9 @@ impl DiskConfig {
             .add("lock_granularity")
             .add("guest_block_size")
             .add_all(PciDeviceCommonConfig::OPTIONS_IOMMU);
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        parser.add("bootindex");
 
         parser.parse(disk).map_err(Error::ParseDisk)?;
 
@@ -1664,6 +1698,11 @@ impl DiskConfig {
 
         let pci_common = PciDeviceCommonConfig::parse(disk)?;
 
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        let bootindex = parser
+            .convert::<u32>("bootindex")
+            .map_err(Error::ParseDisk)?;
+
         Ok(DiskConfig {
             pci_common,
             path,
@@ -1684,6 +1723,8 @@ impl DiskConfig {
             image_type,
             lock_granularity,
             guest_block_size,
+            #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+            bootindex,
         })
     }
 
@@ -1752,6 +1793,16 @@ impl DiskConfig {
             && (!guest_block_size.is_power_of_two() || !(512..=65536).contains(&guest_block_size))
         {
             return Err(ValidationError::InvalidGuestBlockSize(guest_block_size));
+        }
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        // Fail early if we attempt to set boot index for a device not connected to segment 0. OVMF
+        // currently exposes only PCI segment 0 during boot. Devices on other CHV PCI segments
+        // cannot be selected through fw_cfg boot order.
+        if self.pci_common.pci_segment != 0 && self.bootindex.is_some() {
+            return Err(ValidationError::BootIndexCombinedWithNonZeroSegment(
+                self.pci_common.pci_segment,
+            ));
         }
 
         Ok(())
@@ -2325,27 +2376,27 @@ impl FwCfgConfig {
         let e820 = parser
             .convert::<Toggle>("e820")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let kernel = parser
             .convert::<Toggle>("kernel")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let cmdline = parser
             .convert::<Toggle>("cmdline")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let initramfs = parser
             .convert::<Toggle>("initramfs")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let acpi_tables = parser
             .convert::<Toggle>("acpi_table")
             .map_err(Error::ParseFwCfgItem)?
-            .unwrap_or(Toggle(true))
+            .unwrap_or(Toggle(false))
             .0;
         let items = if parser.is_set("items") {
             Some(
@@ -2367,6 +2418,7 @@ impl FwCfgConfig {
             items,
         })
     }
+
     pub fn validate(&self, payload: &PayloadConfig) -> result::Result<(), PayloadConfigError> {
         if self.kernel && payload.kernel.is_none() {
             return Err(PayloadConfigError::FwCfgMissingKernel);
@@ -2448,7 +2500,7 @@ impl PmemConfig {
 }
 
 impl CommonConsoleConfig {
-    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null"];
+    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null", "tcp"];
     const VALUE_OPTIONS: &[&str] = &["file", "socket"];
 
     fn parse(console: &str, map_err: impl Fn(OptionParserError) -> Error) -> Result<Self> {
@@ -2460,6 +2512,7 @@ impl CommonConsoleConfig {
 
         let mut file: Option<PathBuf> = None;
         let mut socket: Option<PathBuf> = None;
+        let mut url: Option<String> = None;
         let mut mode: ConsoleOutputMode = ConsoleOutputMode::Off;
 
         if parser.is_set("off") {
@@ -2475,6 +2528,19 @@ impl CommonConsoleConfig {
                 Some(PathBuf::from(parser.get("file").ok_or(
                     Error::Validation(ValidationError::ConsoleFileMissing),
                 )?));
+        } else if parser.is_set("tcp") {
+            mode = ConsoleOutputMode::Tcp;
+            url = Some(
+                parser
+                    .get("tcp")
+                    .ok_or(Error::Validation(ValidationError::ConsoleTcpAddressMissing))?,
+            );
+            if parser.is_set("file") {
+                file =
+                    Some(PathBuf::from(parser.get("file").ok_or(
+                        Error::Validation(ValidationError::ConsoleFileMissing),
+                    )?));
+            }
         } else if parser.is_set("socket") {
             mode = ConsoleOutputMode::Socket;
             socket = Some(PathBuf::from(parser.get("socket").ok_or(
@@ -2484,7 +2550,12 @@ impl CommonConsoleConfig {
             return Err(Error::ParseConsoleInvalidModeGiven);
         }
 
-        Ok(Self { mode, file, socket })
+        Ok(Self {
+            mode,
+            file,
+            socket,
+            url,
+        })
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
@@ -2907,6 +2978,27 @@ pub struct RestoredNetConfig {
     // and will be populated into this struct on the destination VMM eventually.
     #[serde(default, deserialize_with = "deserialize_restorednetconfig_fds")]
     pub fds: Option<Vec<i32>>,
+}
+
+impl RestoredNetConfig {
+    // Ensure all net devices from 'VmConfig' backed by FDs have a
+    // corresponding 'RestoreNetConfig' with a matched 'id' and expected
+    // number of FDs.
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        let found = vm_config
+            .net
+            .iter()
+            .flatten()
+            .any(|net| net.pci_common.id.as_ref() == Some(&self.id));
+
+        if found {
+            Ok(())
+        } else {
+            Err(ValidationError::RestoreMissingRequiredNetId(
+                self.id.clone(),
+            ))
+        }
+    }
 }
 
 fn deserialize_restorednetconfig_fds<'de, D>(d: D) -> result::Result<Option<Vec<i32>>, D::Error>
@@ -3436,6 +3528,8 @@ impl VmConfig {
     // configuration.
     pub fn validate(&mut self) -> ValidationResult<BTreeSet<String>> {
         let mut id_list = BTreeSet::new();
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        let mut seen_boot_indices: HashSet<u32> = HashSet::new();
 
         if self.virtio_iommu_attached() && self.smmuv3_attached() {
             return Err(ValidationError::MixedIommuTypes);
@@ -3604,6 +3698,13 @@ impl VmConfig {
                     } else {
                         return Err(ValidationError::InvalidRateLimiterGroup);
                     }
+                }
+
+                #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+                if let Some(bootindex) = disk.bootindex
+                    && !seen_boot_indices.insert(bootindex)
+                {
+                    return Err(ValidationError::BootIndexAlreadyInUse(bootindex));
                 }
 
                 disk.validate(self)?;
@@ -4194,6 +4295,8 @@ impl VmConfig {
     /// To use this safely, the caller must guarantee that the input
     /// fds are all valid.
     pub unsafe fn add_preserved_fds(&mut self, fds: Vec<i32>) {
+        debug!("adding preserved FDs to VM list: {fds:?}");
+
         if fds.is_empty() {
             return;
         }
@@ -4247,7 +4350,14 @@ impl Clone for VmConfig {
                 .preserved_fds
                 .as_ref()
                 // SAFETY: FFI call with valid FDs
-                .map(|fds| fds.iter().map(|fd| unsafe { libc::dup(*fd) }).collect()),
+                .map(|fds| {
+                    fds.iter()
+                        .map(|fd| {
+                            // SAFETY: Trivially safe.
+                            unsafe { libc::dup(*fd) }
+                        })
+                        .collect()
+                }),
             landlock_rules: self.landlock_rules.clone(),
             #[cfg(feature = "ivshmem")]
             ivshmem: self.ivshmem.clone(),
@@ -4259,6 +4369,7 @@ impl Clone for VmConfig {
 impl Drop for VmConfig {
     fn drop(&mut self) {
         if let Some(mut fds) = self.preserved_fds.take() {
+            debug!("Closing preserved FDs from VM: fds={fds:?}");
             for fd in fds.drain() {
                 // SAFETY: FFI call with valid FDs
                 unsafe { libc::close(fd) };
@@ -4645,6 +4756,8 @@ mod tests {
             image_type: ImageType::Unknown,
             lock_granularity: LockGranularityChoice::default(),
             guest_block_size: None,
+            #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+            bootindex: Default::default(),
         }
     }
 
@@ -4746,6 +4859,13 @@ mod tests {
             DiskConfig::parse("path=/path/to_file,lock_granularity=byte-range")?,
             DiskConfig {
                 lock_granularity: LockGranularityChoice::ByteRange,
+                ..disk_fixture()
+            }
+        );
+        assert_eq!(
+            DiskConfig::parse("path=/path/to_file,lock_granularity=qemu-compatible")?,
+            DiskConfig {
+                lock_granularity: LockGranularityChoice::QemuCompatible,
                 ..disk_fixture()
             }
         );
@@ -5147,7 +5267,12 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
     #[test]
     fn test_console_parsing() -> Result<()> {
         let console_config = |mode, file, socket, iommu| ConsoleConfig {
-            common: CommonConsoleConfig { file, mode, socket },
+            common: CommonConsoleConfig {
+                file,
+                mode,
+                socket,
+                url: None,
+            },
             pci_common: PciDeviceCommonConfig {
                 iommu,
                 ..Default::default()
@@ -6143,6 +6268,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     file: None,
                     mode: ConsoleOutputMode::Null,
                     socket: None,
+                    url: None,
                 },
             },
             console: ConsoleConfig {
@@ -6150,6 +6276,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     file: None,
                     mode: ConsoleOutputMode::Tty,
                     socket: None,
+                    url: None,
                 },
                 pci_common: PciDeviceCommonConfig::default(),
             },
@@ -6211,6 +6338,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                 payload.firmware = Some(PathBuf::from("/path/to/firmware"));
                 payload.cmdline = Some("console=hvc0".to_string());
                 payload.fw_cfg_config = Some(FwCfgConfig {
+                    kernel: true,
                     initramfs: false,
                     ..Default::default()
                 });
@@ -7594,6 +7722,54 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             invalid_config.validate(),
             Err(ValidationError::IdentifierNotUnique("test0".to_string()))
         );
+
+        #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+        {
+            let mut valid_config_with_bootindex = valid_config.clone();
+            valid_config_with_bootindex.disks = Some(vec![DiskConfig {
+                bootindex: Some(1),
+                ..raw_disk_fixture()
+            }]);
+            valid_config_with_bootindex.validate().unwrap();
+
+            let expected_index = 1;
+            let mut invalid_config = valid_config.clone();
+            invalid_config.disks = Some(vec![
+                DiskConfig {
+                    bootindex: Some(expected_index),
+                    ..raw_disk_fixture()
+                },
+                DiskConfig {
+                    bootindex: Some(expected_index),
+                    ..raw_disk_fixture()
+                },
+            ]);
+            let e = invalid_config.validate().unwrap_err();
+            assert!(
+                matches!(e, ValidationError::BootIndexAlreadyInUse(i) if i == expected_index),
+                "Expected the bootindex of {expected_index} to be part of the error."
+            );
+
+            let expected_segment = 1;
+            let mut invalid_config = valid_config.clone();
+            invalid_config.platform = Some(PlatformConfig {
+                num_pci_segments: 2,
+                ..platform_fixture()
+            });
+            invalid_config.disks = Some(vec![DiskConfig {
+                bootindex: Some(1),
+                pci_common: PciDeviceCommonConfig {
+                    pci_segment: expected_segment,
+                    ..Default::default()
+                },
+                ..raw_disk_fixture()
+            }]);
+            let e = invalid_config.validate().unwrap_err();
+            assert!(
+                matches!(e, ValidationError::BootIndexCombinedWithNonZeroSegment(i) if i == expected_segment),
+                "Expected a segment ID of {expected_segment} to be part of the error."
+            );
+        }
     }
     #[test]
     fn test_landlock_parsing() -> Result<()> {

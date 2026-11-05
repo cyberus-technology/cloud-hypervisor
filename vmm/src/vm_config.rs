@@ -441,7 +441,7 @@ pub struct PciDeviceCommonConfig {
     pub iommu: IommuType,
     #[serde(default)]
     pub pci_segment: u16,
-    #[serde(default)]
+    #[serde(default, alias = "pci_device_id", rename = "bdf_device")]
     pub pci_device_id: Option<u8>,
 }
 
@@ -486,6 +486,9 @@ pub struct DiskConfig {
     pub lock_granularity: LockGranularityChoice,
     #[serde(default)]
     pub guest_block_size: Option<u32>,
+    #[cfg(all(target_arch = "x86_64", feature = "fw_cfg"))]
+    #[serde(default)]
+    pub bootindex: Option<u32>,
 }
 
 impl ApplyLandlock for DiskConfig {
@@ -707,6 +710,7 @@ pub enum ConsoleOutputMode {
     Tty,
     File,
     Socket,
+    Tcp,
     Null,
 }
 
@@ -721,6 +725,7 @@ pub struct CommonConsoleConfig {
     pub mode: ConsoleOutputMode,
     #[serde(default)]
     pub socket: Option<PathBuf>,
+    pub url: Option<String>,
 }
 
 impl ApplyLandlock for CommonConsoleConfig {
@@ -747,7 +752,8 @@ pub struct SerialConfig {
 }
 
 impl SerialConfig {
-    pub const SYNTAX: &str = "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>\"";
+    pub const SYNTAX: &str =
+        "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>|tcp=<host:port>\"";
 }
 
 impl Default for SerialConfig {
@@ -757,6 +763,7 @@ impl Default for SerialConfig {
                 file: None,
                 mode: ConsoleOutputMode::Null,
                 socket: None,
+                url: None,
             },
         }
     }
@@ -788,6 +795,7 @@ impl Default for ConsoleConfig {
                 file: None,
                 mode: ConsoleOutputMode::Tty,
                 socket: None,
+                url: None,
             },
             pci_common: PciDeviceCommonConfig::default(),
         }
@@ -1052,7 +1060,7 @@ pub struct PayloadConfig {
 
 #[cfg(feature = "fw_cfg")]
 #[serde_with::skip_serializing_none]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct FwCfgConfig {
     pub e820: bool,
@@ -1061,20 +1069,6 @@ pub struct FwCfgConfig {
     pub initramfs: bool,
     pub acpi_tables: bool,
     pub items: Option<FwCfgItemList>,
-}
-
-#[cfg(feature = "fw_cfg")]
-impl Default for FwCfgConfig {
-    fn default() -> Self {
-        FwCfgConfig {
-            e820: true,
-            kernel: true,
-            cmdline: true,
-            initramfs: true,
-            acpi_tables: true,
-            items: None,
-        }
-    }
 }
 
 #[cfg(feature = "fw_cfg")]
@@ -1390,7 +1384,7 @@ impl VmConfig {
         Ok(())
     }
 
-    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    #[cfg(all(target_arch = "x86_64", any(feature = "kvm", feature = "fw_cfg")))]
     pub(crate) fn max_apic_id(&self) -> u32 {
         if let Some(topology) = &self.cpus.topology {
             arch::x86_64::get_max_x2apic_id((

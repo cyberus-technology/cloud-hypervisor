@@ -12,11 +12,12 @@
 
 use std::fs::{File, OpenOptions, read_link};
 use std::mem::zeroed;
+use std::net::TcpListener;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::{io, result};
+use std::{io, net, result};
 
 use libc::{TCSANOW, cfmakeraw, isatty, tcgetattr, tcsetattr, termios};
 use thiserror::Error;
@@ -53,6 +54,10 @@ pub enum ConsoleDeviceError {
     #[error("Socket path missing for socket console mode")]
     MissingSocketPath,
 
+    /// Error parsing the TCP address
+    #[error("Wrong TCP address format: {0}")]
+    WrongTcpAddressFormat(String),
+
     /// Error setting pty raw mode
     #[error("Error setting pty raw mode")]
     SetPtyRaw(#[source] errno::Error),
@@ -75,6 +80,7 @@ pub enum ConsoleTransport {
     Tty(Arc<File>),
     Null,
     Socket(Arc<LockedUnixListener>),
+    Tcp(Arc<TcpListener>, Option<Arc<File>>),
     Off,
 }
 
@@ -259,6 +265,7 @@ pub(crate) fn pre_create_console_devices(vmm: &mut Vmm) -> ConsoleDeviceResult<C
                     ConsoleTransport::Socket(Arc::new(listener))
                 }
             }
+            ConsoleOutputMode::Tcp => ConsoleTransport::Null,
             ConsoleOutputMode::Null => ConsoleTransport::Null,
             ConsoleOutputMode::Off => ConsoleTransport::Off,
         },
@@ -309,6 +316,21 @@ pub(crate) fn pre_create_console_devices(vmm: &mut Vmm) -> ConsoleDeviceResult<C
                     ConsoleTransport::Socket(Arc::new(listener))
                 }
             }
+            ConsoleOutputMode::Tcp => {
+                let url = vmconfig.serial.common.url.as_ref().unwrap();
+                let socket_addr: net::SocketAddr = url
+                    .parse()
+                    .map_err(|_| ConsoleDeviceError::WrongTcpAddressFormat(url.to_string()))?;
+                let listener = TcpListener::bind(socket_addr)
+                    .map_err(ConsoleDeviceError::CreateConsoleDevice)?;
+
+                let mut f = None;
+                if let Some(p) = &vmconfig.serial.common.file {
+                    let file = File::create(p).map_err(ConsoleDeviceError::CreateConsoleDevice)?;
+                    f = Some(Arc::new(file));
+                }
+                ConsoleTransport::Tcp(Arc::new(listener), f)
+            }
             ConsoleOutputMode::Null => ConsoleTransport::Null,
             ConsoleOutputMode::Off => ConsoleTransport::Off,
         },
@@ -335,6 +357,7 @@ pub(crate) fn pre_create_console_devices(vmm: &mut Vmm) -> ConsoleDeviceResult<C
             ConsoleOutputMode::Socket => {
                 return Err(ConsoleDeviceError::NoSocketOptionSupportForConsoleDevice);
             }
+            ConsoleOutputMode::Tcp => ConsoleTransport::Null,
             ConsoleOutputMode::Null => ConsoleTransport::Null,
             ConsoleOutputMode::Off => ConsoleTransport::Off,
         },

@@ -10,18 +10,21 @@ mod test_util;
 use std::io::{self, Read};
 use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
+use std::thread::sleep;
+use std::time::Duration;
 use std::{error, fs, iter, num, process};
 
 use api_client::{
-    Error as ApiClientError, simple_api_command, simple_api_command_with_fds,
-    simple_api_full_command,
+    Error as ApiClientError, StatusCode, simple_api_command, simple_api_command_with_fds,
+    simple_api_full_command, simple_api_full_command_with_fds_and_response,
 };
 #[cfg(feature = "dbus_api")]
 use clap::ArgAction;
 use clap::{Arg, ArgMatches, Command};
-use log::error;
+use log::{error, info};
 use option_parser::{ByteSized, ByteSizedParseError};
 use thiserror::Error;
+use vm_migration::progress::{MigrationProgress, MigrationState};
 use vmm::api;
 use vmm::config::{self, RestoreConfig};
 use vmm::vm_config::{
@@ -119,6 +122,7 @@ trait DBusApi1 {
     fn vm_receive_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_send_migration(&self, receive_migration_data: &str) -> zbus::Result<()>;
     fn vm_resume(&self) -> zbus::Result<()>;
+    fn vm_post_migration_announce(&self) -> zbus::Result<()>;
     fn vm_shutdown(&self) -> zbus::Result<()>;
     fn vm_snapshot(&self, vm_snapshot_config: &str) -> zbus::Result<()>;
 }
@@ -276,6 +280,11 @@ impl<'a> DBusApi1ProxyBlocking<'a> {
         self.vm_resume().map_err(Error::DBusApiClient)
     }
 
+    fn api_vm_post_migration_announce(&self) -> ApiResult {
+        self.vm_post_migration_announce()
+            .map_err(Error::DBusApiClient)
+    }
+
     fn api_vm_shutdown(&self) -> ApiResult {
         self.vm_shutdown().map_err(Error::DBusApiClient)
     }
@@ -309,6 +318,10 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
         Some("resume") => {
             simple_api_command(socket, "PUT", "resume", None).map_err(Error::HttpApiClient)
         }
+        Some("post-migration-announce") => {
+            simple_api_command(socket, "PUT", "post-migration-announce", None)
+                .map_err(Error::HttpApiClient)
+        }
         Some("power-button") => {
             simple_api_command(socket, "PUT", "power-button", None).map_err(Error::HttpApiClient)
         }
@@ -333,6 +346,8 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
         Some("shutdown") => {
             simple_api_command(socket, "PUT", "shutdown", None).map_err(Error::HttpApiClient)
         }
+        Some("migration-progress") => simple_api_command(socket, "GET", "migration-progress", None)
+            .map_err(Error::HttpApiClient),
         Some("nmi") => simple_api_command(socket, "PUT", "nmi", None).map_err(Error::HttpApiClient),
         Some("resize") => {
             let resize = resize_config(
@@ -535,15 +550,91 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                 .map_err(Error::HttpApiClient)
         }
         Some("send-migration") => {
-            let send_migration_data = send_migration_data(
+            let just_dispatch = matches
+                .subcommand_matches("send-migration")
+                .unwrap()
+                .get_one::<bool>("dispatch")
+                .cloned()
+                .unwrap_or(false);
+            let wait_for_migration = !just_dispatch;
+
+            let mut send_migration_data = send_migration_data(
                 matches
                     .subcommand_matches("send-migration")
                     .unwrap()
                     .get_one::<String>("send_migration_config")
                     .unwrap(),
             )?;
+            let shutdown_after_migration =
+                !send_migration_data.keep_alive && !send_migration_data.preserve_source;
+            if wait_for_migration {
+                // Keep the API available until the final progress snapshot is observed.
+                send_migration_data.keep_alive = true;
+            }
+            let send_migration_data = serde_json::to_string(&send_migration_data).unwrap();
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
-                .map_err(Error::HttpApiClient)
+                .map_err(Error::HttpApiClient)?;
+
+            if !wait_for_migration {
+                return Ok(());
+            }
+            loop {
+                let response = simple_api_full_command_with_fds_and_response(
+                    socket,
+                    "GET",
+                    "vm.migration-progress",
+                    None,
+                    &[],
+                )
+                .map_err(Error::HttpApiClient)?
+                // should have response
+                .ok_or(Error::HttpApiClient(ApiClientError::ServerResponse(
+                    StatusCode::Ok,
+                    None,
+                )))?;
+
+                // This is guaranteed by the SendMigration call
+                assert_ne!(
+                    response, "null",
+                    "migration progress should be there immediately when the migration was dispatched"
+                );
+
+                let progress = serde_json::from_slice::<MigrationProgress>(response.as_bytes())
+                    .map_err(|e| {
+                        error!("failed to parse response as MigrationProgress: {e}");
+                        Error::HttpApiClient(ApiClientError::ServerResponse(
+                            StatusCode::Ok,
+                            Some(response),
+                        ))
+                    })?;
+
+                match progress.state {
+                    MigrationState::Cancelled { .. } => {
+                        info!("Migration was cancelled");
+                        break;
+                    }
+                    MigrationState::Failed {
+                        error_msg,
+                        error_msg_debug,
+                    } => {
+                        error!("Migration failed! {error_msg}\n{error_msg_debug}");
+                        break;
+                    }
+                    MigrationState::Finished { .. } => {
+                        info!("Migration finished successfully");
+                        if shutdown_after_migration {
+                            simple_api_full_command(socket, "PUT", "vmm.shutdown", None)
+                                .map_err(Error::HttpApiClient)?;
+                        }
+                        break;
+                    }
+                    MigrationState::Ongoing { .. } => {
+                        sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                }
+            }
+            Ok(())
         }
         Some("receive-migration") => {
             let (receive_migration_data, fds) = receive_migration_data(
@@ -585,6 +676,7 @@ fn dbus_api_do_command(matches: &ArgMatches, proxy: &DBusApi1ProxyBlocking<'_>) 
         Some("delete") => proxy.api_vm_delete(),
         Some("shutdown-vmm") => proxy.api_vmm_shutdown(),
         Some("resume") => proxy.api_vm_resume(),
+        Some("post-migration-announce") => proxy.api_vm_post_migration_announce(),
         Some("power-button") => proxy.api_vm_power_button(),
         Some("reboot") => proxy.api_vm_reboot(),
         Some("pause") => proxy.api_vm_pause(),
@@ -767,7 +859,7 @@ fn dbus_api_do_command(matches: &ArgMatches, proxy: &DBusApi1ProxyBlocking<'_>) 
                     .get_one::<String>("send_migration_config")
                     .unwrap(),
             )?;
-            proxy.api_vm_send_migration(&send_migration_data)
+            proxy.api_vm_send_migration(&serde_json::to_string(&send_migration_data).unwrap())
         }
         Some("receive-migration") => {
             let (receive_migration_data, _fds) = receive_migration_data(
@@ -999,11 +1091,8 @@ fn receive_migration_data(config: &str) -> Result<(String, Vec<i32>), Error> {
     Ok((serde_json::to_string(&data).unwrap(), fds))
 }
 
-fn send_migration_data(config: &str) -> Result<String, Error> {
-    let send_migration_data =
-        api::VmSendMigrationData::parse(config).map_err(Error::SendMigrationConfig)?;
-    let send_migration_config = serde_json::to_string(&send_migration_data).unwrap();
-    Ok(send_migration_config)
+fn send_migration_data(config: &str) -> Result<api::VmSendMigrationData, Error> {
+    api::VmSendMigrationData::parse(config).map_err(Error::SendMigrationConfig)
 }
 
 fn create_data(path: &str) -> Result<String, Error> {
@@ -1103,9 +1192,11 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
             .arg(Arg::new("path").index(1).default_value("-")),
         Command::new("delete").about("Delete a VM"),
         Command::new("info").about("Info on the VM"),
+        Command::new("migration-progress"),
         Command::new("nmi").about("Trigger NMI"),
         Command::new("pause").about("Pause the VM"),
         Command::new("ping").about("Ping the VMM to check for API server availability"),
+        Command::new("post-migration-announce").about("Announce completion of VM migration"),
         Command::new("power-button").about("Trigger a power button in the VM"),
         Command::new("reboot").about("Reboot the VM"),
         Command::new("receive-migration")
@@ -1177,6 +1268,12 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
         Command::new("resume").about("Resume the VM"),
         Command::new("send-migration")
             .about("Initiate a VM migration")
+            .arg(
+                Arg::new("dispatch")
+                    .long("dispatch")
+                    .help("just dispatch the migration without waiting for it to finish")
+                    .num_args(0),
+            )
             .arg(
                 Arg::new("send_migration_config")
                     .index(1)

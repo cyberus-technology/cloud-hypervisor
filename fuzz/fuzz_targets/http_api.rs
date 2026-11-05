@@ -11,6 +11,7 @@ use std::thread;
 
 use libfuzzer_sys::{fuzz_target, Corpus};
 use micro_http::Request;
+use vm_migration::progress::MigrationProgress;
 use vm_migration::MigratableError;
 use vmm::api::http::*;
 use vmm::api::{
@@ -105,6 +106,10 @@ impl RequestHandler for StubApiRequestHandler {
         Ok(())
     }
 
+    fn vm_post_migration_announce(&mut self) -> Result<(), VmError> {
+        Ok(())
+    }
+
     fn vm_snapshot(&mut self, _: &str) -> Result<(), VmError> {
         Ok(())
     }
@@ -114,6 +119,22 @@ impl RequestHandler for StubApiRequestHandler {
     }
 
     fn vm_resize_disk(&mut self, _: String, _: u64) -> Result<(), VmError> {
+        Ok(())
+    }
+
+    fn vm_disk_mirror_start(&mut self, _: String, _: PathBuf) -> Result<(), VmError> {
+        Ok(())
+    }
+
+    fn vm_disk_mirror_status(&mut self, _: String) -> Result<Option<Vec<u8>>, VmError> {
+        Ok(None)
+    }
+
+    fn vm_disk_mirror_complete(&mut self, _: String) -> Result<(), VmError> {
+        Ok(())
+    }
+
+    fn vm_disk_mirror_cancel(&mut self, _: String) -> Result<(), VmError> {
         Ok(())
     }
 
@@ -128,6 +149,10 @@ impl RequestHandler for StubApiRequestHandler {
 
     fn vm_reboot(&mut self) -> Result<(), VmError> {
         Ok(())
+    }
+
+    fn vm_migration_progress(&mut self) -> Option<MigrationProgress> {
+        None
     }
 
     fn vm_info(&self) -> Result<VmInfoResponse, VmError> {
@@ -183,6 +208,7 @@ impl RequestHandler for StubApiRequestHandler {
                         file: None,
                         mode: ConsoleOutputMode::Tty,
                         socket: None,
+                        url: None,
                     },
                 },
                 console: ConsoleConfig {
@@ -190,6 +216,7 @@ impl RequestHandler for StubApiRequestHandler {
                         file: None,
                         mode: ConsoleOutputMode::Tty,
                         socket: None,
+                        url: None,
                     },
                     pci_common: PciDeviceCommonConfig::default(),
                 },

@@ -11,14 +11,14 @@ use std::net::IpAddr;
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
+use std::{result, thread};
 
 use anyhow::{Context, anyhow};
 use event_monitor::event;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 #[cfg(not(fuzzing))]
 use net_util::virtio_features_to_tap_offload;
 use net_util::{
@@ -313,9 +313,9 @@ impl NetEpollHandler {
 
         if res {
             self.signal_used_queue(self.queue_index_base)?;
-            debug!("Signalling RX queue");
+            trace!("Signalling RX queue");
         } else {
-            debug!("Not signalling RX queue");
+            trace!("Not signalling RX queue");
         }
         Ok(())
     }
@@ -720,11 +720,12 @@ impl Net {
         for fd in fds.iter() {
             // Duplicate so that it can survive reboots
             // SAFETY: FFI call to dup. Trivially safe.
-            let fd = unsafe { libc::dup(*fd) };
-            if fd < 0 {
+            let fd_duped = unsafe { libc::dup(*fd) };
+            if fd_duped < 0 {
                 return Err(Error::DuplicateTapFd(io::Error::last_os_error()));
             }
-            let tap = Tap::from_tap_fd(fd, num_queue_pairs).map_err(Error::TapError)?;
+            debug!("dup'ed fd {fd} => {fd_duped} for virtio-net device {id}");
+            let tap = Tap::from_tap_fd(fd_duped, num_queue_pairs).map_err(Error::TapError)?;
             taps.push(tap);
         }
 
@@ -825,6 +826,24 @@ impl Net {
     }
 }
 
+impl Drop for Net {
+    fn drop(&mut self) {
+        self.announce.invalidate();
+        // Get a comma-separated list of the interface names of the tap devices
+        // associated with this network device.
+        let ifnames_str = self
+            .taps
+            .iter()
+            .map(|tap| tap.if_name_as_str())
+            .collect::<Vec<_>>();
+        let ifnames_str = ifnames_str.join(",");
+        debug!(
+            "virtio-net device closed: id={}, ifnames=[{ifnames_str}]",
+            self.id
+        );
+    }
+}
+
 impl VirtioDevice for Net {
     fn device_type(&self) -> u32 {
         self.common.device_type
@@ -840,6 +859,46 @@ impl VirtioDevice for Net {
 
     fn ack_features(&mut self, value: u64) {
         self.common.ack_features(value);
+    }
+
+    fn post_migration_announce(&mut self) -> io::Result<()> {
+        let mut host_announce = VirtioNetHostAnnounceOps::new(
+            self.build_rarp_announce(),
+            self.taps.clone().into_boxed_slice(),
+        );
+        let _ = host_announce.send_announce();
+
+        let has_ctrl_worker = self.common.workers.is_some()
+            && self.common.feature_acked(VIRTIO_NET_F_CTRL_VQ.into())
+            && !self.common.queue_evts.len().is_multiple_of(2);
+        self.announce.invalidate();
+        if has_ctrl_worker {
+            self.announce.pending.store(true, Ordering::Release);
+            self.announce.evt.write(1)?;
+            return Ok(());
+        }
+        if host_announce.rarp_announce.is_none() {
+            return Ok(());
+        }
+
+        let mut announcer = Announcer::new(
+            &self.announce,
+            vec![Box::new(host_announce) as Box<dyn AnnounceOps>].into_boxed_slice(),
+        );
+        announcer.initialize();
+        announcer.announcements_done = 1;
+        let _ = thread::Builder::new()
+            .name(format!("{}_announce", self.id))
+            .spawn(move || {
+                // Match our v52 implementation: cumulative delays of 50, 200, 450 and 800 ms.
+                for delay_ms in [50, 150, 250, 350] {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    if matches!(announcer.send_announce(), AnnounceOutcome::Done) {
+                        break;
+                    }
+                }
+            })?;
+        Ok(())
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {

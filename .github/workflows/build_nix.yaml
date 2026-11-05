@@ -1,0 +1,38 @@
+name: Cloud Hypervisor Build (Nix)
+on: [push, pull_request, merge_group]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+      # We restore Nix evaluation and Nix tarball cache, speeding up the CI.
+      # This does not cover any Nix artifacts from the Nix store.
+      - name: Restore Nix cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/nix
+          key: nix-cache-${{ github.job }}
+      # Nix binary cache
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # Dedicated step to separate all the
+      # "copying path '/nix/store/...' from 'https://cache.nixos.org'."
+      # messages from the actual build output.
+      - name: Prepare Nix Store
+        run: nix develop --command bash -c "nix --version"
+      - name: Check Nix format
+        run: nix fmt -- --ci
+      - name: Check Nix Flake
+        run: nix flake check -L
+      - name: Build Cloud Hypervisor
+        run: |
+          nix build -L .#default
+          nix build -L .#cloud-hypervisor

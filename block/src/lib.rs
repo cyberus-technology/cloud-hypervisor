@@ -17,6 +17,7 @@ pub use io_impl::{async_io, fcntl, request};
 pub(crate) mod aligned_buffer;
 pub mod aligned_file;
 pub mod formats;
+pub mod mirror;
 mod sparse;
 #[cfg(test)]
 pub(crate) mod test_util;

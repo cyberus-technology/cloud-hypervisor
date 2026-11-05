@@ -134,6 +134,11 @@ pub trait VirtioDevice: Send {
     /// Optionally deactivates this device.
     fn reset(&mut self) {}
 
+    /// Starts an explicit post-migration announcement when supported.
+    fn post_migration_announce(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Returns the list of shared memory regions required by the device.
     fn get_shm_regions(&self) -> Option<VirtioSharedMemoryList> {
         None
