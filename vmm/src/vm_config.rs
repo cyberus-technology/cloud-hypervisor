@@ -441,7 +441,11 @@ pub struct PciDeviceCommonConfig {
     pub iommu: IommuType,
     #[serde(default)]
     pub pci_segment: u16,
-    #[serde(default, alias = "pci_device_id", rename = "bdf_device")]
+    // Alias is technical debt from our fork. Once the previous version
+    // is fully rolled out, we can remove this for migration. However, there
+    // might be old snapshots that would not restore without this.
+    // Remove with caution.
+    #[serde(default, alias = "bdf_device")]
     pub pci_device_id: Option<u8>,
 }
 
