@@ -86,7 +86,10 @@ pub mod console_devices;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 mod coredump;
 pub mod cpu;
-#[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
+#[cfg(any(
+    all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+    all(feature = "kvm", feature = "tdx")
+))]
 pub(crate) mod cvm;
 pub mod device_manager;
 pub mod device_tree;
