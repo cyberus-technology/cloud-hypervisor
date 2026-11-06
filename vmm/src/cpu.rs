@@ -1100,9 +1100,7 @@ impl CpuManager {
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemory>)>,
     ) -> Result<()> {
         #[cfg(all(feature = "sev_snp", feature = "mshv"))]
-        if self.sev_snp_enabled
-            && self.hypervisor.hypervisor_type() == hypervisor::HypervisorType::Mshv
-        {
+        if self.sev_snp_enabled && self.hypervisor_type() == hypervisor::HypervisorType::Mshv {
             if let Some((kernel_entry_point, _)) = boot_setup {
                 vcpu.set_sev_control_register(kernel_entry_point.entry_addr.0 / HV_PAGE_SIZE)?;
             }
@@ -1273,7 +1271,7 @@ impl CpuManager {
             .map_err(Error::EventFdClone)?;
 
         #[cfg(feature = "kvm")]
-        let hypervisor_type = self.hypervisor.hypervisor_type();
+        let hypervisor_type = self.hypervisor_type();
         #[cfg(feature = "guest_debug")]
         let vm_debug_evt = self.vm_debug_evt.try_clone().map_err(Error::EventFdClone)?;
         let panic_exit_evt = self.exit_evt.try_clone().map_err(Error::EventFdClone)?;
@@ -1595,7 +1593,7 @@ impl CpuManager {
                 get_seccomp_filter(
                     &self.seccomp_action,
                     Thread::Vcpu,
-                    Some(self.hypervisor.hypervisor_type()),
+                    Some(self.hypervisor_type()),
                 )
                 .map_err(Error::CreateSeccompFilter)?,
             );
@@ -1656,13 +1654,12 @@ impl CpuManager {
             .as_ref()
             .map_or(self.boot_vcpus(), |state| state.active_vcpus.len() as u32);
         #[cfg(all(feature = "kvm", feature = "sev_snp"))]
-        let num_vcpus =
-            if self.sev_snp_enabled && self.hypervisor.hypervisor_type() == HypervisorType::Kvm {
-                // Create all SEV-SNP vCPUs before SNP_LAUNCH_FINISH.
-                self.max_vcpus()
-            } else {
-                num_vcpus
-            };
+        let num_vcpus = if self.sev_snp_enabled && self.hypervisor_type() == HypervisorType::Kvm {
+            // Create all SEV-SNP vCPUs before SNP_LAUNCH_FINISH.
+            self.max_vcpus()
+        } else {
+            num_vcpus
+        };
 
         self.create_vcpus(num_vcpus, snapshot)
     }
@@ -2482,7 +2479,6 @@ impl CpuManager {
         self.sev_snp_enabled
     }
 
-    #[cfg(feature = "igvm")]
     pub(crate) fn hypervisor_type(&self) -> hypervisor::HypervisorType {
         self.hypervisor.hypervisor_type()
     }
