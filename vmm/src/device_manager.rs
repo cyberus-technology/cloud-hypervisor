@@ -144,14 +144,14 @@ use crate::cpu::{
     ACPI_CPU_HOTPLUG_CONTROLLER_SNAPSHOT_ID, AcpiCpuHotplugController, CPU_MANAGER_ACPI_SIZE,
     CpuManager,
 };
+#[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
+use crate::cvm::sev::SevSnpSharedPageTracker;
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::{LegacyUserspaceInterruptManager, MsiInterruptManager};
 use crate::locked_unix_listener::LockedUnixListener;
 use crate::memory_manager::{Error as MemoryManagerError, MEMORY_MANAGER_ACPI_SIZE, MemoryManager};
 use crate::pci_segment::{PciSegment, PciSegmentState};
 use crate::serial_manager::{Error as SerialManagerError, SerialManager};
-#[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-use crate::sev::SevSnpSharedPageTracker;
 use crate::util::flatten_error_chain_to_string;
 #[cfg(feature = "ivshmem")]
 use crate::vm_config::IvshmemConfig;
@@ -4601,7 +4601,7 @@ impl DeviceManager {
                     false
                 }
                 None => {
-                    if self.config.lock().unwrap().is_sev_snp_enabled()
+                    if self.config.lock().unwrap().is_cvm()
                         && self.cpu_manager.lock().unwrap().hypervisor_type()
                             == hypervisor::HypervisorType::Kvm
                     {
@@ -6210,7 +6210,7 @@ impl DeviceManager {
         // static-mapping all pages.
         let sev_snp_config_enabled = {
             let config = config.lock().unwrap();
-            config.is_sev_snp_enabled()
+            config.is_cvm()
                 && config.platform.as_ref().is_some_and(|p| p.iommufd)
                 && config
                     .user_devices

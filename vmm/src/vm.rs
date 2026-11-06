@@ -88,6 +88,8 @@ use crate::console_devices::{ConsoleDeviceError, ConsoleInfo};
 use crate::coredump::{
     CpuElf64Writable, DumpState, Elf64Writable, GuestDebuggable, GuestDebuggableError, NoteDescType,
 };
+#[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
+use crate::cvm::sev::MeasuredBootInfo;
 use crate::device_manager::{DeviceManager, DeviceManagerError};
 use crate::device_tree::DeviceTree;
 use crate::external_fds::UpdateFdsError;
@@ -102,8 +104,6 @@ use crate::memory_manager::{
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::migration::url_to_file;
 use crate::migration::{SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE, get_vm_snapshot, url_to_path};
-#[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-use crate::sev::MeasuredBootInfo;
 use crate::util::flatten_error_chain_to_string;
 #[cfg(feature = "fw_cfg")]
 use crate::vm_config::FwCfgConfig;
@@ -1122,7 +1122,7 @@ impl Vm {
         let kvm_sev_snp_enabled = {
             #[cfg(feature = "sev_snp")]
             {
-                let sev_snp_enabled = self.config.lock().unwrap().is_sev_snp_enabled();
+                let sev_snp_enabled = self.config.lock().unwrap().is_cvm();
                 sev_snp_enabled
                     && self.cpu_manager.lock().unwrap().hypervisor_type()
                         == hypervisor::HypervisorType::Kvm
