@@ -4043,13 +4043,12 @@ mod tests {
 
     use super::*;
     use crate::config::RestoredVfioConfig;
-    use crate::console_devices::ConsoleDeviceError;
     #[cfg(target_arch = "x86_64")]
     use crate::vm_config::DebugConsoleConfig;
     use crate::vm_config::{
-        CommonConsoleConfig, ConsoleConfig, ConsoleOutputMode, CoreScheduling, CpuFeatures,
-        CpusConfig, DeviceConfig, HotplugMethod, MemoryConfig, MemoryZoneConfig, PayloadConfig,
-        PciDeviceCommonConfig, PlatformConfig, RngConfig, SerialConfig,
+        ConsoleConfig, ConsoleOutput, CoreScheduling, CpuFeatures, CpusConfig, DeviceConfig,
+        HotplugMethod, MemoryConfig, MemoryZoneConfig, PayloadConfig, PciDeviceCommonConfig,
+        PlatformConfig, RngConfig, SerialConfig,
     };
 
     fn create_dummy_vmm() -> Vmm {
@@ -4120,21 +4119,11 @@ mod tests {
             generic_vhost_user: None,
             pmem: None,
             serial: SerialConfig {
-                common: CommonConsoleConfig {
-                    file: None,
-                    mode: ConsoleOutputMode::Null,
-                    socket: None,
-                    tcp: None,
-                },
+                output: ConsoleOutput::Null,
             },
             console: ConsoleConfig {
-                common: CommonConsoleConfig {
-                    file: None,
-                    // Caution: Don't use `Tty` to not mess with users terminal
-                    mode: ConsoleOutputMode::Off,
-                    socket: None,
-                    tcp: None,
-                },
+                // Caution: Don't use `Tty` to not mess with users terminal
+                output: ConsoleOutput::Off,
                 pci_common: PciDeviceCommonConfig::default(),
             },
             #[cfg(target_arch = "x86_64")]
@@ -4172,21 +4161,6 @@ mod tests {
         assert!(matches!(
             vmm.vm_create(config),
             Err(VmError::VmAlreadyCreated)
-        ));
-    }
-
-    // vm.create sets up the console devices before the config is validated.
-    #[test]
-    fn test_vmm_vm_create_serial_file_without_path() {
-        let mut vmm = create_dummy_vmm();
-        let mut config = create_dummy_vm_config();
-        config.serial.common.mode = ConsoleOutputMode::File;
-
-        assert!(matches!(
-            vmm.vm_create(config),
-            Err(VmError::CreateConsoleDevices(
-                ConsoleDeviceError::MissingFilePath
-            ))
         ));
     }
 
