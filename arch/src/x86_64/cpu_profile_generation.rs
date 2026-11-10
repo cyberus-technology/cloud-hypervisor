@@ -8,10 +8,11 @@ use std::fs::File;
 use std::io::Write;
 use std::ops::{BitOr, RangeInclusive, Shl};
 use std::path::PathBuf;
+use std::{cmp, env, iter};
 
 use anyhow::{Context, anyhow};
 use hypervisor::arch::x86::{CpuIdEntry, MsrEntry};
-use hypervisor::{CpuVendor, Hypervisor, HypervisorError, HypervisorType};
+use hypervisor::{CpuVendor, Hypervisor, HypervisorError, HypervisorType, arch};
 use jiff::Zoned;
 use log::warn;
 
@@ -129,7 +130,7 @@ fn create_files(profile_name: &str) -> anyhow::Result<Files> {
         path
     };
 
-    let current_dir = std::env::current_dir()
+    let current_dir = env::current_dir()
         .context("CPU profile generation failed: Unable to get the current working directory")?;
 
     let common_path = format!("arch/src/x86_64/cpu_profiles/{profile_file_name}");
@@ -179,7 +180,7 @@ fn cpu_brand_string_bytes(cpu_vendor: CpuVendor, profile_name: &str) -> anyhow::
     for (b, brand_byte) in cpu_vendor_str
         .as_bytes()
         .iter()
-        .chain(std::iter::once(&b' '))
+        .chain(iter::once(&b' '))
         .chain(profile_name.as_bytes())
         .zip(brand_string_bytes.iter_mut())
     {
@@ -473,7 +474,7 @@ fn supported_cpuid(hypervisor: &dyn Hypervisor) -> anyhow::Result<Vec<CpuIdEntry
         Err(HypervisorError::CouldNotEnableAmxStateComponents(amx_err)) => {
             if matches!(
                 amx_err,
-                hypervisor::arch::x86::AmxGuestSupportError::AmxGuestTileRequest { .. }
+                arch::x86::AmxGuestSupportError::AmxGuestTileRequest { .. }
             ) {
                 return Err(amx_err).context("Unable to enable AMX state tiles for guests");
             }
@@ -522,7 +523,7 @@ fn overwrite_brand_string(
 fn sort_entries(mut cpuid: Vec<CpuIdEntry>) -> Vec<CpuIdEntry> {
     cpuid.sort_unstable_by(|entry, other_entry| {
         let fn_cmp = entry.function.cmp(&other_entry.function);
-        if fn_cmp == core::cmp::Ordering::Equal {
+        if fn_cmp == cmp::Ordering::Equal {
             entry.index.cmp(&other_entry.index)
         } else {
             fn_cmp
