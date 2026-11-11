@@ -1103,13 +1103,8 @@ impl Vmm {
              memory_files: HashMap<u32, File>|
              -> result::Result<ReceiveMigrationConfiguredData, MigratableError> {
                 let shared_backing = !memory_files.is_empty();
-                let (memory_manager, memory_mode) = self.vm_receive_config(
-                    req,
-                    socket,
-                    memory_files,
-                    receive_data_migration,
-                    receive_data_migration.tcp_serial_url.clone(),
-                )?;
+                let (memory_manager, memory_mode) =
+                    self.vm_receive_config(req, socket, memory_files, receive_data_migration)?;
 
                 if !receive_data_migration.net_fds.is_empty() {
                     let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
@@ -1383,7 +1378,6 @@ impl Vmm {
         socket: &mut T,
         existing_memory_files: HashMap<u32, File>,
         receive_data_migration: &VmReceiveMigrationData,
-        tcp_serial_url: Option<String>,
     ) -> result::Result<(Arc<Mutex<MemoryManager>>, MigrationMode), MigratableError>
     where
         T: Read,
@@ -1445,11 +1439,6 @@ impl Vmm {
 
         let config = Arc::clone(&vm_migration_config.vm_config);
         self.vm_config = Some(vm_migration_config.vm_config);
-        if let Some(tcp_serial_url) = tcp_serial_url {
-            let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
-            vm_config.serial.common.url = Some(tcp_serial_url);
-        }
-
         self.console_info = Some(
             pre_create_console_devices(self)
                 .context("Error creating console devices")
@@ -4651,7 +4640,6 @@ mod tests {
             net_fds: vec![],
             vfio_fds,
             iommufd_fd,
-            tcp_serial_url: None,
             zone_updates: vec![],
             background_fetch_pages: true,
         }

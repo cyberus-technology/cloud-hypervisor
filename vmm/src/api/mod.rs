@@ -417,10 +417,6 @@ pub struct VmReceiveMigrationData {
     // FDs are not serialized and any deserialized value is invalid; see NetConfig::fds.
     #[serde(default, deserialize_with = "deserialize_restored_fd")]
     pub iommufd_fd: Option<i32>,
-    /// Optional URL if the TCP serial configuration must be changed during
-    /// migration. Example: "192.168.1.1:2222".
-    #[serde(default)]
-    pub tcp_serial_url: Option<String>,
     /// Optional memory zone update data
     #[serde(default)]
     pub zone_updates: Vec<VmMemoryZoneUpdateData>,
@@ -480,7 +476,7 @@ pub enum VmReceiveMigrationConfigError {
 
 impl VmReceiveMigrationData {
     pub const SYNTAX: &'static str = "VM receive migration parameters \
-        \"<receiver_url>\" or \"receiver_url=<url>[,tls_dir=<path>,tcp_serial_url=<host:port>]\
+        \"<receiver_url>\" or \"receiver_url=<url>[,tls_dir=<path>]\
         [,vfio_fds=<list_of_vfio_ids_with_their_associated_fd>][,iommufd_fd=<fd>]\
         [,zone_updates=[<id@host_numa_node>]][,background_fetch_pages=on|off]\"";
 
@@ -492,8 +488,7 @@ impl VmReceiveMigrationData {
             .add("vfio_fds")
             .add("iommufd_fd")
             .add("zone_updates")
-            .add("background_fetch_pages")
-            .add("tcp_serial_url");
+            .add("background_fetch_pages");
         parser
             .parse(migration)
             .map_err(VmReceiveMigrationConfigError::ParseError)?;
@@ -539,9 +534,6 @@ impl VmReceiveMigrationData {
             .map_err(VmReceiveMigrationConfigError::ParseError)?
             .unwrap_or(Toggle(true))
             .0;
-        let tcp_serial_url = parser
-            .convert::<String>("tcp_serial_url")
-            .map_err(VmReceiveMigrationConfigError::ParseError)?;
 
         let data = Self {
             receiver_url,
@@ -549,7 +541,6 @@ impl VmReceiveMigrationData {
             net_fds: vec![],
             vfio_fds,
             iommufd_fd,
-            tcp_serial_url,
             zone_updates,
             background_fetch_pages,
         };
@@ -2628,7 +2619,6 @@ mod tests {
                 net_fds: vec![],
                 vfio_fds: None,
                 iommufd_fd: None,
-                tcp_serial_url: None,
                 zone_updates: vec![],
                 background_fetch_pages: true,
             }
@@ -2648,7 +2638,7 @@ mod tests {
         tls_dir.add_receive_tls_files();
         let tls_dir_path = tls_dir.path.clone();
         let data = VmReceiveMigrationData::parse(&format!(
-            "receiver_url=tcp:192.168.1.1:8080,tls_dir={},tcp_serial_url=1.2.3.4:6789",
+            "receiver_url=tcp:192.168.1.1:8080,tls_dir={}",
             tls_dir_path.display()
         ))
         .unwrap();
@@ -2660,7 +2650,6 @@ mod tests {
                 net_fds: vec![],
                 vfio_fds: None,
                 iommufd_fd: None,
-                tcp_serial_url: Some("1.2.3.4:6789".to_string()),
                 zone_updates: vec![],
                 background_fetch_pages: true,
             }
