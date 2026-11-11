@@ -160,7 +160,7 @@ use crate::vm_config::FwCfgConfig;
 #[cfg(feature = "ivshmem")]
 use crate::vm_config::IvshmemConfig;
 use crate::vm_config::{
-    ConsoleOutputMode, DEFAULT_IOMMU_ADDRESS_WIDTH_BITS, DEFAULT_PCI_SEGMENT_APERTURE_WEIGHT,
+    ConsoleOutput, DEFAULT_IOMMU_ADDRESS_WIDTH_BITS, DEFAULT_PCI_SEGMENT_APERTURE_WEIGHT,
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, IommuType, NetConfig,
     PciDeviceCommonConfig, PmemConfig, UserDeviceConfig, VdpaConfig, VhostMode, VmConfig,
     VsockConfig,
@@ -237,10 +237,6 @@ pub enum DeviceManagerError {
     /// Cannot create virtio-console device
     #[error("Cannot create virtio-console device")]
     CreateVirtioConsole(#[source] io::Error),
-
-    /// TCP transport is unavailable for the virtio console.
-    #[error("TCP mode is not supported for the virtio console")]
-    UnsupportedTcpConsole,
 
     /// Failed to trigger a device's post-migration announcements.
     #[error("Failed to trigger post-migration announcements")]
@@ -2729,9 +2725,7 @@ impl DeviceManager {
                 self.console.socket = Some(listener);
                 Endpoint::Socket(Arc::new(inner))
             }
-            ConsoleTransport::Tcp(_, _) => {
-                return Err(DeviceManagerError::UnsupportedTcpConsole);
-            }
+            ConsoleTransport::TcpListen(listener) => Endpoint::TcpListen(listener),
             ConsoleTransport::Null => Endpoint::Null,
             ConsoleTransport::Off => return Ok(None),
         };
@@ -2777,13 +2771,11 @@ impl DeviceManager {
             .insert(id.clone(), device_node!(id, virtio_console_device));
 
         // Only provide a resizer (for SIGWINCH handling) if the console is attached to the TTY
-        Ok(
-            if matches!(console_config.common.mode, ConsoleOutputMode::Tty) {
-                Some(console_resizer)
-            } else {
-                None
-            },
-        )
+        Ok(if matches!(console_config.output, ConsoleOutput::Tty) {
+            Some(console_resizer)
+        } else {
+            None
+        })
     }
 
     /// Adds all devices that behave like a console with respect to the VM
@@ -2809,8 +2801,8 @@ impl DeviceManager {
             ConsoleTransport::Off
             | ConsoleTransport::Null
             | ConsoleTransport::Pty(_)
-            | ConsoleTransport::Socket(_) => None,
-            ConsoleTransport::Tcp(_, _) => None,
+            | ConsoleTransport::Socket(_)
+            | ConsoleTransport::TcpListen(_) => None,
         };
 
         if !matches!(console_info.serial, ConsoleTransport::Off) {
@@ -2819,7 +2811,7 @@ impl DeviceManager {
                 ConsoleTransport::Pty(_)
                 | ConsoleTransport::Tty(_)
                 | ConsoleTransport::Socket(_)
-                | ConsoleTransport::Tcp(_, _) => {
+                | ConsoleTransport::TcpListen(_) => {
                     let serial_manager = SerialManager::new(serial, console_info.serial)
                         .map_err(DeviceManagerError::CreateSerialManager)?;
                     if let Some(mut serial_manager) = serial_manager {
@@ -2848,7 +2840,7 @@ impl DeviceManager {
                 | ConsoleTransport::Null
                 | ConsoleTransport::Pty(_)
                 | ConsoleTransport::Socket(_)
-                | ConsoleTransport::Tcp(_, _) => None,
+                | ConsoleTransport::TcpListen(_) => None,
             };
             if let Some(writer) = debug_console_writer {
                 let _ = self.add_debug_console_device(writer)?;
@@ -6807,8 +6799,7 @@ impl Aml for DeviceManager {
         #[cfg(target_arch = "x86_64")]
         let serial_irq = 4;
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-        let serial_irq = if self.config.lock().unwrap().serial.common.mode == ConsoleOutputMode::Off
-        {
+        let serial_irq = if self.config.lock().unwrap().serial.output == ConsoleOutput::Off {
             // If serial is turned off, add a fake device with invalid irq.
             31
         } else {
@@ -6818,7 +6809,7 @@ impl Aml for DeviceManager {
                 .unwrap()
                 .irq()
         };
-        if self.config.lock().unwrap().serial.common.mode != ConsoleOutputMode::Off {
+        if self.config.lock().unwrap().serial.output != ConsoleOutput::Off {
             aml::Device::new(
                 "_SB_.COM1".into(),
                 vec![

@@ -6,10 +6,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 #[cfg(feature = "ivshmem")]
 use std::fs;
+use std::mem::discriminant;
 use std::path::PathBuf;
-use std::result;
 use std::str::FromStr;
 use std::sync::LazyLock;
+use std::{io, result};
 
 use arch::CpuProfile;
 use block::ImageType;
@@ -132,6 +133,12 @@ pub enum Error {
     /// Failed parsing serial parameters
     #[error("Error parsing --serial")]
     ParseSerial(#[source] OptionParserError),
+    #[error("Cannot resolve TCP console address {address:?}")]
+    ResolveConsoleTcpAddress {
+        address: String,
+        #[source]
+        source: io::Error,
+    },
     /// No mode given for console
     #[error("Error parsing --console: invalid console mode given")]
     ParseConsoleInvalidModeGiven,
@@ -201,15 +208,24 @@ pub enum ValidationError {
     /// Missing file value for console
     #[error("Path missing when using file console mode")]
     ConsoleFileMissing,
-    /// Missing TCP address for console
-    #[error("Address missing when using TCP console mode")]
-    ConsoleTcpAddressMissing,
     /// Missing socket path for console
     #[error("Path missing when using socket console mode")]
     ConsoleSocketPathMissing,
-    /// Socket path given without socket console mode
-    #[error("Path only valid when using socket console mode")]
-    ConsoleSocketPathUnexpected,
+    /// Missing address for TCP console mode
+    #[error("Address missing when using TCP console mode")]
+    ConsoleTcpAddressMissing,
+    #[error("Server is only valid when using TCP console mode")]
+    ConsoleTcpServerUnexpected,
+    #[error("TCP console client mode is not supported")]
+    ConsoleTcpClientUnsupported,
+    #[error("TCP console port must not be zero")]
+    ConsoleTcpPortZero,
+    /// More than one new output was given for the same console
+    #[error("More than one new output given for console {0}")]
+    ConsoleOutputUpdateAmbiguous(String),
+    /// A new console output must keep the mode of the current one
+    #[error("Cannot change console output {0:?} to {1:?} with a different mode")]
+    ConsoleOutputUpdateModeMismatch(ConsoleOutput, ConsoleOutput),
     /// Max is less than boot
     #[error("Max CPUs ({0}) lower than boot CPUs ({1})")]
     CpusMaxLowerThanBoot(u32 /* max vCPUs */, u32 /* boot vCPUs */),
@@ -2499,72 +2515,138 @@ impl PmemConfig {
     }
 }
 
-impl CommonConsoleConfig {
-    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null", "tcp"];
-    const VALUE_OPTIONS: &[&str] = &["file", "socket"];
+impl ConsoleOutput {
+    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null"];
+    const VALUE_OPTIONS: &[&str] = &["file", "socket", "tcp", "server"];
 
     fn parse(console: &str, map_err: impl Fn(OptionParserError) -> Error) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add_all_valueless(Self::VALUELESS_OPTIONS)
             .add_all(Self::VALUE_OPTIONS);
-        parser.parse_subset(console).map_err(map_err)?;
+        parser.parse_subset(console).map_err(&map_err)?;
 
-        let mut file: Option<PathBuf> = None;
-        let mut socket: Option<PathBuf> = None;
-        let mut url: Option<String> = None;
-        let mut mode: ConsoleOutputMode = ConsoleOutputMode::Off;
-
-        if parser.is_set("off") {
+        let output = if parser.is_set("off") {
+            ConsoleOutput::Off
         } else if parser.is_set("pty") {
-            mode = ConsoleOutputMode::Pty;
+            ConsoleOutput::Pty { file: None }
         } else if parser.is_set("tty") {
-            mode = ConsoleOutputMode::Tty;
+            ConsoleOutput::Tty
         } else if parser.is_set("null") {
-            mode = ConsoleOutputMode::Null;
+            ConsoleOutput::Null
         } else if parser.is_set("file") {
-            mode = ConsoleOutputMode::File;
-            file =
-                Some(PathBuf::from(parser.get("file").ok_or(
-                    Error::Validation(ValidationError::ConsoleFileMissing),
-                )?));
-        } else if parser.is_set("tcp") {
-            mode = ConsoleOutputMode::Tcp;
-            url = Some(
-                parser
-                    .get("tcp")
-                    .ok_or(Error::Validation(ValidationError::ConsoleTcpAddressMissing))?,
-            );
-            if parser.is_set("file") {
-                file =
-                    Some(PathBuf::from(parser.get("file").ok_or(
-                        Error::Validation(ValidationError::ConsoleFileMissing),
-                    )?));
+            let file = parser
+                .get("file")
+                .ok_or(Error::Validation(ValidationError::ConsoleFileMissing))?;
+            ConsoleOutput::File {
+                file: PathBuf::from(file),
             }
         } else if parser.is_set("socket") {
-            mode = ConsoleOutputMode::Socket;
-            socket = Some(PathBuf::from(parser.get("socket").ok_or(
-                Error::Validation(ValidationError::ConsoleSocketPathMissing),
-            )?));
+            let socket = parser
+                .get("socket")
+                .ok_or(Error::Validation(ValidationError::ConsoleSocketPathMissing))?;
+            ConsoleOutput::Socket {
+                socket: PathBuf::from(socket),
+            }
+        } else if parser.is_set("tcp") {
+            let address = parser
+                .get("tcp")
+                .ok_or(Error::Validation(ValidationError::ConsoleTcpAddressMissing))?;
+            let server = parser
+                .convert::<Toggle>("server")
+                .map_err(&map_err)?
+                .unwrap_or(Toggle(true))
+                .0;
+            if !server {
+                return Err(Error::Validation(
+                    ValidationError::ConsoleTcpClientUnsupported,
+                ));
+            }
+            ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: parse_tcp_address(&address)
+                        .map_err(|source| Error::ResolveConsoleTcpAddress { address, source })?,
+                    server,
+                },
+            }
         } else {
             return Err(Error::ParseConsoleInvalidModeGiven);
+        };
+
+        if parser.is_set("server") && !matches!(output, ConsoleOutput::Tcp { .. }) {
+            return Err(Error::Validation(
+                ValidationError::ConsoleTcpServerUnexpected,
+            ));
         }
 
-        Ok(Self {
-            mode,
-            file,
-            socket,
-            url,
-        })
+        Ok(output)
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
-        if self.mode == ConsoleOutputMode::Socket && self.socket.is_none() {
-            return Err(ValidationError::ConsoleSocketPathMissing);
+        if let ConsoleOutput::Tcp { tcp } = self {
+            if !tcp.server {
+                return Err(ValidationError::ConsoleTcpClientUnsupported);
+            }
+            if tcp.address.port() == 0 {
+                return Err(ValidationError::ConsoleTcpPortZero);
+            }
         }
-        if self.socket.is_some() && self.mode != ConsoleOutputMode::Socket {
-            return Err(ValidationError::ConsoleSocketPathUnexpected);
+        Ok(())
+    }
+
+    /// Options that select a new output when restoring or migrating a VM.
+    pub(crate) const UPDATE_OPTIONS: &[&str] = &[
+        "serial_file",
+        "serial_socket",
+        "serial_tcp",
+        "console_file",
+        "console_socket",
+        "console_tcp",
+    ];
+
+    /// Parses the new output of `device` from the [`Self::UPDATE_OPTIONS`] set
+    /// in `parser`, where `device` is the prefix of the option names.
+    pub(crate) fn parse_update(parser: &OptionParser, device: &str) -> Result<Option<Self>> {
+        let file = parser.get(&format!("{device}_file"));
+        let socket = parser.get(&format!("{device}_socket"));
+        let tcp = parser.get(&format!("{device}_tcp"));
+
+        let output = match (file, socket, tcp) {
+            (None, None, None) => return Ok(None),
+            (Some(file), None, None) => Self::File {
+                file: PathBuf::from(file),
+            },
+            (None, Some(socket), None) => Self::Socket {
+                socket: PathBuf::from(socket),
+            },
+            (None, None, Some(address)) => Self::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: parse_tcp_address(&address)
+                        .map_err(|source| Error::ResolveConsoleTcpAddress { address, source })?,
+                    server: true,
+                },
+            },
+            _ => {
+                return Err(Error::Validation(
+                    ValidationError::ConsoleOutputUpdateAmbiguous(device.to_owned()),
+                ));
+            }
+        };
+
+        Ok(Some(output))
+    }
+
+    /// Replaces the output with `new`. The mode must stay the same because it
+    /// affects the devices of the VM: for example, `Off` creates no device.
+    fn update(&mut self, new: &Self) -> ValidationResult<()> {
+        if discriminant(self) != discriminant(new) {
+            return Err(ValidationError::ConsoleOutputUpdateModeMismatch(
+                self.clone(),
+                new.clone(),
+            ));
         }
+        new.validate()?;
+        self.clone_from(new);
         Ok(())
     }
 }
@@ -2573,19 +2655,19 @@ impl ConsoleConfig {
     pub fn parse(console: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
-            .add_all_valueless(CommonConsoleConfig::VALUELESS_OPTIONS)
-            .add_all(CommonConsoleConfig::VALUE_OPTIONS)
+            .add_all_valueless(ConsoleOutput::VALUELESS_OPTIONS)
+            .add_all(ConsoleOutput::VALUE_OPTIONS)
             .add_all(PciDeviceCommonConfig::OPTIONS_IOMMU);
         parser.parse(console).map_err(Error::ParseConsole)?;
 
-        let common = CommonConsoleConfig::parse(console, Error::ParseConsole)?;
+        let output = ConsoleOutput::parse(console, Error::ParseConsole)?;
         let pci_common = PciDeviceCommonConfig::parse(console)?;
 
-        Ok(Self { common, pci_common })
+        Ok(Self { output, pci_common })
     }
 
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        self.common.validate()?;
+        self.output.validate()?;
         self.pci_common.validate(vm_config, true)
     }
 }
@@ -2594,16 +2676,16 @@ impl SerialConfig {
     pub fn parse(serial: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
-            .add_all_valueless(CommonConsoleConfig::VALUELESS_OPTIONS)
-            .add_all(CommonConsoleConfig::VALUE_OPTIONS);
+            .add_all_valueless(ConsoleOutput::VALUELESS_OPTIONS)
+            .add_all(ConsoleOutput::VALUE_OPTIONS);
         parser.parse(serial).map_err(Error::ParseSerial)?;
 
-        let common = CommonConsoleConfig::parse(serial, Error::ParseSerial)?;
-        Ok(Self { common })
+        let output = ConsoleOutput::parse(serial, Error::ParseSerial)?;
+        Ok(Self { output })
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
-        self.common.validate()
+        self.output.validate()
     }
 }
 
@@ -2622,26 +2704,8 @@ impl DebugConsoleConfig {
             .parse(debug_console_ops)
             .map_err(Error::ParseConsole)?;
 
-        let mut file: Option<PathBuf> = None;
+        let output = ConsoleOutput::parse(debug_console_ops, Error::ParseConsole)?;
         let mut iobase: Option<u16> = None;
-        let mut mode: ConsoleOutputMode = ConsoleOutputMode::Off;
-
-        if parser.is_set("off") {
-        } else if parser.is_set("pty") {
-            mode = ConsoleOutputMode::Pty;
-        } else if parser.is_set("tty") {
-            mode = ConsoleOutputMode::Tty;
-        } else if parser.is_set("null") {
-            mode = ConsoleOutputMode::Null;
-        } else if parser.is_set("file") {
-            mode = ConsoleOutputMode::File;
-            file =
-                Some(PathBuf::from(parser.get("file").ok_or(
-                    Error::Validation(ValidationError::ConsoleFileMissing),
-                )?));
-        } else {
-            return Err(Error::ParseConsoleInvalidModeGiven);
-        }
 
         if parser.is_set("iobase")
             && let Some(iobase_opt) = parser.get("iobase")
@@ -2657,7 +2721,7 @@ impl DebugConsoleConfig {
                 })?);
         }
 
-        Ok(Self { file, mode, iobase })
+        Ok(Self { output, iobase })
     }
 }
 
@@ -3424,6 +3488,21 @@ impl IvshmemConfig {
 }
 
 impl VmConfig {
+    /// Applies the new console outputs of a restore or migration.
+    pub(crate) fn update_console_outputs(
+        &mut self,
+        serial: Option<&ConsoleOutput>,
+        console: Option<&ConsoleOutput>,
+    ) -> ValidationResult<()> {
+        if let Some(serial) = serial {
+            self.serial.output.update(serial)?;
+        }
+        if let Some(console) = console {
+            self.console.output.update(console)?;
+        }
+        Ok(())
+    }
+
     fn validate_identifier(
         id_list: &mut BTreeSet<String>,
         id: &Option<String>,
@@ -3612,27 +3691,18 @@ impl VmConfig {
         // "console=hvc0 earlyprintk=ttyS0"
 
         let mut tty_consoles = Vec::new();
-        if self.console.common.mode == ConsoleOutputMode::Tty {
+        if self.console.output == ConsoleOutput::Tty {
             tty_consoles.push("virtio-console");
         }
-        if self.serial.common.mode == ConsoleOutputMode::Tty {
+        if self.serial.output == ConsoleOutput::Tty {
             tty_consoles.push("serial-console");
         }
         #[cfg(target_arch = "x86_64")]
-        if self.debug_console.mode == ConsoleOutputMode::Tty {
+        if self.debug_console.output == ConsoleOutput::Tty {
             tty_consoles.push("debug-console");
         }
         if tty_consoles.len() > 1 {
             warn!("Using TTY output for multiple consoles: {tty_consoles:?}");
-        }
-
-        if self.console.common.mode == ConsoleOutputMode::File && self.console.common.file.is_none()
-        {
-            return Err(ValidationError::ConsoleFileMissing);
-        }
-
-        if self.serial.common.mode == ConsoleOutputMode::File && self.serial.common.file.is_none() {
-            return Err(ValidationError::ConsoleFileMissing);
         }
 
         if self.cpus.max_vcpus < self.cpus.boot_vcpus {
@@ -5267,13 +5337,8 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
 
     #[test]
     fn test_console_parsing() -> Result<()> {
-        let console_config = |mode, file, socket, iommu| ConsoleConfig {
-            common: CommonConsoleConfig {
-                file,
-                mode,
-                socket,
-                url: None,
-            },
+        let console_config = |output, iommu| ConsoleConfig {
+            output,
             pci_common: PciDeviceCommonConfig {
                 iommu,
                 ..Default::default()
@@ -5284,52 +5349,430 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
         ConsoleConfig::parse("badmode").unwrap_err();
         assert_eq!(
             ConsoleConfig::parse("off")?,
-            console_config(ConsoleOutputMode::Off, None, None, IommuType::Off)
+            console_config(ConsoleOutput::Off, IommuType::Off)
         );
         assert_eq!(
             ConsoleConfig::parse("pty")?,
-            console_config(ConsoleOutputMode::Pty, None, None, IommuType::Off)
+            console_config(ConsoleOutput::Pty { file: None }, IommuType::Off)
         );
         assert_eq!(
             ConsoleConfig::parse("tty")?,
-            console_config(ConsoleOutputMode::Tty, None, None, IommuType::Off)
+            console_config(ConsoleOutput::Tty, IommuType::Off)
         );
         assert_eq!(
             ConsoleConfig::parse("null")?,
-            console_config(ConsoleOutputMode::Null, None, None, IommuType::Off)
+            console_config(ConsoleOutput::Null, IommuType::Off)
         );
         assert_eq!(
             ConsoleConfig::parse("file=/tmp/console")?,
             console_config(
-                ConsoleOutputMode::File,
-                Some(PathBuf::from("/tmp/console")),
-                None,
+                ConsoleOutput::File {
+                    file: PathBuf::from("/tmp/console"),
+                },
                 IommuType::Off
             )
         );
         assert_eq!(
             ConsoleConfig::parse("null,iommu=on")?,
-            console_config(ConsoleOutputMode::Null, None, None, IommuType::Virtio)
+            console_config(ConsoleOutput::Null, IommuType::Virtio)
         );
         assert_eq!(
             ConsoleConfig::parse("file=/tmp/console,iommu=on")?,
             console_config(
-                ConsoleOutputMode::File,
-                Some(PathBuf::from("/tmp/console")),
-                None,
+                ConsoleOutput::File {
+                    file: PathBuf::from("/tmp/console"),
+                },
                 IommuType::Virtio
             )
         );
         assert_eq!(
             ConsoleConfig::parse("socket=/tmp/serial.sock,iommu=on")?,
             console_config(
-                ConsoleOutputMode::Socket,
-                None,
-                Some(PathBuf::from("/tmp/serial.sock")),
+                ConsoleOutput::Socket {
+                    socket: PathBuf::from("/tmp/serial.sock"),
+                },
                 IommuType::Virtio
             )
         );
+        assert_eq!(
+            ConsoleConfig::parse("tcp=127.0.0.1:4444")?.output,
+            ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: "127.0.0.1:4444".parse().unwrap(),
+                    server: true,
+                },
+            }
+        );
+        assert_eq!(
+            ConsoleConfig::parse("tcp=[::1]:4444")?.output,
+            ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: "[::1]:4444".parse().unwrap(),
+                    server: true,
+                },
+            }
+        );
+        SerialConfig::parse("tcp=localhost:4444").unwrap_err();
+        for options in ["tcp=127.0.0.1:4444", "tcp=127.0.0.1:4444,server=on"] {
+            let serial = SerialConfig::parse(options)?;
+            let console = ConsoleConfig::parse(options)?;
+            assert_eq!(serial.output, console.output);
+            assert!(matches!(
+                serial.output,
+                ConsoleOutput::Tcp {
+                    tcp: TcpConsoleConfig { server: true, .. }
+                }
+            ));
+            serial.validate().unwrap();
+            console.output.validate().unwrap();
+        }
+        for options in ["tcp=127.0.0.1:4444,server=invalid", "null,server=on"] {
+            ConsoleConfig::parse(options).unwrap_err();
+            SerialConfig::parse(options).unwrap_err();
+        }
+        assert!(matches!(
+            SerialConfig::parse("tcp=127.0.0.1:4444,server=off"),
+            Err(Error::Validation(
+                ValidationError::ConsoleTcpClientUnsupported
+            ))
+        ));
+        assert!(matches!(
+            ConsoleConfig::parse("tcp=127.0.0.1:4444,server=off"),
+            Err(Error::Validation(
+                ValidationError::ConsoleTcpClientUnsupported
+            ))
+        ));
         Ok(())
+    }
+
+    #[test]
+    fn test_console_output_parse_update() {
+        let parse = |input: &str, device: &str| {
+            let mut parser = OptionParser::new();
+            parser.add_all(ConsoleOutput::UPDATE_OPTIONS);
+            parser.parse(input).unwrap();
+            ConsoleOutput::parse_update(&parser, device)
+        };
+
+        assert_eq!(parse("", "serial").unwrap(), None);
+        assert_eq!(
+            parse("serial_file=/tmp/serial.log", "serial").unwrap(),
+            Some(ConsoleOutput::File {
+                file: PathBuf::from("/tmp/serial.log"),
+            })
+        );
+        assert_eq!(
+            parse("console_socket=/tmp/console.sock", "console").unwrap(),
+            Some(ConsoleOutput::Socket {
+                socket: PathBuf::from("/tmp/console.sock"),
+            })
+        );
+        assert_eq!(
+            parse("serial_tcp=127.0.0.1:4444", "serial").unwrap(),
+            Some(ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: "127.0.0.1:4444".parse().unwrap(),
+                    server: true,
+                },
+            })
+        );
+
+        // Options of the other console must not leak into this one.
+        assert_eq!(parse("console_tcp=127.0.0.1:4444", "serial").unwrap(), None);
+        // Two outputs for different consoles are fine, two for one are not.
+        parse("serial_file=/tmp/a,console_file=/tmp/b", "serial").unwrap();
+        assert!(matches!(
+            parse("serial_file=/tmp/a,serial_tcp=127.0.0.1:4444", "serial"),
+            Err(Error::Validation(
+                ValidationError::ConsoleOutputUpdateAmbiguous(_)
+            ))
+        ));
+        assert!(matches!(
+            parse("serial_tcp=localhost:4444", "serial"),
+            Err(Error::ResolveConsoleTcpAddress { .. })
+        ));
+    }
+
+    #[test]
+    fn test_console_output_update() {
+        let tcp = |address: &str| ConsoleOutput::Tcp {
+            tcp: TcpConsoleConfig {
+                address: address.parse().unwrap(),
+                server: true,
+            },
+        };
+        let file = ConsoleOutput::File {
+            file: PathBuf::from("/tmp/console.log"),
+        };
+
+        let mut output = tcp("127.0.0.1:4444");
+        output
+            .update(&tcp("127.0.0.1:5555"))
+            .expect("should accept a new address in the same mode");
+        assert_eq!(output, tcp("127.0.0.1:5555"));
+
+        // Rejected updates must leave the output unchanged.
+        assert_eq!(
+            output.update(&file),
+            Err(ValidationError::ConsoleOutputUpdateModeMismatch(
+                tcp("127.0.0.1:5555"),
+                file.clone()
+            ))
+        );
+        assert_eq!(
+            output.update(&tcp("127.0.0.1:0")),
+            Err(ValidationError::ConsoleTcpPortZero)
+        );
+        assert_eq!(output, tcp("127.0.0.1:5555"));
+    }
+
+    #[test]
+    fn test_console_output_update_requires_same_mode() {
+        let outputs = [
+            ConsoleOutput::Off,
+            ConsoleOutput::Pty { file: None },
+            ConsoleOutput::Tty,
+            ConsoleOutput::File {
+                file: PathBuf::from("/tmp/console.log"),
+            },
+            ConsoleOutput::Socket {
+                socket: PathBuf::from("/tmp/console.sock"),
+            },
+            ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: "127.0.0.1:4444".parse().unwrap(),
+                    server: true,
+                },
+            },
+            ConsoleOutput::Null,
+        ];
+
+        for (current_index, current) in outputs.iter().enumerate() {
+            for (new_index, new) in outputs.iter().enumerate() {
+                let mut output = current.clone();
+                if current_index == new_index {
+                    assert_eq!(output.update(new), Ok(()));
+                } else {
+                    assert_eq!(
+                        output.update(new),
+                        Err(ValidationError::ConsoleOutputUpdateModeMismatch(
+                            current.clone(),
+                            new.clone()
+                        ))
+                    );
+                    assert_eq!(output, *current);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_tcp_console_port_zero_validation() {
+        for address in ["127.0.0.1:0", "[::1]:0"] {
+            let options = format!("tcp={address}");
+            let serial = SerialConfig::parse(&options).unwrap();
+            let console = ConsoleConfig::parse(&options).unwrap();
+            assert_eq!(
+                serial.validate().unwrap_err(),
+                ValidationError::ConsoleTcpPortZero
+            );
+            assert_eq!(
+                console.output.validate().unwrap_err(),
+                ValidationError::ConsoleTcpPortZero
+            );
+
+            let config = serde_json::json!({
+                "mode": "Tcp",
+                "tcp": { "address": address }
+            });
+            let serial: SerialConfig = serde_json::from_value(config.clone()).unwrap();
+            let console: ConsoleConfig = serde_json::from_value(config).unwrap();
+            assert_eq!(
+                serial.validate().unwrap_err(),
+                ValidationError::ConsoleTcpPortZero
+            );
+            assert_eq!(
+                console.output.validate().unwrap_err(),
+                ValidationError::ConsoleTcpPortZero
+            );
+        }
+    }
+
+    #[test]
+    fn test_tcp_console_deserialization() {
+        let config = serde_json::json!({
+            "mode": "Tcp",
+            "tcp": { "address": "127.0.0.1:4444" }
+        });
+        let serial: SerialConfig = serde_json::from_value(config.clone()).unwrap();
+        let console: ConsoleConfig = serde_json::from_value(config.clone()).unwrap();
+        let expected = ConsoleOutput::Tcp {
+            tcp: TcpConsoleConfig {
+                address: "127.0.0.1:4444".parse().unwrap(),
+                server: true,
+            },
+        };
+        assert_eq!(serial.output, expected);
+        assert_eq!(console.output, expected);
+        serial.validate().unwrap();
+        console.output.validate().unwrap();
+
+        let mut hostname = config.clone();
+        hostname["tcp"]["address"] = serde_json::json!("localhost:4444");
+        serde_json::from_value::<SerialConfig>(hostname.clone()).unwrap_err();
+        serde_json::from_value::<ConsoleConfig>(hostname).unwrap_err();
+
+        let mut explicit = config.clone();
+        explicit["tcp"]["server"] = serde_json::json!(true);
+        assert_eq!(
+            serde_json::from_value::<SerialConfig>(explicit.clone()).unwrap(),
+            serial
+        );
+        assert_eq!(
+            serde_json::from_value::<ConsoleConfig>(explicit.clone()).unwrap(),
+            console
+        );
+        explicit["tcp"]["server"] = serde_json::json!(false);
+        let serial: SerialConfig = serde_json::from_value(explicit.clone()).unwrap();
+        let console: ConsoleConfig = serde_json::from_value(explicit).unwrap();
+        assert_eq!(
+            serial.validate().unwrap_err(),
+            ValidationError::ConsoleTcpClientUnsupported
+        );
+        assert_eq!(
+            console.output.validate().unwrap_err(),
+            ValidationError::ConsoleTcpClientUnsupported
+        );
+    }
+
+    // The HTTP API, snapshots, and migration rely on this JSON format.
+    #[test]
+    fn test_console_output_json_format() {
+        let tcp = TcpConsoleConfig {
+            address: "127.0.0.1:4444".parse().unwrap(),
+            server: true,
+        };
+        let cases = [
+            (serde_json::json!({ "mode": "Off" }), ConsoleOutput::Off),
+            (
+                serde_json::json!({ "mode": "Pty" }),
+                ConsoleOutput::Pty { file: None },
+            ),
+            (
+                serde_json::json!({ "mode": "Pty", "file": "/dev/pts/3" }),
+                ConsoleOutput::Pty {
+                    file: Some(PathBuf::from("/dev/pts/3")),
+                },
+            ),
+            (serde_json::json!({ "mode": "Tty" }), ConsoleOutput::Tty),
+            (
+                serde_json::json!({ "mode": "File", "file": "/tmp/console" }),
+                ConsoleOutput::File {
+                    file: PathBuf::from("/tmp/console"),
+                },
+            ),
+            (
+                serde_json::json!({ "mode": "Socket", "socket": "/tmp/console.sock" }),
+                ConsoleOutput::Socket {
+                    socket: PathBuf::from("/tmp/console.sock"),
+                },
+            ),
+            (
+                serde_json::json!({
+                    "mode": "Tcp",
+                    "tcp": { "address": "127.0.0.1:4444", "server": true }
+                }),
+                ConsoleOutput::Tcp { tcp },
+            ),
+            (serde_json::json!({ "mode": "Null" }), ConsoleOutput::Null),
+        ];
+        for (json, output) in cases {
+            let config = SerialConfig { output };
+            assert_eq!(
+                serde_json::from_value::<SerialConfig>(json.clone()).unwrap(),
+                config
+            );
+            assert_eq!(serde_json::to_value(&config).unwrap(), json);
+        }
+
+        // Versions before v53 serialized unset paths as null.
+        let config: SerialConfig = serde_json::from_value(serde_json::json!({
+            "mode": "Socket",
+            "file": null,
+            "socket": "/tmp/console.sock"
+        }))
+        .unwrap();
+        assert_eq!(
+            config.output,
+            ConsoleOutput::Socket {
+                socket: PathBuf::from("/tmp/console.sock"),
+            }
+        );
+
+        for mode in ["File", "Socket", "Tcp"] {
+            serde_json::from_value::<SerialConfig>(serde_json::json!({ "mode": mode }))
+                .unwrap_err();
+        }
+    }
+
+    // Migration from fork versions before the upstream TCP console backend
+    // must keep working: they stored the listen address in `url`.
+    #[test]
+    fn test_console_output_tcp_legacy_format() {
+        let expected = SerialConfig {
+            output: ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: "127.0.0.1:4444".parse().unwrap(),
+                    server: true,
+                },
+            },
+        };
+        let current = serde_json::json!({
+            "mode": "Tcp",
+            "tcp": { "address": "127.0.0.1:4444", "server": true }
+        });
+        let legacy = serde_json::json!({
+            "mode": "Tcp",
+            "url": "127.0.0.1:4444",
+            "file": "/tmp/serial.log"
+        });
+        for json in [legacy, current.clone()] {
+            let config: SerialConfig =
+                serde_json::from_value(json).expect("should accept the legacy and current format");
+            assert_eq!(config, expected);
+            assert_eq!(serde_json::to_value(&config).unwrap(), current);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_debug_console_config() {
+        let config = DebugConsoleConfig {
+            output: ConsoleOutput::File {
+                file: PathBuf::from("/tmp/console"),
+            },
+            iobase: Some(0xe9),
+        };
+        assert_eq!(
+            DebugConsoleConfig::parse("file=/tmp/console,iobase=0xe9").unwrap(),
+            config
+        );
+
+        let json = serde_json::json!({
+            "mode": "File",
+            "file": "/tmp/console",
+            "iobase": 0xe9
+        });
+        assert_eq!(
+            serde_json::from_value::<DebugConsoleConfig>(json.clone()).unwrap(),
+            config
+        );
+        assert_eq!(serde_json::to_value(&config).unwrap(), json);
+
+        // The debug console has no socket or TCP backend.
+        for options in ["socket=/tmp/console.sock", "tcp=127.0.0.1:4444"] {
+            DebugConsoleConfig::parse(options).unwrap_err();
+        }
     }
 
     fn device_fixture() -> DeviceConfig {
@@ -6265,20 +6708,10 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             generic_vhost_user: None,
             pmem: None,
             serial: SerialConfig {
-                common: CommonConsoleConfig {
-                    file: None,
-                    mode: ConsoleOutputMode::Null,
-                    socket: None,
-                    url: None,
-                },
+                output: ConsoleOutput::Null,
             },
             console: ConsoleConfig {
-                common: CommonConsoleConfig {
-                    file: None,
-                    mode: ConsoleOutputMode::Tty,
-                    socket: None,
-                    url: None,
-                },
+                output: ConsoleOutput::Tty,
                 pci_common: PciDeviceCommonConfig::default(),
             },
             #[cfg(target_arch = "x86_64")]
@@ -6319,8 +6752,8 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
         );
 
         let mut invalid_config = valid_config.clone();
-        invalid_config.serial.common.mode = ConsoleOutputMode::Tty;
-        invalid_config.console.common.mode = ConsoleOutputMode::Tty;
+        invalid_config.serial.output = ConsoleOutput::Tty;
+        invalid_config.console.output = ConsoleOutput::Tty;
         valid_config.validate().unwrap();
 
         let mut invalid_config = valid_config.clone();
@@ -6392,30 +6825,6 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                 ))
             );
         }
-
-        let mut invalid_config = valid_config.clone();
-        invalid_config.serial.common.mode = ConsoleOutputMode::File;
-        invalid_config.serial.common.file = None;
-        assert_eq!(
-            invalid_config.validate(),
-            Err(ValidationError::ConsoleFileMissing)
-        );
-
-        let mut invalid_config = valid_config.clone();
-        invalid_config.serial.common.mode = ConsoleOutputMode::Socket;
-        invalid_config.serial.common.socket = None;
-        assert_eq!(
-            invalid_config.validate(),
-            Err(ValidationError::ConsoleSocketPathMissing)
-        );
-
-        let mut invalid_config = valid_config.clone();
-        invalid_config.console.common.mode = ConsoleOutputMode::Tty;
-        invalid_config.console.common.socket = Some(PathBuf::from("/tmp/console.sock"));
-        assert_eq!(
-            invalid_config.validate(),
-            Err(ValidationError::ConsoleSocketPathUnexpected)
-        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.cpus.max_vcpus = 16;

@@ -15,6 +15,7 @@ const AUTO_CONVERGE_MAX: u8 = 99;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write, stdout};
+use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -739,6 +740,8 @@ pub struct Vmm {
     serial_socket_listener: Option<Arc<LockedUnixListener>>,
     console_socket_listener: Option<Arc<LockedUnixListener>>,
     no_shutdown: bool,
+    serial_tcp_listener: Option<Arc<TcpListener>>,
+    console_tcp_listener: Option<Arc<TcpListener>>,
     check_migration_evt: EventFd,
     postponed_lifecycle_event: Arc<Mutex<Option<PostponedLifecycleEvent>>>,
 }
@@ -989,6 +992,8 @@ impl Vmm {
             serial_socket_listener: None,
             console_socket_listener: None,
             no_shutdown,
+            serial_tcp_listener: None,
+            console_tcp_listener: None,
             check_migration_evt,
             postponed_lifecycle_event: Arc::new(Mutex::new(None)),
         })
@@ -1103,13 +1108,8 @@ impl Vmm {
              memory_files: HashMap<u32, File>|
              -> result::Result<ReceiveMigrationConfiguredData, MigratableError> {
                 let shared_backing = !memory_files.is_empty();
-                let (memory_manager, memory_mode) = self.vm_receive_config(
-                    req,
-                    socket,
-                    memory_files,
-                    receive_data_migration,
-                    receive_data_migration.tcp_serial_url.clone(),
-                )?;
+                let (memory_manager, memory_mode) =
+                    self.vm_receive_config(req, socket, memory_files, receive_data_migration)?;
 
                 if !receive_data_migration.net_fds.is_empty() {
                     let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
@@ -1383,7 +1383,6 @@ impl Vmm {
         socket: &mut T,
         existing_memory_files: HashMap<u32, File>,
         receive_data_migration: &VmReceiveMigrationData,
-        tcp_serial_url: Option<String>,
     ) -> result::Result<(Arc<Mutex<MemoryManager>>, MigrationMode), MigratableError>
     where
         T: Read,
@@ -1445,16 +1444,25 @@ impl Vmm {
 
         let config = Arc::clone(&vm_migration_config.vm_config);
         self.vm_config = Some(vm_migration_config.vm_config);
-        if let Some(tcp_serial_url) = tcp_serial_url {
-            let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
-            vm_config.serial.common.url = Some(tcp_serial_url);
-        }
 
-        self.console_info = Some(
-            pre_create_console_devices(self)
-                .context("Error creating console devices")
-                .map_err(MigratableError::MigrateReceive)?,
-        );
+        // Console setup
+        {
+            config
+                .lock()
+                .unwrap()
+                .update_console_outputs(
+                    receive_data_migration.serial.as_ref(),
+                    receive_data_migration.console.as_ref(),
+                )
+                .context("Error updating console outputs")
+                .map_err(MigratableError::MigrateReceive)?;
+
+            self.console_info = Some(
+                pre_create_console_devices(self)
+                    .context("Error creating console devices")
+                    .map_err(MigratableError::MigrateReceive)?,
+            );
+        }
 
         if self
             .vm_config
@@ -3222,6 +3230,8 @@ impl RequestHandler for Vmm {
         self.console_info = None;
         self.serial_socket_listener = None;
         self.console_socket_listener = None;
+        self.serial_tcp_listener = None;
+        self.console_tcp_listener = None;
         self.vm_config = None;
         event!("vm", "deleted");
 
@@ -4046,13 +4056,13 @@ mod tests {
     use arch::CpuProfile;
 
     use super::*;
-    use crate::config::RestoredVfioConfig;
+    use crate::config::{RestoredVfioConfig, ValidationError};
     #[cfg(target_arch = "x86_64")]
     use crate::vm_config::DebugConsoleConfig;
     use crate::vm_config::{
-        CommonConsoleConfig, ConsoleConfig, ConsoleOutputMode, CoreScheduling, CpuFeatures,
-        CpusConfig, DeviceConfig, HotplugMethod, MemoryConfig, MemoryZoneConfig, PayloadConfig,
-        PciDeviceCommonConfig, PlatformConfig, RngConfig, SerialConfig,
+        ConsoleConfig, ConsoleOutput, CoreScheduling, CpuFeatures, CpusConfig, DeviceConfig,
+        HotplugMethod, MemoryConfig, MemoryZoneConfig, PayloadConfig, PciDeviceCommonConfig,
+        PlatformConfig, RngConfig, SerialConfig,
     };
 
     fn create_dummy_vmm() -> Vmm {
@@ -4123,21 +4133,11 @@ mod tests {
             generic_vhost_user: None,
             pmem: None,
             serial: SerialConfig {
-                common: CommonConsoleConfig {
-                    file: None,
-                    mode: ConsoleOutputMode::Null,
-                    socket: None,
-                    url: None,
-                },
+                output: ConsoleOutput::Null,
             },
             console: ConsoleConfig {
-                common: CommonConsoleConfig {
-                    file: None,
-                    // Caution: Don't use `Tty` to not mess with users terminal
-                    mode: ConsoleOutputMode::Off,
-                    socket: None,
-                    url: None,
-                },
+                // Caution: Don't use `Tty` to not mess with users terminal
+                output: ConsoleOutput::Off,
                 pci_common: PciDeviceCommonConfig::default(),
             },
             #[cfg(target_arch = "x86_64")]
@@ -4164,6 +4164,43 @@ mod tests {
             #[cfg(feature = "ivshmem")]
             ivshmem: None,
         })
+    }
+
+    #[test]
+    fn test_update_console_outputs() {
+        let file = |path: &str| ConsoleOutput::File {
+            file: PathBuf::from(path),
+        };
+        let mut config = create_dummy_vm_config();
+        config.serial.output = file("/tmp/serial-old");
+        config.console.output = file("/tmp/console-old");
+
+        // `None` must keep the output of the respective console.
+        config
+            .update_console_outputs(Some(&file("/tmp/serial-new")), None)
+            .expect("should update only the serial console");
+        assert_eq!(config.serial.output, file("/tmp/serial-new"));
+        assert_eq!(config.console.output, file("/tmp/console-old"));
+
+        config
+            .update_console_outputs(None, Some(&file("/tmp/console-new")))
+            .expect("should update only the virtio console");
+        assert_eq!(config.serial.output, file("/tmp/serial-new"));
+        assert_eq!(config.console.output, file("/tmp/console-new"));
+
+        config
+            .update_console_outputs(Some(&file("/tmp/s")), Some(&file("/tmp/c")))
+            .expect("should update both consoles");
+        assert_eq!(config.serial.output, file("/tmp/s"));
+        assert_eq!(config.console.output, file("/tmp/c"));
+
+        assert_eq!(
+            config.update_console_outputs(None, Some(&ConsoleOutput::Null)),
+            Err(ValidationError::ConsoleOutputUpdateModeMismatch(
+                file("/tmp/c"),
+                ConsoleOutput::Null
+            ))
+        );
     }
 
     #[test]
@@ -4651,9 +4688,10 @@ mod tests {
             net_fds: vec![],
             vfio_fds,
             iommufd_fd,
-            tcp_serial_url: None,
             zone_updates: vec![],
             background_fetch_pages: true,
+            serial: None,
+            console: None,
         }
     }
 
