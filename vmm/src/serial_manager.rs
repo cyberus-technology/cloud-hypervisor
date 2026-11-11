@@ -355,11 +355,8 @@ impl SerialManager {
                     }
 
                     let write_distributor = match &transport {
-                        ConsoleTransport::Tcp(_, file_opt) => {
+                        ConsoleTransport::Tcp(_, _) => {
                             let distributor = FanoutWriter::new();
-                            if let Some(file) = file_opt {
-                                distributor.add_writer("file".into(), Arc::clone(file));
-                            }
                             serial
                                 .as_ref()
                                 .lock()
