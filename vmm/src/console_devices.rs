@@ -259,7 +259,6 @@ pub(crate) fn pre_create_console_devices(vmm: &mut Vmm) -> ConsoleDeviceResult<C
                     ConsoleTransport::Socket(Arc::new(listener))
                 }
             }
-            ConsoleOutputMode::Tcp => ConsoleTransport::Null,
             ConsoleOutputMode::Null => ConsoleTransport::Null,
             ConsoleOutputMode::Off => ConsoleTransport::Off,
         },
@@ -310,7 +309,6 @@ pub(crate) fn pre_create_console_devices(vmm: &mut Vmm) -> ConsoleDeviceResult<C
                     ConsoleTransport::Socket(Arc::new(listener))
                 }
             }
-            ConsoleOutputMode::Tcp => ConsoleTransport::Null,
             ConsoleOutputMode::Null => ConsoleTransport::Null,
             ConsoleOutputMode::Off => ConsoleTransport::Off,
         },
@@ -337,7 +335,6 @@ pub(crate) fn pre_create_console_devices(vmm: &mut Vmm) -> ConsoleDeviceResult<C
             ConsoleOutputMode::Socket => {
                 return Err(ConsoleDeviceError::NoSocketOptionSupportForConsoleDevice);
             }
-            ConsoleOutputMode::Tcp => ConsoleTransport::Null,
             ConsoleOutputMode::Null => ConsoleTransport::Null,
             ConsoleOutputMode::Off => ConsoleTransport::Off,
         },

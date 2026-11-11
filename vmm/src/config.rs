@@ -201,9 +201,6 @@ pub enum ValidationError {
     /// Missing file value for console
     #[error("Path missing when using file console mode")]
     ConsoleFileMissing,
-    /// Missing TCP address for console
-    #[error("Address missing when using TCP console mode")]
-    ConsoleTcpAddressMissing,
     /// Missing socket path for console
     #[error("Path missing when using socket console mode")]
     ConsoleSocketPathMissing,
@@ -2500,7 +2497,7 @@ impl PmemConfig {
 }
 
 impl CommonConsoleConfig {
-    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null", "tcp"];
+    const VALUELESS_OPTIONS: &[&str] = &["off", "pty", "tty", "null"];
     const VALUE_OPTIONS: &[&str] = &["file", "socket"];
 
     fn parse(console: &str, map_err: impl Fn(OptionParserError) -> Error) -> Result<Self> {
@@ -2512,7 +2509,6 @@ impl CommonConsoleConfig {
 
         let mut file: Option<PathBuf> = None;
         let mut socket: Option<PathBuf> = None;
-        let mut url: Option<String> = None;
         let mut mode: ConsoleOutputMode = ConsoleOutputMode::Off;
 
         if parser.is_set("off") {
@@ -2528,13 +2524,6 @@ impl CommonConsoleConfig {
                 Some(PathBuf::from(parser.get("file").ok_or(
                     Error::Validation(ValidationError::ConsoleFileMissing),
                 )?));
-        } else if parser.is_set("tcp") {
-            mode = ConsoleOutputMode::Tcp;
-            url = Some(
-                parser
-                    .get("tcp")
-                    .ok_or(Error::Validation(ValidationError::ConsoleTcpAddressMissing))?,
-            );
         } else if parser.is_set("socket") {
             mode = ConsoleOutputMode::Socket;
             socket = Some(PathBuf::from(parser.get("socket").ok_or(
@@ -2544,12 +2533,7 @@ impl CommonConsoleConfig {
             return Err(Error::ParseConsoleInvalidModeGiven);
         }
 
-        Ok(Self {
-            mode,
-            file,
-            socket,
-            url,
-        })
+        Ok(Self { mode, file, socket })
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
@@ -5261,12 +5245,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
     #[test]
     fn test_console_parsing() -> Result<()> {
         let console_config = |mode, file, socket, iommu| ConsoleConfig {
-            common: CommonConsoleConfig {
-                file,
-                mode,
-                socket,
-                url: None,
-            },
+            common: CommonConsoleConfig { file, mode, socket },
             pci_common: PciDeviceCommonConfig {
                 iommu,
                 ..Default::default()
@@ -6262,7 +6241,6 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     file: None,
                     mode: ConsoleOutputMode::Null,
                     socket: None,
-                    url: None,
                 },
             },
             console: ConsoleConfig {
@@ -6270,7 +6248,6 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     file: None,
                     mode: ConsoleOutputMode::Tty,
                     socket: None,
-                    url: None,
                 },
                 pci_common: PciDeviceCommonConfig::default(),
             },
