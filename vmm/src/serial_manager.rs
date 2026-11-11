@@ -65,10 +65,6 @@ pub enum Error {
     #[error("Error accepting connection")]
     AcceptConnection(#[source] io::Error),
 
-    /// Cannot clone the Stream
-    #[error("Error cloning Stream")]
-    CloneStream(#[source] io::Error),
-
     /// Cannot shutdown the connection
     #[error("Error shutting down a connection")]
     ShutdownConnection(#[source] io::Error),
