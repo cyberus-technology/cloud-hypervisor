@@ -1275,7 +1275,6 @@ fn serial_manager_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, Backend
         (libc::SYS_sendto, vec![]),
         (libc::SYS_shutdown, vec![]),
         (libc::SYS_sigaltstack, vec![]),
-        (libc::SYS_getrandom, vec![]),
     ])
 }
 
