@@ -5714,6 +5714,35 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
         }
     }
 
+    // Migration from fork versions before the upstream TCP console backend
+    // must keep working: they stored the listen address in `url`.
+    #[test]
+    fn test_console_output_tcp_legacy_format() {
+        let expected = SerialConfig {
+            output: ConsoleOutput::Tcp {
+                tcp: TcpConsoleConfig {
+                    address: "127.0.0.1:4444".parse().unwrap(),
+                    server: true,
+                },
+            },
+        };
+        let current = serde_json::json!({
+            "mode": "Tcp",
+            "tcp": { "address": "127.0.0.1:4444", "server": true }
+        });
+        let legacy = serde_json::json!({
+            "mode": "Tcp",
+            "url": "127.0.0.1:4444",
+            "file": "/tmp/serial.log"
+        });
+        for json in [legacy, current.clone()] {
+            let config: SerialConfig =
+                serde_json::from_value(json).expect("should accept the legacy and current format");
+            assert_eq!(config, expected);
+            assert_eq!(serde_json::to_value(&config).unwrap(), current);
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_debug_console_config() {

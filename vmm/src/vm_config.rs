@@ -14,7 +14,7 @@ use block::ImageType;
 pub use block::fcntl::LockGranularityChoice;
 #[cfg(target_arch = "x86_64")]
 use devices::debug_console;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use net_util::MacAddr;
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -732,6 +732,32 @@ impl TcpConsoleConfig {
     }
 }
 
+/// Transparent upgrade from old fork format to upstream format (introduced in
+/// v55.0)
+// TODO remove this once all VMs in the field use this version.
+fn deserialize_console_output<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ConsoleOutput, D::Error> {
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    if value["mode"] == "Tcp"
+        && let Some(fields) = value.as_object_mut()
+        && let Some(address) = fields.remove("url")
+    {
+        // Old fork format: a plain "<ip>:<port>" string in `url`. These
+        // versions always listened as a server.
+        fields.insert(
+            "tcp".to_string(),
+            serde_json::json!({ "address": address, "server": true }),
+        );
+        // These versions could log to a file in addition to TCP. Upstream
+        // supports only one output per console.
+        if let Some(file) = fields.remove("file") {
+            info!("Dropping the additional TCP console log file {file}");
+        }
+    }
+    ConsoleOutput::deserialize(value).map_err(DeError::custom)
+}
+
 /// Output of a serial or virtio console.
 ///
 /// Serialized as a `mode` tag next to the fields of the variant. The HTTP API,
@@ -783,7 +809,7 @@ impl ApplyLandlock for ConsoleOutput {
 /// Configuration for a legacy serial console device.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SerialConfig {
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "deserialize_console_output")]
     pub output: ConsoleOutput,
 }
 
@@ -808,7 +834,7 @@ impl ApplyLandlock for SerialConfig {
 /// Configuration for a virtio-console device.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ConsoleConfig {
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "deserialize_console_output")]
     pub output: ConsoleOutput,
     #[serde(default, flatten)]
     pub pci_common: PciDeviceCommonConfig,
