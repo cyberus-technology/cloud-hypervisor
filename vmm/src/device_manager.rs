@@ -5605,30 +5605,34 @@ impl DeviceManager {
         // In case the 'id' refers to a virtio device, we must find the PCI
         // node by looking at the parent.
         let device_tree = self.device_tree.lock().unwrap();
-        let node = device_tree
-            .get(id)
-            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(id.to_string()))?;
 
-        // Release advisory locks by dropping all references.
-        // Linux automatically releases all locks of that file if the last open FD is closed.
+        if let Some(index) = self
+            .block_devices
+            .iter()
+            .position(|dev| dev.lock().unwrap().id() == id)
         {
-            if let Some(index) = self
-                .block_devices
-                .iter()
-                .position(|dev| dev.lock().unwrap().id() == id)
+            // Deny removal of active mirroring block device.
+            if self.block_devices[index]
+                .lock()
+                .unwrap()
+                .mirror_status()
+                .is_some()
             {
-                // Deny removal of active mirroring block device.
-                if self.block_devices[index]
-                    .lock()
-                    .unwrap()
-                    .mirror_status()
-                    .is_some()
-                {
-                    return Err(DeviceManagerError::BlockMirrorActive(id.to_string()));
-                }
-                let _ = self.block_devices.swap_remove(index);
+                return Err(DeviceManagerError::BlockMirrorActive(id.to_string()));
             }
         }
+
+        let Some(node) = device_tree.get(id) else {
+            if !self.config.lock().unwrap().remove_device(id) {
+                return Err(DeviceManagerError::UnknownDeviceId(id.to_string()));
+            }
+
+            // Release advisory locks by dropping all references.
+            // Linux automatically releases all locks of that file if the last open FD is closed.
+            self.block_devices
+                .retain(|dev| dev.lock().unwrap().id() != id);
+            return Ok(());
+        };
 
         let pci_device_node = if node.pci_bdf.is_some() && node.pci_device_handle.is_some() {
             node
@@ -5736,6 +5740,10 @@ impl DeviceManager {
         }
 
         self.config.lock().unwrap().remove_device(id);
+        // Release advisory locks by dropping all references.
+        // Linux automatically releases all locks of that file if the last open FD is closed.
+        self.block_devices
+            .retain(|dev| dev.lock().unwrap().id() != id);
 
         // Update the PCID bitmap
         self.pci_segments[pci_segment_id as usize].pci_devices_down |= 1 << pci_device_bdf.device();
