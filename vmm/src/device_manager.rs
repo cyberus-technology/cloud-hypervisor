@@ -763,9 +763,14 @@ impl DeviceRelocation for AddressManager {
         pci_dev: &mut dyn PciDevice,
         region_type: PciBarRegionType,
     ) -> result::Result<(), io::Error> {
+        // Keep allocators locked until the BAR has fully moved to protect
+        // against concurrent allocations (e.g., hotplug).
+        let mut sys_allocator;
+        let mut pci_mmio_allocator;
+
         match region_type {
             PciBarRegionType::IoRegion => {
-                let mut sys_allocator = self.allocator.lock().unwrap();
+                sys_allocator = self.allocator.lock().unwrap();
                 if sys_allocator
                     .move_io_addresses(
                         GuestAddress(old_base),
@@ -791,10 +796,9 @@ impl DeviceRelocation for AddressManager {
                 } else {
                     &self.pci_mmio64_allocators
                 };
-                let mut pci_mmio_allocator = pci_mmio_allocators
-                    [usize::from(pci_dev.bdf().segment())]
-                .lock()
-                .unwrap();
+                pci_mmio_allocator = pci_mmio_allocators[usize::from(pci_dev.bdf().segment())]
+                    .lock()
+                    .unwrap();
 
                 if pci_mmio_allocator
                     .move_range(
@@ -5601,30 +5605,34 @@ impl DeviceManager {
         // In case the 'id' refers to a virtio device, we must find the PCI
         // node by looking at the parent.
         let device_tree = self.device_tree.lock().unwrap();
-        let node = device_tree
-            .get(id)
-            .ok_or_else(|| DeviceManagerError::UnknownDeviceId(id.to_string()))?;
 
-        // Release advisory locks by dropping all references.
-        // Linux automatically releases all locks of that file if the last open FD is closed.
+        if let Some(index) = self
+            .block_devices
+            .iter()
+            .position(|dev| dev.lock().unwrap().id() == id)
         {
-            if let Some(index) = self
-                .block_devices
-                .iter()
-                .position(|dev| dev.lock().unwrap().id() == id)
+            // Deny removal of active mirroring block device.
+            if self.block_devices[index]
+                .lock()
+                .unwrap()
+                .mirror_status()
+                .is_some()
             {
-                // Deny removal of active mirroring block device.
-                if self.block_devices[index]
-                    .lock()
-                    .unwrap()
-                    .mirror_status()
-                    .is_some()
-                {
-                    return Err(DeviceManagerError::BlockMirrorActive(id.to_string()));
-                }
-                let _ = self.block_devices.swap_remove(index);
+                return Err(DeviceManagerError::BlockMirrorActive(id.to_string()));
             }
         }
+
+        let Some(node) = device_tree.get(id) else {
+            if !self.config.lock().unwrap().remove_device(id) {
+                return Err(DeviceManagerError::UnknownDeviceId(id.to_string()));
+            }
+
+            // Release advisory locks by dropping all references.
+            // Linux automatically releases all locks of that file if the last open FD is closed.
+            self.block_devices
+                .retain(|dev| dev.lock().unwrap().id() != id);
+            return Ok(());
+        };
 
         let pci_device_node = if node.pci_bdf.is_some() && node.pci_device_handle.is_some() {
             node
@@ -5732,6 +5740,10 @@ impl DeviceManager {
         }
 
         self.config.lock().unwrap().remove_device(id);
+        // Release advisory locks by dropping all references.
+        // Linux automatically releases all locks of that file if the last open FD is closed.
+        self.block_devices
+            .retain(|dev| dev.lock().unwrap().id() != id);
 
         // Update the PCID bitmap
         self.pci_segments[pci_segment_id as usize].pci_devices_down |= 1 << pci_device_bdf.device();
@@ -6032,16 +6044,23 @@ impl DeviceManager {
         };
 
         let id = handle.id().to_owned();
-        let bdf = self.add_virtio_pci_device(
-            handle.virtio_device,
-            &mapping,
-            &id,
-            handle.pci_common.pci_segment,
-            true,
-            handle.dma_handler,
-            handle.pci_common.pci_device_id,
-            None,
-        )?;
+        let bdf = self
+            .add_virtio_pci_device(
+                handle.virtio_device,
+                &mapping,
+                &id,
+                handle.pci_common.pci_segment,
+                true,
+                handle.dma_handler,
+                handle.pci_common.pci_device_id,
+                None,
+            )
+            .inspect_err(|_| {
+                self.virtio_devices.retain(|device| device.id() != id);
+                self.block_devices
+                    .retain(|device| device.lock().unwrap().id() != id);
+                self.device_tree.lock().unwrap().remove(&id);
+            })?;
 
         // Update the PCIU bitmap
         self.pci_segments[handle.pci_common.pci_segment as usize].pci_devices_up |=
