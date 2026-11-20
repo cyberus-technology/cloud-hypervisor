@@ -1769,9 +1769,13 @@ impl KvmVcpu {
                     end.saturating_sub(start)
                 })
                 .sum();
-            if covered == size {
-                return Ok(size);
-            }
+            return match covered {
+                covered if covered == size => Ok(covered),
+                0 => Ok(0),
+                _ => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                    "Mixing guest RAM and non-RAM ranges is illegal"
+                ))),
+            };
         }
         Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
             "Conversion requires guest_memfd backend"
@@ -2483,6 +2487,14 @@ impl cpu::Vcpu for KvmVcpu {
                                 // https://docs.kernel.org/virt/kvm/api.html#kvm-set-memory-attributes
                                 0u64
                             };
+                            if size == 0 {
+                                if set_private_attr != 0 {
+                                    return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                                        "Cannot convert memory outside of guest RAM range to private"
+                                    )));
+                                }
+                                return Ok(cpu::VmExit::Ignore);
+                            }
                             let mem_attributes = kvm_memory_attributes {
                                 address,
                                 size,
@@ -3878,7 +3890,7 @@ mod tests {
             [
                 (0, 0x1000, 0x2000),
                 (1, 0x3000, 0x1000),
-                (2, 0x5000, 0x1000),
+                (2, 0x5000, 0x2000),
             ]
             .into_iter()
             .map(|(id, guest_phys_addr, memory_size)| {
@@ -3917,21 +3929,25 @@ mod tests {
         assert_eq!(vcpu.validate_gpa_range(0x1000, 1).unwrap(), 0x1000);
         assert_eq!(vcpu.validate_gpa_range(0x1000, 3).unwrap(), 0x3000);
         assert_eq!(vcpu.validate_gpa_range(0x5000, 1).unwrap(), 0x1000);
+        assert_eq!(vcpu.validate_gpa_range(0x6000, 1).unwrap(), 0x1000);
+        vcpu.validate_gpa_range(0x6000, 2).unwrap_err();
+        assert_eq!(vcpu.validate_gpa_range(0x7000, 1).unwrap(), 0x0);
         for (gpa, pages) in [
-            (0, 1),
-            (0x1001, 1),
-            (0x1fff, 1),
-            (0x6000, 1),
-            (0x3000, 2),
-            (0x3000, 3),
-            (0x1000, 0),
-            (0x1000, u64::MAX / PAGE_SIZE_4K + 1),
-            (u64::MAX - PAGE_SIZE_4K + 1, 1),
+            (0x1001, 1),                           /* Invalid alignment */
+            (0x1fff, 1),                           /* Invalid alignment */
+            (0x3000, 2),                           /* RAM and non-RAM mixed */
+            (0x3000, 3),                           /* RAM and non-RAM mixed */
+            (0x1000, 0),                           /* Zero page count */
+            (0x1000, u64::MAX / PAGE_SIZE_4K + 1), /* Range overflows 64 bits, too many pages */
+            (u64::MAX - PAGE_SIZE_4K + 1, 1),      /* Range overflows 64 bits, GPA too big */
         ] {
-            vcpu.validate_gpa_range(gpa, pages).unwrap_err();
+            vcpu.validate_gpa_range(gpa, pages).expect_err(&format!(
+                "Should fail for GPA: {gpa:#x} and page count {pages:#x}"
+            ));
         }
         vcpu.memory_slots = None;
-        vcpu.validate_gpa_range(0x1000, 1).unwrap_err();
+        vcpu.validate_gpa_range(0x1000, 1)
+            .expect_err("Should fail without guest_memfd backend");
     }
 
     #[test]
