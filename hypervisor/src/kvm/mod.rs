@@ -179,6 +179,10 @@ const KVM_CAP_ARM_EL2: u32 = 240;
 #[cfg(target_arch = "x86_64")]
 const INVALID_GPA: u64 = u64::MAX;
 
+#[cfg(feature = "sev_snp")]
+// https://docs.kernel.org/virt/kvm/x86/hypercalls.html#kvm-hc-map-gpa-range
+const KVM_HC_MAP_GPA_RANGE: u64 = 12;
+
 #[cfg(target_arch = "x86_64")]
 ioctl_io_nr!(KVM_NMI, kvm_bindings::KVMIO, 0x9a);
 // kvm-ioctls only exposes the vCPU device-attribute ioctls for aarch64.
@@ -1443,6 +1447,34 @@ impl KvmHypervisor {
             )),
         }
     }
+
+    #[cfg(feature = "sev_snp")]
+    // Activates the KVM_HC_MAP_GPA_RANGE hypercall after ensuring KVM supports it.
+    fn activate_map_gpa_hc(&self, fd: &VmFd) -> hypervisor::Result<()> {
+        let mask = self.kvm.check_extension_int(Cap::ExitHypercall);
+        if mask < 0 {
+            return Err(hypervisor::HypervisorError::CheckExitHypercall(
+                io::Error::last_os_error().into(),
+            ));
+        }
+        // KVM supports the HC only if the respective bit is set
+        let hc_map_gpa_range_mask = 1 << KVM_HC_MAP_GPA_RANGE;
+        if mask & hc_map_gpa_range_mask == 0 {
+            return Err(hypervisor::HypervisorError::CheckExtensions(anyhow!(
+                "Hypercall mask is missing support for KVM_HC_MAP_GPA_RANGE"
+            )));
+        }
+        // Only activate the HC that we want to take. Must be a subset
+        // of the initially returned mask.
+        let cap = kvm_bindings::kvm_enable_cap {
+            cap: kvm_bindings::KVM_CAP_EXIT_HYPERCALL,
+            args: [hc_map_gpa_range_mask as _, 0, 0, 0],
+            ..Default::default()
+        };
+        fd.enable_cap(&cap)
+            .map_err(|e| hypervisor::HypervisorError::VmCreate(e.into()))?;
+        Ok(())
+    }
 }
 
 /// Implementation of Hypervisor trait for KVM
@@ -1548,19 +1580,8 @@ impl hypervisor::Hypervisor for KvmHypervisor {
             let sev_fd = {
                 let sev_snp_enabled = vm_type == KVM_X86_SNP_VM as u64;
                 if sev_snp_enabled {
-                    let mask = self.kvm.check_extension_int(Cap::ExitHypercall);
-                    if mask < 0 {
-                        return Err(hypervisor::HypervisorError::CheckExitHypercall(
-                            io::Error::last_os_error().into(),
-                        ));
-                    }
-                    let cap = kvm_bindings::kvm_enable_cap {
-                        cap: kvm_bindings::KVM_CAP_EXIT_HYPERCALL,
-                        args: [mask as _, 0, 0, 0],
-                        ..Default::default()
-                    };
-                    fd.enable_cap(&cap)
-                        .map_err(|e| hypervisor::HypervisorError::VmCreate(e.into()))?;
+                    self.activate_map_gpa_hc(&fd)?;
+
                     let sev_dev = x86_64::sev::SevFd::new("/dev/sev")
                         .map_err(|e| hypervisor::HypervisorError::SevSnpCapabilities(e.into()))?;
                     sev_dev
@@ -2410,8 +2431,6 @@ impl cpu::Vcpu for KvmVcpu {
                 VcpuExit::Debug(_) => Ok(cpu::VmExit::Debug),
                 #[cfg(feature = "sev_snp")]
                 VcpuExit::Hypercall(hypercall) => {
-                    // https://docs.kernel.org/virt/kvm/x86/hypercalls.html#kvm-hc-map-gpa-range
-                    const KVM_HC_MAP_GPA_RANGE: u64 = 12;
                     // 4th bit of attributes argument is encrypted page bit
                     match hypercall.nr {
                         KVM_HC_MAP_GPA_RANGE => {
