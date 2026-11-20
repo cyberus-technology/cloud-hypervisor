@@ -1738,12 +1738,27 @@ pub struct KvmVcpu {
 #[cfg(any(feature = "sev_snp", feature = "tdx"))]
 impl KvmVcpu {
     fn validate_gpa_range(&self, gpa: u64, num_pages: u64) -> cpu::Result<u64> {
-        if gpa.is_multiple_of(PAGE_SIZE_4K)
-            && let Some(size) = num_pages.checked_mul(PAGE_SIZE_4K)
-            && size != 0
-            && let Some(end) = gpa.checked_add(size)
-            && let Some(slots) = &self.memory_slots
-        {
+        if num_pages == 0 {
+            return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "Illegal zero-sized range for {gpa:#x}"
+            )));
+        }
+        if !gpa.is_multiple_of(PAGE_SIZE_4K) {
+            return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "GPA {gpa:#x} not page-aligned"
+            )));
+        }
+        let size = num_pages
+            .checked_mul(PAGE_SIZE_4K)
+            .ok_or(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "GPA range overflows 64 bits: GPA: {gpa:#x} Num pages: {num_pages:#x}"
+            )))?;
+        let end = gpa
+            .checked_add(size)
+            .ok_or(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "GPA range overflows 64 bits: GPA: {gpa:#x} Num pages: {num_pages:#x}"
+            )))?;
+        if let Some(slots) = &self.memory_slots {
             let slots = slots.read().unwrap();
             // Memory slots do not overlap, so their intersections must cover the range.
             let covered: u64 = slots
@@ -1759,7 +1774,7 @@ impl KvmVcpu {
             }
         }
         Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-            "Invalid GPA range: address={gpa:#x}, pages={num_pages}"
+            "Conversion requires guest_memfd backend"
         )))
     }
 
