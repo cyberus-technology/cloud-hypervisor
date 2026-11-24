@@ -174,9 +174,9 @@ pub struct PlatformConfig {
     pub system_sku_number: Option<String>,
     #[serde(default)]
     pub chassis_asset_tag: Option<String>,
-    #[cfg(feature = "sev_snp")]
-    #[serde(default)]
-    pub sev_snp: bool,
+    #[cfg(any(feature = "tdx", feature = "sev_snp"))]
+    #[serde(default, alias = "sev_snp")]
+    pub is_cvm: bool,
     #[serde(default)]
     pub iommufd: bool,
     // Deserialized FDs are discarded.
@@ -1418,7 +1418,7 @@ impl VmConfig {
         }
 
         #[cfg(feature = "sev_snp")]
-        if self.platform.as_ref().is_some_and(|p| p.sev_snp) {
+        if self.platform.as_ref().is_some_and(|p| p.is_cvm) {
             landlock.add_rule_with_access(Path::new("/dev/sev"), "rw")?;
         }
 

@@ -144,14 +144,17 @@ use crate::cpu::{
     ACPI_CPU_HOTPLUG_CONTROLLER_SNAPSHOT_ID, AcpiCpuHotplugController, CPU_MANAGER_ACPI_SIZE,
     CpuManager,
 };
+#[cfg(any(
+    all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+    all(feature = "kvm", feature = "tdx")
+))]
+use crate::cvm::CvmSharedPageTracker;
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::{LegacyUserspaceInterruptManager, MsiInterruptManager};
 use crate::locked_unix_listener::LockedUnixListener;
 use crate::memory_manager::{Error as MemoryManagerError, MEMORY_MANAGER_ACPI_SIZE, MemoryManager};
 use crate::pci_segment::{PciSegment, PciSegmentState};
 use crate::serial_manager::{Error as SerialManagerError, SerialManager};
-#[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-use crate::sev::SevSnpSharedPageTracker;
 use crate::util::flatten_error_chain_to_string;
 #[cfg(feature = "ivshmem")]
 use crate::vm_config::IvshmemConfig;
@@ -579,10 +582,13 @@ pub enum DeviceManagerError {
     #[error("Failed to remove DMA mapping handler from virtio-mem device")]
     RemoveDmaMappingHandlerVirtioMem(#[source] mem::Error),
 
-    /// Failed to add a DMA mapping handler to the SEV-SNP shared-page tracker.
-    #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-    #[error("Failed to add DMA mapping handler to SEV-SNP shared-page tracker")]
-    AddDmaMappingHandlerSevSnp(#[source] ExternalDmaMappingError),
+    /// Failed to add a DMA mapping handler to the CVM shared-page tracker.
+    #[cfg(any(
+        all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+        all(feature = "kvm", feature = "tdx")
+    ))]
+    #[error("Failed to add DMA mapping handler to CVM shared-page tracker")]
+    AddDmaMappingHandlerCvm(#[source] ExternalDmaMappingError),
 
     /// Failed to create vfio-user client
     #[error("Failed to create vfio-user client")]
@@ -604,10 +610,13 @@ pub enum DeviceManagerError {
     #[error("Failed to update memory mappings for VFIO user device")]
     UpdateMemoryForVfioUserPciDevice(#[source] ExternalDmaMappingError),
 
-    /// vfio-user cannot be hot-added while SEV-SNP shared-page tracking is active
-    #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-    #[error("Cannot hot-add a vfio-user device while SEV-SNP shared-page tracking is active")]
-    VfioUserHotplugSevSnpTracker,
+    /// vfio-user cannot be hot-added while CVM shared-page tracking is active
+    #[cfg(any(
+        all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+        all(feature = "kvm", feature = "tdx")
+    ))]
+    #[error("Cannot hot-add a vfio-user device while CVM shared-page tracking is active")]
+    VfioUserHotplugCvmTracker,
 
     /// Cannot duplicate file descriptor
     #[error("Cannot duplicate file descriptor")]
@@ -1133,9 +1142,12 @@ pub struct DeviceManager {
 
     mmio_regions: Arc<Mutex<Vec<VfioBar>>>,
 
-    // Track shared pages for SEV-SNP VFIO
-    #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-    sev_snp_shared_page_tracker: Option<Arc<SevSnpSharedPageTracker>>,
+    // Track shared pages for CVM VFIO
+    #[cfg(any(
+        all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+        all(feature = "kvm", feature = "tdx")
+    ))]
+    cvm_shared_page_tracker: Option<Arc<CvmSharedPageTracker>>,
 
     #[cfg(feature = "fw_cfg")]
     fw_cfg: Option<Arc<Mutex<FwCfg>>>,
@@ -1413,8 +1425,11 @@ impl DeviceManager {
             }
         }
 
-        #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-        let sev_snp_shared_page_tracker = Self::create_sev_snp_shared_page_tracker(
+        #[cfg(any(
+            all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+            all(feature = "kvm", feature = "tdx")
+        ))]
+        let cvm_shared_page_tracker = Self::create_cvm_shared_page_tracker(
             &address_manager,
             &config,
             &cpu_manager,
@@ -1480,8 +1495,11 @@ impl DeviceManager {
             acpi_platform_addresses: AcpiPlatformAddresses::default(),
             rate_limit_groups,
             mmio_regions: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-            sev_snp_shared_page_tracker,
+            #[cfg(any(
+                all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+                all(feature = "kvm", feature = "tdx")
+            ))]
+            cvm_shared_page_tracker,
             #[cfg(feature = "fw_cfg")]
             fw_cfg: None,
             #[cfg(feature = "ivshmem")]
@@ -4591,17 +4609,20 @@ impl DeviceManager {
         if needs_dma_mapping {
             let vfio_mapping = &vfio_context.dma_mapping;
 
-            #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-            let static_map_all_ram = match self.sev_snp_shared_page_tracker.as_ref() {
+            #[cfg(any(
+                all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+                all(feature = "kvm", feature = "tdx")
+            ))]
+            let static_map_all_ram = match self.cvm_shared_page_tracker.as_ref() {
                 // Confidential VM over iommufd supports shared/private tracking.
                 Some(tracker) => {
                     tracker
                         .add_dma_mapping_handler(vfio_mapping)
-                        .map_err(DeviceManagerError::AddDmaMappingHandlerSevSnp)?;
+                        .map_err(DeviceManagerError::AddDmaMappingHandlerCvm)?;
                     false
                 }
                 None => {
-                    if self.config.lock().unwrap().is_sev_snp_enabled()
+                    if self.config.lock().unwrap().is_cvm()
                         && self.cpu_manager.lock().unwrap().hypervisor_type()
                             == hypervisor::HypervisorType::Kvm
                     {
@@ -4614,7 +4635,10 @@ impl DeviceManager {
                     true
                 }
             };
-            #[cfg(not(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg")))]
+            #[cfg(not(any(
+                all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+                all(feature = "kvm", feature = "tdx")
+            )))]
             let static_map_all_ram = true;
 
             if static_map_all_ram {
@@ -5078,7 +5102,7 @@ impl DeviceManager {
 
         // If SEV-SNP is enabled create the AccessPlatform from SevSnpPageAccessProxy
         #[cfg(feature = "sev_snp")]
-        if self.config.lock().unwrap().is_sev_snp_enabled() {
+        if self.config.lock().unwrap().is_cvm() {
             access_platform = Some(Arc::new(SevSnpPageAccessProxy::new(Arc::clone(
                 &self.address_manager.vm,
             ))));
@@ -5549,9 +5573,12 @@ impl DeviceManager {
             ));
         }
 
-        #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-        if self.sev_snp_shared_page_tracker.is_some() {
-            return Err(DeviceManagerError::VfioUserHotplugSevSnpTracker);
+        #[cfg(any(
+            all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+            all(feature = "kvm", feature = "tdx")
+        ))]
+        if self.cvm_shared_page_tracker.is_some() {
+            return Err(DeviceManagerError::VfioUserHotplugCvmTracker);
         }
 
         let (bdf, device_name) = self.add_vfio_user_device(device_cfg, None)?;
@@ -6198,19 +6225,22 @@ impl DeviceManager {
         &self.acpi_platform_addresses
     }
 
-    #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-    fn create_sev_snp_shared_page_tracker(
+    #[cfg(any(
+        all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+        all(feature = "kvm", feature = "tdx")
+    ))]
+    fn create_cvm_shared_page_tracker(
         address_manager: &Arc<AddressManager>,
         config: &Arc<Mutex<VmConfig>>,
         cpu_manager: &Arc<Mutex<CpuManager>>,
         memory_manager: &Arc<Mutex<MemoryManager>>,
-    ) -> Option<Arc<SevSnpSharedPageTracker>> {
+    ) -> Option<Arc<CvmSharedPageTracker>> {
         // The SEV-SNP per-page tracker is only supported over an iommufd backend
         // with no vfio-user devices. Otherwise, confidential VFIO falls back to
         // static-mapping all pages.
         let sev_snp_config_enabled = {
             let config = config.lock().unwrap();
-            config.is_sev_snp_enabled()
+            config.is_cvm()
                 && config.platform.as_ref().is_some_and(|p| p.iommufd)
                 && config
                     .user_devices
@@ -6226,7 +6256,7 @@ impl DeviceManager {
             return None;
         }
 
-        let tracker = Arc::new(SevSnpSharedPageTracker::new());
+        let tracker = Arc::new(CvmSharedPageTracker::new());
         for zone in memory_manager.lock().unwrap().memory_zones().values() {
             for region in zone.regions() {
                 tracker.register_region(region.start_addr().raw_value(), region.len());

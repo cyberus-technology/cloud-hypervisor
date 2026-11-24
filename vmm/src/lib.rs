@@ -86,6 +86,11 @@ pub mod console_devices;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 mod coredump;
 pub mod cpu;
+#[cfg(any(
+    all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"),
+    all(feature = "kvm", feature = "tdx")
+))]
+pub(crate) mod cvm;
 pub mod device_manager;
 pub mod device_tree;
 pub mod external_fds;
@@ -103,8 +108,6 @@ mod pci_segment;
 mod prefault;
 pub mod seccomp_filters;
 mod serial_manager;
-#[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
-pub(crate) mod sev;
 mod sigwinch_listener;
 pub mod sparse;
 mod sync_utils;
@@ -253,8 +256,8 @@ pub enum MemoryZoneUpdateError {
 impl From<&VmConfig> for hypervisor::HypervisorVmConfig {
     fn from(_value: &VmConfig) -> Self {
         hypervisor::HypervisorVmConfig {
-            #[cfg(feature = "sev_snp")]
-            sev_snp_enabled: _value.is_sev_snp_enabled(),
+            #[cfg(any(feature = "tdx", feature = "sev_snp"))]
+            is_cvm: _value.is_cvm(),
             #[cfg(feature = "sev_snp")]
             mem_size: _value.memory.total_size(),
             #[cfg(feature = "sev_snp")]
@@ -1390,7 +1393,7 @@ impl Vmm {
             None,
             phys_bits,
             #[cfg(feature = "sev_snp")]
-            vm_config.is_sev_snp_enabled(),
+            vm_config.is_cvm(),
             Some(&vm_migration_config.memory_manager_data),
             existing_memory_files,
         )

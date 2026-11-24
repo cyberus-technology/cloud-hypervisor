@@ -18,11 +18,11 @@ use std::mem::offset_of;
 use std::num;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::io::AsRawFd;
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
 use std::process;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use std::sync::Mutex;
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "tdx", feature = "sev_snp"))]
 use std::sync::OnceLock;
 #[cfg(target_arch = "x86_64")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,7 +39,7 @@ use igvm::snp_defs::{SevSelector, SevVmsa};
 use kvm_bindings::fam_wrappers::KvmIrqRouting;
 use kvm_bindings::kvm_create_guest_memfd;
 use kvm_ioctls::{NoDatamatch, VcpuFd, VmFd};
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
 use log::debug;
 #[cfg(target_arch = "x86_64")]
 use log::warn;
@@ -76,10 +76,10 @@ use kvm_bindings::{
     KVM_REG_GUEST_SSP, KVM_X2APIC_API_DISABLE_BROADCAST_QUIRK, KVM_X2APIC_API_USE_32BIT_IDS,
     MsrList, kvm_enable_cap, kvm_msr_entry, kvm_x86_reg_kvm,
 };
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
+use x86_64::check_required_cvm_extensions;
 #[cfg(target_arch = "x86_64")]
 use x86_64::check_required_kvm_extensions;
-#[cfg(all(target_arch = "x86_64", feature = "sev_snp"))]
-use x86_64::check_required_sev_snp_extensions;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{CpuId, ExtendedControlRegisters, MsrEntries, VcpuKvmState};
 
@@ -179,6 +179,10 @@ const KVM_CAP_ARM_EL2: u32 = 240;
 #[cfg(target_arch = "x86_64")]
 const INVALID_GPA: u64 = u64::MAX;
 
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
+// https://docs.kernel.org/virt/kvm/x86/hypercalls.html#kvm-hc-map-gpa-range
+const KVM_HC_MAP_GPA_RANGE: u64 = 12;
+
 #[cfg(target_arch = "x86_64")]
 ioctl_io_nr!(KVM_NMI, kvm_bindings::KVMIO, 0x9a);
 // kvm-ioctls only exposes the vCPU device-attribute ioctls for aarch64.
@@ -199,12 +203,14 @@ ioctl_iow_nr!(
 #[cfg(target_arch = "x86_64")]
 const SHSTK_ECX_BIT: u8 = 7; // CET shadow stack, CPUID leaf 7 subleaf 0 ECX
 
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "tdx", feature = "sev_snp"))]
 use igvm_defs::PAGE_SIZE_4K;
+#[cfg(feature = "tdx")]
+use kvm_bindings::KVM_X86_TDX_VM;
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
+use kvm_bindings::{KVM_MEMORY_ATTRIBUTE_PRIVATE, kvm_memory_attributes};
 #[cfg(feature = "sev_snp")]
-use kvm_bindings::{
-    KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_X86_SNP_VM, kvm_memory_attributes, kvm_segment as Segment,
-};
+use kvm_bindings::{KVM_X86_SNP_VM, kvm_segment as Segment};
 use vm_memory::GuestAddress;
 #[cfg(feature = "sev_snp")]
 use x86_64::sev;
@@ -462,13 +468,13 @@ struct KvmDirtyLogSlot {
 }
 
 struct KvmMemorySlot {
-    #[cfg_attr(not(feature = "sev_snp"), expect(dead_code))]
+    #[cfg_attr(not(any(feature = "sev_snp", feature = "tdx")), expect(dead_code))]
     guest_memfd: OwnedFd,
-    #[cfg_attr(not(feature = "sev_snp"), expect(dead_code))]
+    #[cfg_attr(not(any(feature = "sev_snp", feature = "tdx")), expect(dead_code))]
     guest_phys_addr: u64,
-    #[cfg_attr(not(feature = "sev_snp"), expect(dead_code))]
+    #[cfg_attr(not(any(feature = "sev_snp", feature = "tdx")), expect(dead_code))]
     memory_size: u64,
-    #[cfg_attr(not(feature = "sev_snp"), expect(dead_code))]
+    #[cfg_attr(not(any(feature = "sev_snp", feature = "tdx")), expect(dead_code))]
     userspace_addr: u64,
 }
 
@@ -483,7 +489,7 @@ pub struct KvmVm {
     snp_guest_policy: OnceLock<u64>,
     dirty_log_slots: RwLock<HashMap<u32, KvmDirtyLogSlot>>,
     memory_slots: Option<Arc<RwLock<HashMap<u32, KvmMemorySlot>>>>,
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "sev_snp", feature = "tdx"))]
     memory_conversion_handler: Arc<OnceLock<Arc<dyn vm::MemoryConversionHandler>>>,
 }
 
@@ -561,7 +567,7 @@ impl KvmVm {
 /// let vm = hypervisor.create_vm(HypervisorVmConfig::default()).expect("new VM fd creation failed");
 /// ```
 impl vm::Vm for KvmVm {
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "sev_snp", feature = "tdx"))]
     fn register_memory_conversion_handler(&self, handler: Arc<dyn vm::MemoryConversionHandler>) {
         self.memory_conversion_handler
             .set(handler)
@@ -789,9 +795,9 @@ impl vm::Vm for KvmVm {
             has_xcrs: self.check_extension(Cap::Xcrs),
             #[cfg(target_arch = "x86_64")]
             vm_fd: Arc::clone(&self.fd),
-            #[cfg(feature = "sev_snp")]
+            #[cfg(any(feature = "sev_snp", feature = "tdx"))]
             memory_slots: self.memory_slots.clone(),
-            #[cfg(feature = "sev_snp")]
+            #[cfg(any(feature = "sev_snp", feature = "tdx"))]
             memory_conversion_handler: Arc::clone(&self.memory_conversion_handler),
         };
         Ok(Box::new(vcpu))
@@ -1003,7 +1009,7 @@ impl vm::Vm for KvmVm {
                 .map_err(|e| vm::HypervisorVmError::CreateUserMemory(e.into()))?;
         }
 
-        #[cfg(feature = "sev_snp")]
+        #[cfg(any(feature = "sev_snp", feature = "tdx"))]
         if visibility == vm::MemoryVisibility::Private
             && self.memory_slots.is_some()
             && let Err(e) = self.fd.set_memory_attributes(kvm_memory_attributes {
@@ -1050,7 +1056,6 @@ impl vm::Vm for KvmVm {
                 },
             );
         }
-
         Ok(())
     }
 
@@ -1411,7 +1416,7 @@ impl KvmHypervisor {
 pub enum KvmError {
     #[error("Capability missing: {0:?}")]
     CapabilityMissing(Cap),
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "tdx", feature = "sev_snp"))]
     #[error(
         "Memory attributes {0:#b} do not include required private attribute ({KVM_MEMORY_ATTRIBUTE_PRIVATE:#b})"
     )]
@@ -1443,6 +1448,34 @@ impl KvmHypervisor {
                 err.into(),
             )),
         }
+    }
+
+    #[cfg(any(feature = "sev_snp", feature = "tdx"))]
+    // Activates the KVM_HC_MAP_GPA_RANGE hypercall after ensuring KVM supports it.
+    fn activate_map_gpa_hc(&self, fd: &VmFd) -> hypervisor::Result<()> {
+        let mask = self.kvm.check_extension_int(Cap::ExitHypercall);
+        if mask < 0 {
+            return Err(hypervisor::HypervisorError::CheckExitHypercall(
+                io::Error::last_os_error().into(),
+            ));
+        }
+        // KVM supports the HC only if the respective bit is set
+        let hc_map_gpa_range_mask = 1 << KVM_HC_MAP_GPA_RANGE;
+        if mask & hc_map_gpa_range_mask == 0 {
+            return Err(hypervisor::HypervisorError::CheckExtensions(anyhow!(
+                "Hypercall mask is missing support for KVM_HC_MAP_GPA_RANGE"
+            )));
+        }
+        // Only activate the HC that we want to take. Must be a subset
+        // of the initially returned mask.
+        let cap = kvm_bindings::kvm_enable_cap {
+            cap: kvm_bindings::KVM_CAP_EXIT_HYPERCALL,
+            args: [hc_map_gpa_range_mask as _, 0, 0, 0],
+            ..Default::default()
+        };
+        fd.enable_cap(&cap)
+            .map_err(|e| hypervisor::HypervisorError::VmCreate(e.into()))?;
+        Ok(())
     }
 }
 
@@ -1495,8 +1528,13 @@ impl hypervisor::Hypervisor for KvmHypervisor {
             vm_type = KVM_X86_DEFAULT_VM.into();
 
             #[cfg(feature = "sev_snp")]
-            if _config.sev_snp_enabled {
+            if _config.is_cvm {
                 vm_type = KVM_X86_SNP_VM.into();
+            }
+
+            #[cfg(feature = "tdx")]
+            if _config.is_cvm {
+                vm_type = KVM_X86_TDX_VM.into();
             }
         }
 
@@ -1538,9 +1576,9 @@ impl hypervisor::Hypervisor for KvmHypervisor {
 
             #[allow(unused_mut)]
             let mut memory_slots = None;
-            #[cfg(feature = "sev_snp")]
-            if _config.sev_snp_enabled {
-                check_required_sev_snp_extensions(&fd)
+            #[cfg(any(feature = "sev_snp", feature = "tdx"))]
+            if _config.is_cvm {
+                check_required_cvm_extensions(&fd)
                     .map_err(|e| hypervisor::HypervisorError::CheckExtensions(e.into()))?;
                 memory_slots = Some(Arc::new(RwLock::new(HashMap::new())));
             }
@@ -1549,19 +1587,8 @@ impl hypervisor::Hypervisor for KvmHypervisor {
             let sev_fd = {
                 let sev_snp_enabled = vm_type == KVM_X86_SNP_VM as u64;
                 if sev_snp_enabled {
-                    let mask = self.kvm.check_extension_int(Cap::ExitHypercall);
-                    if mask < 0 {
-                        return Err(hypervisor::HypervisorError::CheckExitHypercall(
-                            io::Error::last_os_error().into(),
-                        ));
-                    }
-                    let cap = kvm_bindings::kvm_enable_cap {
-                        cap: kvm_bindings::KVM_CAP_EXIT_HYPERCALL,
-                        args: [mask as _, 0, 0, 0],
-                        ..Default::default()
-                    };
-                    fd.enable_cap(&cap)
-                        .map_err(|e| hypervisor::HypervisorError::VmCreate(e.into()))?;
+                    self.activate_map_gpa_hc(&fd)?;
+
                     let sev_dev = x86_64::sev::SevFd::new("/dev/sev")
                         .map_err(|e| hypervisor::HypervisorError::SevSnpCapabilities(e.into()))?;
                     sev_dev
@@ -1573,6 +1600,11 @@ impl hypervisor::Hypervisor for KvmHypervisor {
                 }
             };
 
+            #[cfg(feature = "tdx")]
+            if vm_type == KVM_X86_TDX_VM as u64 {
+                self.activate_map_gpa_hc(&fd)?;
+            }
+
             Ok(Arc::new(KvmVm {
                 fd: Arc::new(fd),
                 msrs,
@@ -1582,7 +1614,7 @@ impl hypervisor::Hypervisor for KvmHypervisor {
                 #[cfg(feature = "sev_snp")]
                 snp_guest_policy: OnceLock::new(),
                 memory_slots,
-                #[cfg(feature = "sev_snp")]
+                #[cfg(any(feature = "sev_snp", feature = "tdx"))]
                 memory_conversion_handler: Arc::new(OnceLock::new()),
             }))
         }
@@ -1697,21 +1729,36 @@ pub struct KvmVcpu {
     has_xcrs: bool,
     #[cfg(target_arch = "x86_64")]
     vm_fd: Arc<VmFd>,
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "sev_snp", feature = "tdx"))]
     memory_slots: Option<Arc<RwLock<HashMap<u32, KvmMemorySlot>>>>,
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "sev_snp", feature = "tdx"))]
     memory_conversion_handler: Arc<OnceLock<Arc<dyn vm::MemoryConversionHandler>>>,
 }
 
-#[cfg(feature = "sev_snp")]
+#[cfg(any(feature = "sev_snp", feature = "tdx"))]
 impl KvmVcpu {
     fn validate_gpa_range(&self, gpa: u64, num_pages: u64) -> cpu::Result<u64> {
-        if gpa.is_multiple_of(PAGE_SIZE_4K)
-            && let Some(size) = num_pages.checked_mul(PAGE_SIZE_4K)
-            && size != 0
-            && let Some(end) = gpa.checked_add(size)
-            && let Some(slots) = &self.memory_slots
-        {
+        if num_pages == 0 {
+            return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "Illegal zero-sized range for {gpa:#x}"
+            )));
+        }
+        if !gpa.is_multiple_of(PAGE_SIZE_4K) {
+            return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "GPA {gpa:#x} not page-aligned"
+            )));
+        }
+        let size = num_pages
+            .checked_mul(PAGE_SIZE_4K)
+            .ok_or(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "GPA range overflows 64 bits: GPA: {gpa:#x} Num pages: {num_pages:#x}"
+            )))?;
+        let end = gpa
+            .checked_add(size)
+            .ok_or(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                "GPA range overflows 64 bits: GPA: {gpa:#x} Num pages: {num_pages:#x}"
+            )))?;
+        if let Some(slots) = &self.memory_slots {
             let slots = slots.read().unwrap();
             // Memory slots do not overlap, so their intersections must cover the range.
             let covered: u64 = slots
@@ -1722,12 +1769,16 @@ impl KvmVcpu {
                     end.saturating_sub(start)
                 })
                 .sum();
-            if covered == size {
-                return Ok(size);
-            }
+            return match covered {
+                covered if covered == size => Ok(covered),
+                0 => Ok(0),
+                _ => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                    "Mixing guest RAM and non-RAM ranges is illegal"
+                ))),
+            };
         }
         Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-            "Invalid GPA range: address={gpa:#x}, pages={num_pages}"
+            "Conversion requires guest_memfd backend"
         )))
     }
 
@@ -2409,10 +2460,8 @@ impl cpu::Vcpu for KvmVcpu {
                 }
                 VcpuExit::Hyperv => Ok(cpu::VmExit::Hyperv),
                 VcpuExit::Debug(_) => Ok(cpu::VmExit::Debug),
-                #[cfg(feature = "sev_snp")]
+                #[cfg(any(feature = "sev_snp", feature = "tdx"))]
                 VcpuExit::Hypercall(hypercall) => {
-                    // https://docs.kernel.org/virt/kvm/x86/hypercalls.html#kvm-hc-map-gpa-range
-                    const KVM_HC_MAP_GPA_RANGE: u64 = 12;
                     // 4th bit of attributes argument is encrypted page bit
                     match hypercall.nr {
                         KVM_HC_MAP_GPA_RANGE => {
@@ -2438,6 +2487,14 @@ impl cpu::Vcpu for KvmVcpu {
                                 // https://docs.kernel.org/virt/kvm/api.html#kvm-set-memory-attributes
                                 0u64
                             };
+                            if size == 0 {
+                                if set_private_attr != 0 {
+                                    return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                                        "Cannot convert memory outside of guest RAM range to private"
+                                    )));
+                                }
+                                return Ok(cpu::VmExit::Ignore);
+                            }
                             let mem_attributes = kvm_memory_attributes {
                                 address,
                                 size,
@@ -2468,7 +2525,7 @@ impl cpu::Vcpu for KvmVcpu {
                     }
                 }
 
-                #[cfg(feature = "sev_snp")]
+                #[cfg(any(feature = "sev_snp", feature = "tdx"))]
                 VcpuExit::MemoryFault { flags, gpa, size } => {
                     debug!("VcpuExit::MemoryFault: flags={flags:#x}, gpa={gpa:#x}, size={size:#x}");
 
@@ -3825,7 +3882,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "sev_snp")]
+    #[cfg(any(feature = "tdx", feature = "sev_snp"))]
     fn test_validate_gpa_range() {
         use super::*;
 
@@ -3833,7 +3890,7 @@ mod tests {
             [
                 (0, 0x1000, 0x2000),
                 (1, 0x3000, 0x1000),
-                (2, 0x5000, 0x1000),
+                (2, 0x5000, 0x2000),
             ]
             .into_iter()
             .map(|(id, guest_phys_addr, memory_size)| {
@@ -3872,21 +3929,25 @@ mod tests {
         assert_eq!(vcpu.validate_gpa_range(0x1000, 1).unwrap(), 0x1000);
         assert_eq!(vcpu.validate_gpa_range(0x1000, 3).unwrap(), 0x3000);
         assert_eq!(vcpu.validate_gpa_range(0x5000, 1).unwrap(), 0x1000);
+        assert_eq!(vcpu.validate_gpa_range(0x6000, 1).unwrap(), 0x1000);
+        vcpu.validate_gpa_range(0x6000, 2).unwrap_err();
+        assert_eq!(vcpu.validate_gpa_range(0x7000, 1).unwrap(), 0x0);
         for (gpa, pages) in [
-            (0, 1),
-            (0x1001, 1),
-            (0x1fff, 1),
-            (0x6000, 1),
-            (0x3000, 2),
-            (0x3000, 3),
-            (0x1000, 0),
-            (0x1000, u64::MAX / PAGE_SIZE_4K + 1),
-            (u64::MAX - PAGE_SIZE_4K + 1, 1),
+            (0x1001, 1),                           /* Invalid alignment */
+            (0x1fff, 1),                           /* Invalid alignment */
+            (0x3000, 2),                           /* RAM and non-RAM mixed */
+            (0x3000, 3),                           /* RAM and non-RAM mixed */
+            (0x1000, 0),                           /* Zero page count */
+            (0x1000, u64::MAX / PAGE_SIZE_4K + 1), /* Range overflows 64 bits, too many pages */
+            (u64::MAX - PAGE_SIZE_4K + 1, 1),      /* Range overflows 64 bits, GPA too big */
         ] {
-            vcpu.validate_gpa_range(gpa, pages).unwrap_err();
+            vcpu.validate_gpa_range(gpa, pages).expect_err(&format!(
+                "Should fail for GPA: {gpa:#x} and page count {pages:#x}"
+            ));
         }
         vcpu.memory_slots = None;
-        vcpu.validate_gpa_range(0x1000, 1).unwrap_err();
+        vcpu.validate_gpa_range(0x1000, 1)
+            .expect_err("Should fail without guest_memfd backend");
     }
 
     #[test]
