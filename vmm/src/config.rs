@@ -4223,12 +4223,26 @@ impl VmConfig {
 
     pub fn remove_device(&mut self, id: &str) -> bool {
         let mut removed = false;
+        let mut close_preserved_fd = |fd| {
+            if self
+                .preserved_fds
+                .as_mut()
+                .is_some_and(|fds| fds.remove(&fd))
+            {
+                debug!("Closing preserved FD from device: id={id}, fd={fd}");
+                // SAFETY: VmConfig owns the FD removed from preserved_fds.
+                unsafe { libc::close(fd) };
+            }
+        };
 
         // Remove if VFIO device
         if let Some(devices) = self.devices.as_mut() {
-            let len = devices.len();
-            devices.retain(|dev| dev.pci_common.id.as_ref().map(|id| id.as_ref()) != Some(id));
-            removed |= devices.len() != len;
+            for dev in devices.extract_if(.., |dev| dev.pci_common.id.as_deref() == Some(id)) {
+                if let Some(fd) = dev.fd {
+                    close_preserved_fd(fd);
+                }
+                removed = true;
+            }
         }
 
         // Remove if VFIO user device
@@ -4262,9 +4276,12 @@ impl VmConfig {
 
         // Remove if net device
         if let Some(net) = self.net.as_mut() {
-            let len = net.len();
-            net.retain(|dev| dev.pci_common.id.as_ref().map(|id| id.as_ref()) != Some(id));
-            removed |= net.len() != len;
+            for dev in net.extract_if(.., |dev| dev.pci_common.id.as_deref() == Some(id)) {
+                for fd in dev.fds.into_iter().flatten() {
+                    close_preserved_fd(fd);
+                }
+                removed = true;
+            }
         }
 
         // Remove if pmem device
