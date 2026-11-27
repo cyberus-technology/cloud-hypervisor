@@ -3,13 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::any::TypeId;
-use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::io::Read;
 use std::os::fd::OwnedFd;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -68,10 +65,6 @@ pub enum Error {
     #[error("Error accepting connection")]
     AcceptConnection(#[source] io::Error),
 
-    /// Cannot clone the Stream
-    #[error("Error cloning Stream")]
-    CloneStream(#[source] io::Error),
-
     /// Cannot shutdown the connection
     #[error("Error shutting down a connection")]
     ShutdownConnection(#[source] io::Error),
@@ -96,10 +89,9 @@ pub(crate) enum EpollDispatch {
     File = 0,
     Kill = 1,
     Socket = 2,
-    Tcp = 3,
     Unknown,
 }
-const EPOLL_EVENTS_LEN: usize = 5;
+const EPOLL_EVENTS_LEN: usize = 4;
 
 impl From<u64> for EpollDispatch {
     fn from(v: u64) -> Self {
@@ -108,61 +100,8 @@ impl From<u64> for EpollDispatch {
             0 => File,
             1 => Kill,
             2 => Socket,
-            3 => Tcp,
             _ => Unknown,
         }
-    }
-}
-
-/// A thread-safe writer that fans out to multiple keyed writers. Allows for
-/// bundling different kinds of writers for the serial device, e.g. writing to
-/// a TCP socket and a file.
-#[derive(Clone)]
-struct FanoutWriter {
-    writers: Arc<Mutex<HashMap<TypeId, Box<dyn Write + Send>>>>,
-}
-
-impl FanoutWriter {
-    fn new() -> Self {
-        FanoutWriter {
-            writers: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn add_writer<W: Write + Send + 'static>(&self, writer: W) {
-        let mut writers = self.writers.lock().unwrap();
-        writers.insert(TypeId::of::<W>(), Box::new(writer));
-    }
-
-    fn remove_writer(&self, id: TypeId) -> Option<Box<dyn Write + Send>> {
-        let mut writers = self.writers.lock().unwrap();
-        writers.remove(&id)
-    }
-}
-
-impl Write for FanoutWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut writers = self.writers.lock().unwrap();
-        let mut result: io::Result<usize> = Ok(buf.len());
-
-        for (i, w) in writers.values_mut().enumerate() {
-            let r = w.write(buf);
-            if i == 0 {
-                result = r;
-            } else {
-                r?;
-            }
-        }
-
-        result
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let mut writers = self.writers.lock().unwrap();
-        for w in writers.values_mut() {
-            w.flush()?;
-        }
-        Ok(())
     }
 }
 
@@ -177,8 +116,6 @@ pub(crate) struct SerialManager {
     handle: Option<thread::JoinHandle<()>>,
     pty_write_out: Option<Arc<AtomicBool>>,
     socket_console: Option<SocketConsole>,
-    /// Tracks the active TCP client so `Drop` can shut it down before joining.
-    active_tcp_stream: Arc<Mutex<Option<TcpStream>>>,
 }
 
 impl SerialManager {
@@ -187,8 +124,21 @@ impl SerialManager {
         #[cfg(target_arch = "aarch64")] serial: Arc<Mutex<Pl011>>,
         mut transport: ConsoleTransport,
     ) -> Result<Option<Self>> {
-        let in_fd = match transport {
-            ConsoleTransport::Pty(ref fd) => fd.as_raw_fd(),
+        let epoll_fd = epoll::create(true).map_err(Error::Epoll)?;
+        // SAFETY: epoll::create() returns a new fd that we exclusively own.
+        let epoll_fd = unsafe { OwnedFd::from_raw_fd(epoll_fd) };
+        let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?;
+
+        epoll::ctl(
+            epoll_fd.as_raw_fd(),
+            epoll::ControlOptions::EPOLL_CTL_ADD,
+            kill_evt.as_raw_fd(),
+            epoll::Event::new(epoll::Events::EPOLLIN, EpollDispatch::Kill as u64),
+        )
+        .map_err(Error::Epoll)?;
+
+        let in_registration: Option<(RawFd, EpollDispatch)> = match transport {
+            ConsoleTransport::Pty(ref fd) => Some((fd.as_raw_fd(), EpollDispatch::File)),
             ConsoleTransport::Tty(_)
                 // If running on an interactive TTY then accept input
                 // SAFETY: trivially safe
@@ -213,42 +163,29 @@ impl SerialManager {
                 }
 
                 transport = ConsoleTransport::Tty(Arc::new(stdin_clone));
-                fd
+                Some((fd, EpollDispatch::File))
             }
             ConsoleTransport::Tty(_) => {
                 return Ok(None);
             }
-            ConsoleTransport::Socket(ref listener) => listener.as_raw_fd(),
-            ConsoleTransport::Tcp(ref listener, _) => listener.as_raw_fd(),
+            ConsoleTransport::Socket(ref listener) => {
+                Some((listener.as_raw_fd(), EpollDispatch::Socket))
+            }
+            ConsoleTransport::TcpListen(ref listener) => {
+                Some((listener.as_raw_fd(), EpollDispatch::Socket))
+            }
             _ => return Ok(None),
         };
 
-        let in_event = match &transport {
-            ConsoleTransport::Socket(_) => EpollDispatch::Socket,
-            ConsoleTransport::Tcp(_, _) => EpollDispatch::Tcp,
-            _ => EpollDispatch::File,
-        };
-
-        let epoll_fd = epoll::create(true).map_err(Error::Epoll)?;
-        // SAFETY: epoll::create() returns a new fd that we exclusively own.
-        let epoll_fd = unsafe { OwnedFd::from_raw_fd(epoll_fd) };
-        let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?;
-
-        epoll::ctl(
-            epoll_fd.as_raw_fd(),
-            epoll::ControlOptions::EPOLL_CTL_ADD,
-            kill_evt.as_raw_fd(),
-            epoll::Event::new(epoll::Events::EPOLLIN, EpollDispatch::Kill as u64),
-        )
-        .map_err(Error::Epoll)?;
-
-        epoll::ctl(
-            epoll_fd.as_raw_fd(),
-            epoll::ControlOptions::EPOLL_CTL_ADD,
-            in_fd,
-            epoll::Event::new(epoll::Events::EPOLLIN, in_event as u64),
-        )
-        .map_err(Error::Epoll)?;
+        if let Some((in_fd, in_event)) = in_registration {
+            epoll::ctl(
+                epoll_fd.as_raw_fd(),
+                epoll::ControlOptions::EPOLL_CTL_ADD,
+                in_fd,
+                epoll::Event::new(epoll::Events::EPOLLIN, in_event as u64),
+            )
+            .map_err(Error::Epoll)?;
+        }
 
         let mut pty_write_out = None;
         if let ConsoleTransport::Pty(ref file) = transport {
@@ -266,7 +203,10 @@ impl SerialManager {
         // Install the persistent buffer as the device's sink so output produced
         // before the first client connects is captured rather than dropped.
         let mut socket_console = None;
-        if let ConsoleTransport::Socket(_) = transport {
+        if matches!(
+            transport,
+            ConsoleTransport::Socket(_) | ConsoleTransport::TcpListen(_)
+        ) {
             let console = SocketConsole::new();
             serial
                 .as_ref()
@@ -284,7 +224,6 @@ impl SerialManager {
             handle: None,
             pty_write_out,
             socket_console,
-            active_tcp_stream: Arc::new(Mutex::new(None)),
         }))
     }
 
@@ -333,18 +272,6 @@ impl SerialManager {
         let serial = Arc::clone(&self.serial);
         let pty_write_out = self.pty_write_out.clone();
         let mut socket_console = self.socket_console.take();
-        let mut reader_tcp: Option<TcpStream> = None;
-        // Keep `active_tcp_stream` and `reader_tcp` in sync: the former is the
-        // shutdown handle, the latter is the worker's read-side owner.
-        let active_tcp_stream = Arc::clone(&self.active_tcp_stream);
-
-        // In case of PTY, we want to be able to detect a connection on the
-        // other end of the PTY. This is done by detecting there's no event
-        // triggered on the epoll, which is the reason why we want the
-        // epoll_wait() function to return after the timeout expired.
-        // In case of TTY, we don't expect to detect such behavior, which is
-        // why we can afford to block until an actual event is triggered.
-        let timeout = if pty_write_out.is_some() { 500 } else { -1 };
 
         let thread = thread::Builder::new()
             .name("serial-manager".to_string())
@@ -355,26 +282,18 @@ impl SerialManager {
                         apply_filter(&seccomp_filter).map_err(Error::ApplySeccompFilter)?;
                     }
 
-                    let write_distributor = match &transport {
-                        ConsoleTransport::Tcp(_, file_opt) => {
-                            let distributor = FanoutWriter::new();
-                            if let Some(file) = file_opt {
-                                distributor.add_writer(Arc::clone(file));
-                            }
-                            serial
-                                .as_ref()
-                                .lock()
-                                .unwrap()
-                                .set_out(Some(Box::new(distributor.clone())));
-                            Some(distributor)
-                        }
-                        _ => None,
-                    };
-
                     let mut events =
                         [epoll::Event::new(epoll::Events::empty(), 0); EPOLL_EVENTS_LEN];
 
                     loop {
+                        // In case of PTY, we want to be able to detect a connection on the
+                        // other end of the PTY. This is done by detecting there's no event
+                        // triggered on the epoll, which is the reason why we want the
+                        // epoll_wait() function to return after the timeout expired.
+                        // In case of TTY, we don't expect to detect such behavior, which is
+                        // why we can afford to block until an actual event is triggered.
+                        let timeout = if pty_write_out.is_some() { 500 } else { -1 };
+
                         let num_events =
                             match epoll::wait(epoll_fd.as_raw_fd(), timeout, &mut events[..]) {
                                 Ok(res) => res,
@@ -393,12 +312,14 @@ impl SerialManager {
                                 }
                             };
 
-                        if matches!(transport, ConsoleTransport::Pty(_)) && num_events == 0 {
-                            // This very specific case happens when the serial is connected
-                            // to a PTY. We know EPOLLHUP is always present when there's nothing
-                            // connected at the other end of the PTY. That's why getting no event
-                            // means we can flush the output of the serial through the PTY.
-                            Self::trigger_pty_flush(&serial, pty_write_out.as_ref())?;
+                        if num_events == 0 {
+                            if matches!(transport, ConsoleTransport::Pty(_)) {
+                                // This very specific case happens when the serial is connected
+                                // to a PTY. We know EPOLLHUP is always present when there's nothing
+                                // connected at the other end of the PTY. That's why getting no event
+                                // means we can flush the output of the serial through the PTY.
+                                Self::trigger_pty_flush(&serial, pty_write_out.as_ref())?;
+                            }
                             continue;
                         }
 
@@ -410,10 +331,34 @@ impl SerialManager {
                                     warn!("Unknown serial manager loop event: {event}");
                                 }
                                 EpollDispatch::Socket => {
-                                    let ConsoleTransport::Socket(ref socket) = transport else {
-                                        unreachable!();
-                                    };
                                     if let Some(console) = socket_console.as_mut() {
+                                        if let ConsoleTransport::TcpListen(ref listener) = transport {
+                                            if console.accept_tcp(listener).map_err(Error::AcceptConnection)?
+                                                && let Some(fd) = console.client_fd()
+                                            {
+                                                epoll::ctl(
+                                                    epoll_fd.as_raw_fd(),
+                                                    epoll::ControlOptions::EPOLL_CTL_DEL,
+                                                    listener.as_raw_fd(),
+                                                    epoll::Event::new(
+                                                        epoll::Events::EPOLLIN,
+                                                        EpollDispatch::Socket as u64,
+                                                    ),
+                                                )
+                                                .map_err(Error::Epoll)?;
+                                                epoll::ctl(
+                                                    epoll_fd.as_raw_fd(),
+                                                    epoll::ControlOptions::EPOLL_CTL_ADD,
+                                                    fd,
+                                                    epoll::Event::new(
+                                                        epoll::Events::EPOLLIN,
+                                                        EpollDispatch::File as u64,
+                                                    ),
+                                                )
+                                                .map_err(Error::Epoll)?;
+                                            }
+                                            continue;
+                                        }
                                         if let Some(fd) = console.client_fd() {
                                             epoll::ctl(
                                                 epoll_fd.as_raw_fd(),
@@ -429,9 +374,12 @@ impl SerialManager {
                                                 .shutdown()
                                                 .map_err(Error::ShutdownConnection)?;
                                         }
-                                        console
-                                            .accept(socket.listener())
-                                            .map_err(Error::AcceptConnection)?;
+                                        match transport {
+                                            ConsoleTransport::Socket(ref socket) => console
+                                                .accept(socket.listener())
+                                                .map_err(Error::AcceptConnection)?,
+                                            _ => unreachable!(),
+                                        }
                                         if let Some(fd) = console.client_fd() {
                                             epoll::ctl(
                                                 epoll_fd.as_raw_fd(),
@@ -446,57 +394,18 @@ impl SerialManager {
                                         }
                                     }
                                 }
-                                EpollDispatch::Tcp => {
-                                    // New connection request arrived.
-                                    // Shutdown the previous connection, if any
-                                    if let Some(ref previous_reader) = reader_tcp {
-                                        previous_reader
-                                            .shutdown(Shutdown::Both)
-                                            .map_err(Error::AcceptConnection)?;
-                                        active_tcp_stream.lock().unwrap().take();
-                                        if let Some(distributor) = &write_distributor {
-                                            distributor.remove_writer(TypeId::of::<TcpStream>());
-                                        }
-                                    }
-
-                                    let ConsoleTransport::Tcp(ref listener, _) = transport else {
-                                        unreachable!();
-                                    };
-
-                                    // Events on the listening socket will be connection requests.
-                                    // Accept them, create a reader and a writer.
-                                    let (tcp_stream, _) =
-                                        listener.accept().map_err(Error::AcceptConnection)?;
-                                    let active_tcp_stream_handle =
-                                        tcp_stream.try_clone().map_err(Error::CloneStream)?;
-                                    let writer =
-                                        tcp_stream.try_clone().map_err(Error::CloneStream)?;
-
-                                    epoll::ctl(
-                                        epoll_fd.as_raw_fd(),
-                                        epoll::ControlOptions::EPOLL_CTL_ADD,
-                                        tcp_stream.as_raw_fd(),
-                                        epoll::Event::new(
-                                            epoll::Events::EPOLLIN,
-                                            EpollDispatch::File as u64,
-                                        ),
-                                    )
-                                    .map_err(Error::Epoll)?;
-
-                                    *active_tcp_stream.lock().unwrap() =
-                                        Some(active_tcp_stream_handle);
-                                    reader_tcp = Some(tcp_stream);
-                                    if let Some(distributor) = &write_distributor {
-                                        distributor.add_writer(writer);
-                                    }
-                                }
                                 EpollDispatch::File => {
-                                    if event.events & libc::EPOLLIN as u32 != 0 {
+                                    if event.events & libc::EPOLLIN as u32 != 0
+                                        || matches!(transport, ConsoleTransport::TcpListen(_))
+                                            && event.events & (libc::EPOLLHUP | libc::EPOLLERR) as u32 != 0
+                                    {
                                         let mut input = [0u8; 64];
                                         let count = match &transport {
-                                            ConsoleTransport::Socket(_) => {
+                                            ConsoleTransport::Socket(_)
+                                            | ConsoleTransport::TcpListen(_) => {
                                                 if let Some(console) = socket_console.as_mut() {
-                                                    match console.read(&mut input) {
+                                                    let was_connected = console.client_fd().is_some();
+                                                    let count = match console.read(&mut input) {
                                                         Ok(count) => count,
                                                         Err(e) => {
                                                             warn!(
@@ -504,41 +413,42 @@ impl SerialManager {
                                                             );
                                                             0
                                                         }
-                                                    }
-                                                } else {
-                                                    0
-                                                }
-                                            }
-                                            ConsoleTransport::Tcp(_, _) => {
-                                                if let Some(mut serial_reader) = reader_tcp.as_ref()
-                                                {
-                                                    let count = serial_reader
-                                                        .read(&mut input)
-                                                        .map_err(Error::ReadInput)?;
-                                                    if count == 0 {
-                                                        info!("Remote end closed serial socket");
-                                                        serial_reader
-                                                            .shutdown(Shutdown::Both)
-                                                            .map_err(Error::ShutdownConnection)?;
-                                                        reader_tcp = None;
-                                                        active_tcp_stream.lock().unwrap().take();
-                                                        if let Some(distributor) =
-                                                            &write_distributor
+                                                    };
+                                                    if was_connected
+                                                            && console.client_fd().is_none()
+                                                            && let ConsoleTransport::TcpListen(ref listener) = transport
                                                         {
-                                                            distributor.remove_writer(
-                                                                TypeId::of::<TcpStream>(),
-                                                            );
+                                                            epoll::ctl(
+                                                                epoll_fd.as_raw_fd(),
+                                                                epoll::ControlOptions::EPOLL_CTL_ADD,
+                                                                listener.as_raw_fd(),
+                                                                epoll::Event::new(
+                                                                    epoll::Events::EPOLLIN,
+                                                                    EpollDispatch::Socket as u64,
+                                                                ),
+                                                            )
+                                                            .map_err(Error::Epoll)?;
                                                         }
-                                                    }
                                                     count
                                                 } else {
                                                     0
                                                 }
                                             }
                                             ConsoleTransport::Pty(file)
-                                            | ConsoleTransport::Tty(file) => (&**file)
-                                                .read(&mut input)
-                                                .map_err(Error::ReadInput)?,
+                                            | ConsoleTransport::Tty(file) => {
+                                                match (&**file).read(&mut input) {
+                                                    Ok(count) => count,
+                                                    // Another reader of the same
+                                                    // tty took the input.
+                                                    Err(e)
+                                                        if e.kind()
+                                                            == io::ErrorKind::WouldBlock =>
+                                                    {
+                                                        continue;
+                                                    }
+                                                    Err(e) => return Err(Error::ReadInput(e)),
+                                                }
+                                            }
                                             _ => unreachable!(),
                                         };
 
@@ -553,6 +463,9 @@ impl SerialManager {
                                             .unwrap()
                                             .queue_input_bytes(&input[..count])
                                             .map_err(Error::QueueInput)?;
+                                    }
+                                    if matches!(transport, ConsoleTransport::TcpListen(_)) {
+                                        continue;
                                     }
                                     if event.events & libc::EPOLLHUP as u32 != 0 {
                                         if let Some(pty_write_out) = &pty_write_out {
@@ -591,10 +504,6 @@ impl SerialManager {
 
 impl Drop for SerialManager {
     fn drop(&mut self) {
-        if let Some(tcp_stream) = self.active_tcp_stream.lock().unwrap().take() {
-            tcp_stream.shutdown(Shutdown::Both).ok();
-        }
-
         self.kill_evt.write(1).ok();
         if let Some(handle) = self.handle.take() {
             handle.join().ok();

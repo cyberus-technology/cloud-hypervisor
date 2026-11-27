@@ -3,21 +3,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "fw_cfg")]
 use std::str::FromStr;
-use std::{fmt, fs, result};
+use std::{fmt, fs, io, result};
 
 use arch::CpuProfile;
 use block::ImageType;
 pub use block::fcntl::LockGranularityChoice;
 #[cfg(target_arch = "x86_64")]
 use devices::debug_console;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use net_util::MacAddr;
 use serde::de::{Error as DeError, Visitor};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use virtio_devices::RateLimiterConfig;
 
@@ -717,41 +717,103 @@ impl ApplyLandlock for PmemConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum ConsoleOutputMode {
+#[serde(deny_unknown_fields)]
+pub struct TcpConsoleConfig {
+    #[serde(deserialize_with = "deserialize_tcp_address")]
+    pub address: SocketAddr,
+    /// Client mode is not supported.
+    #[serde(default = "TcpConsoleConfig::default_server")]
+    pub server: bool,
+}
+
+pub(crate) fn parse_tcp_address(address: &str) -> io::Result<SocketAddr> {
+    address
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+fn deserialize_tcp_address<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SocketAddr, D::Error> {
+    let address = String::deserialize(deserializer)?;
+    parse_tcp_address(&address).map_err(DeError::custom)
+}
+
+impl TcpConsoleConfig {
+    fn default_server() -> bool {
+        true
+    }
+}
+
+/// Transparent upgrade from old fork format to upstream format (introduced in
+/// v55.0)
+// TODO remove this once all VMs in the field use this version.
+fn deserialize_console_output<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ConsoleOutput, D::Error> {
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    if value["mode"] == "Tcp"
+        && let Some(fields) = value.as_object_mut()
+        && let Some(address) = fields.remove("url")
+    {
+        // Old fork format: a plain "<ip>:<port>" string in `url`. These
+        // versions always listened as a server.
+        fields.insert(
+            "tcp".to_string(),
+            serde_json::json!({ "address": address, "server": true }),
+        );
+        // These versions could log to a file in addition to TCP. Upstream
+        // supports only one output per console.
+        if let Some(file) = fields.remove("file") {
+            info!("Dropping the additional TCP console log file {file}");
+        }
+    }
+    ConsoleOutput::deserialize(value).map_err(DeError::custom)
+}
+
+/// Output of a serial or virtio console.
+///
+/// Serialized as a `mode` tag next to the fields of the variant. The HTTP API,
+/// snapshots, and migration all rely on this flat JSON format.
+#[serde_with::skip_serializing_none]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "mode")]
+pub enum ConsoleOutput {
     Off,
-    Pty,
+    Pty {
+        /// Path of the PTY. Unknown until the device has been created.
+        #[serde(default)]
+        file: Option<PathBuf>,
+    },
     Tty,
-    File,
-    Socket,
-    Tcp,
+    File {
+        file: PathBuf,
+    },
+    Socket {
+        socket: PathBuf,
+    },
+    Tcp {
+        tcp: TcpConsoleConfig,
+    },
     Null,
 }
 
-/// Common configuration for plain console configs.
-///
-/// Independent of PCI or legacy devices.
-#[serde_with::skip_serializing_none]
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CommonConsoleConfig {
-    #[serde(default)]
-    pub file: Option<PathBuf>,
-    pub mode: ConsoleOutputMode,
-    #[serde(default)]
-    pub socket: Option<PathBuf>,
-    pub url: Option<String>,
-}
-
-impl ApplyLandlock for CommonConsoleConfig {
+impl ApplyLandlock for ConsoleOutput {
     fn apply_landlock(&self, landlock: &mut Landlock) -> LandlockResult<()> {
-        if self.mode == ConsoleOutputMode::Pty {
-            landlock.add_rule_with_access(Path::new("/dev/pts"), "rw")?;
-            landlock.add_rule_with_access(Path::new("/dev/ptmx"), "rw")?;
-        }
-        if let Some(file) = &self.file {
-            landlock.add_rule_with_access(file, "rw")?;
-        }
-        if let Some(socket) = &self.socket {
-            landlock.add_rule_with_access(socket, "rw")?;
+        match self {
+            ConsoleOutput::Pty { file } => {
+                landlock.add_rule_with_access(Path::new("/dev/pts"), "rw")?;
+                landlock.add_rule_with_access(Path::new("/dev/ptmx"), "rw")?;
+                if let Some(file) = file {
+                    landlock.add_rule_with_access(file, "rw")?;
+                }
+            }
+            ConsoleOutput::File { file } => landlock.add_rule_with_access(file, "rw")?,
+            ConsoleOutput::Socket { socket } => landlock.add_rule_with_access(socket, "rw")?,
+            ConsoleOutput::Off
+            | ConsoleOutput::Tty
+            | ConsoleOutput::Tcp { .. }
+            | ConsoleOutput::Null => {}
         }
         Ok(())
     }
@@ -760,56 +822,45 @@ impl ApplyLandlock for CommonConsoleConfig {
 /// Configuration for a legacy serial console device.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SerialConfig {
-    #[serde(flatten)]
-    pub common: CommonConsoleConfig,
+    #[serde(flatten, deserialize_with = "deserialize_console_output")]
+    pub output: ConsoleOutput,
 }
 
 impl SerialConfig {
-    pub const SYNTAX: &str =
-        "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>|tcp=<host:port>\"";
+    pub const SYNTAX: &str = "Control serial port: \"off|null|pty|tty|file=<path>|socket=<path>|tcp=<loopback_ip>:<port>,server=on\"";
 }
 
 impl Default for SerialConfig {
     fn default() -> Self {
         Self {
-            common: CommonConsoleConfig {
-                file: None,
-                mode: ConsoleOutputMode::Null,
-                socket: None,
-                url: None,
-            },
+            output: ConsoleOutput::Null,
         }
     }
 }
 
 impl ApplyLandlock for SerialConfig {
     fn apply_landlock(&self, landlock: &mut Landlock) -> LandlockResult<()> {
-        self.common.apply_landlock(landlock)
+        self.output.apply_landlock(landlock)
     }
 }
 
 /// Configuration for a virtio-console device.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ConsoleConfig {
-    #[serde(flatten)]
-    pub common: CommonConsoleConfig,
+    #[serde(flatten, deserialize_with = "deserialize_console_output")]
+    pub output: ConsoleOutput,
     #[serde(default, flatten)]
     pub pci_common: PciDeviceCommonConfig,
 }
 
 impl ConsoleConfig {
-    pub const SYNTAX: &str = "Control (virtio) console: \"off|null|pty|tty|file=<path>|socket=<path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>,pci_device_id=<pci_slot>\"";
+    pub const SYNTAX: &str = "Control (virtio) console: \"off|null|pty|tty|file=<path>|socket=<path>|tcp=<loopback_ip>:<port>,server=on,iommu=on|off,id=<device_id>,pci_segment=<segment_id>,pci_device_id=<pci_slot>\"";
 }
 
 impl Default for ConsoleConfig {
     fn default() -> Self {
         Self {
-            common: CommonConsoleConfig {
-                file: None,
-                mode: ConsoleOutputMode::Tty,
-                socket: None,
-                url: None,
-            },
+            output: ConsoleOutput::Tty,
             pci_common: PciDeviceCommonConfig::default(),
         }
     }
@@ -817,7 +868,7 @@ impl Default for ConsoleConfig {
 
 impl ApplyLandlock for ConsoleConfig {
     fn apply_landlock(&self, landlock: &mut Landlock) -> LandlockResult<()> {
-        self.common.apply_landlock(landlock)
+        self.output.apply_landlock(landlock)
     }
 }
 
@@ -825,9 +876,8 @@ impl ApplyLandlock for ConsoleConfig {
 #[serde_with::skip_serializing_none]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DebugConsoleConfig {
-    #[serde(default)]
-    pub file: Option<PathBuf>,
-    pub mode: ConsoleOutputMode,
+    #[serde(flatten)]
+    pub output: ConsoleOutput,
     /// Optionally dedicated I/O-port, if the default port should not be used.
     pub iobase: Option<u16>,
 }
@@ -836,8 +886,7 @@ pub struct DebugConsoleConfig {
 impl Default for DebugConsoleConfig {
     fn default() -> Self {
         Self {
-            file: None,
-            mode: ConsoleOutputMode::Off,
+            output: ConsoleOutput::Off,
             iobase: Some(debug_console::DEFAULT_PORT as u16),
         }
     }
@@ -845,14 +894,7 @@ impl Default for DebugConsoleConfig {
 #[cfg(target_arch = "x86_64")]
 impl ApplyLandlock for DebugConsoleConfig {
     fn apply_landlock(&self, landlock: &mut Landlock) -> LandlockResult<()> {
-        if self.mode == ConsoleOutputMode::Pty {
-            landlock.add_rule_with_access(Path::new("/dev/pts"), "rw")?;
-            landlock.add_rule_with_access(Path::new("/dev/ptmx"), "rw")?;
-        }
-        if let Some(file) = &self.file {
-            landlock.add_rule_with_access(file, "rw")?;
-        }
-        Ok(())
+        self.output.apply_landlock(landlock)
     }
 }
 
